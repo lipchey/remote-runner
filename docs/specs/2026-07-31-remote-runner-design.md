@@ -1,6 +1,7 @@
 # Remote Runner Design
 
-> **Status:** design approved; implementation has not started.
+> **Status:** design approved; implementation planned in
+> `docs/superpowers/plans/2026-07-31-remote-runner-implementation.md`.
 >
 > **Initial consumer:** Ariadne full verification.
 
