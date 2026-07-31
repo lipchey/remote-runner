@@ -1,6 +1,6 @@
 # Remote Runner Design
 
-> **Status:** design approved; implementation planned in
+> **Status:** implemented and live-accepted on 2026-07-31; lifecycle is recorded in
 > `docs/superpowers/plans/2026-07-31-remote-runner-implementation.md`.
 >
 > **Initial consumer:** Ariadne full verification.
@@ -28,9 +28,9 @@ runbook, generic tests, live acceptance, and benchmark collection.
 A consuming repository owns only:
 
 - a versioned `.remote-runner.yaml` manifest without secret values;
-- a small invocation seam from its existing command;
+- a minimal invocation seam from its existing command and, optionally, its worktree hook;
 - workload-specific fingerprint inputs, allowed ephemeral environment names, and exclusions;
-- adapter tests proving that existing command semantics are preserved.
+- consumer-level evidence proving that existing command semantics are preserved.
 
 Generic implementation is never copied into a consumer. Consumer documentation describes only its
 adapter contract and points here for system behavior.
@@ -39,8 +39,10 @@ adapter contract and points here for system behavior.
 
 After one installation by the implementation workflow, a macOS LaunchAgent starts the per-user
 controller at login. The controller keeps background synchronization state healthy. Every
-`remote-runner run <profile> -- <command...>` invocation also validates and repairs all required
-state, so correctness never depends solely on that background process.
+`remote-runner run <profile>` invocation also validates and repairs all required state, so
+correctness never depends solely on that background process. The command defaults to the workload
+declared in the manifest; `-- <command...>` is an explicit override. `REMOTE_RUNNER_MODE` is parsed
+inside this package, never by a consumer adapter.
 
 Output stays attached to the invoking terminal and the selected process exit status is returned
 unchanged. Healthy operation never asks the owner to start, stop, resume, flush, install, clean, or
@@ -161,6 +163,10 @@ closes input, and starts the workload. Missing, malformed, oversized, duplicate,
 fields fail before the child-start boundary. The initial Ariadne profile allows only its
 development database credential.
 
+For the common development case, the manifest may name a confined ignored dotenv file. The runner
+parses it locally and retains only allowlisted keys. A bounded argv provider remains an alternative;
+exactly one source is required.
+
 ### 6.7 Notifications and durable state
 
 The first notifier uses Telegram `sendMessage` with `~/.claude/.telegram-ask.conf`. The config
@@ -202,6 +208,10 @@ reboot persistence, and Mutagen deploys its matching agent over SSH.
 
 Preparation may retry bounded idempotent operations. A workload is never retried after its
 child-start boundary.
+
+`prewarm <profile>` uses this same lifecycle in forced-remote mode and converts any failure into a
+visible successful hook result. This prepares synchronization and machine-local dependencies at
+worktree creation without making worktree creation depend on workstation availability.
 
 ## 8. Diagnostic runbook
 

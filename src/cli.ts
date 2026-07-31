@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import process from "node:process";
 
 import { loadManifestText } from "./config/load-manifest.js";
 import type { Profile, RunMode } from "./config/types.js";
@@ -10,6 +11,7 @@ export interface CliIo {
 
 export interface CliDependencies {
   readFile(path: string): Promise<string | Uint8Array>;
+  readonly environment?: Readonly<Record<string, string | undefined>>;
   ensureController?(): Promise<void>;
   runProfile?(profile: Profile, command: readonly string[], mode?: RunMode): Promise<number>;
   statusProfile?(profile?: string): Promise<string>;
@@ -25,7 +27,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
 
 const HELP = [
   "remote-runner install",
-  "remote-runner run <profile> -- <command...>",
+  "remote-runner run <profile> [options] [-- <command...>]",
+  "remote-runner prewarm <profile> [--manifest <path>]",
   "remote-runner validate [profile] [--manifest <path>]",
   "remote-runner status [profile]",
   "remote-runner doctor [profile]",
@@ -50,6 +53,16 @@ export async function runCli(
 
   if (argv[0] === "run") {
     return runSelectedProfile(argv.slice(1), io, dependencies);
+  }
+
+  if (argv[0] === "prewarm") {
+    const code = await runSelectedProfile(argv.slice(1), io, dependencies, "remote");
+    if (code !== 0) {
+      io.stderr(
+        `remote-runner prewarm failed (exit ${code}); worktree preserved and the first manual verify will retry`,
+      );
+    }
+    return 0;
   }
 
   if (argv[0] === "status" || argv[0] === "doctor" || argv[0] === "logs") {
@@ -176,17 +189,24 @@ async function runSelectedProfile(
   argv: readonly string[],
   io: CliIo,
   dependencies: CliDependencies,
+  forcedMode?: RunMode,
 ): Promise<number> {
   const profileId = argv[0];
   const separator = argv.indexOf("--");
-  if (profileId === undefined || profileId.startsWith("-") || separator < 1 || separator === argv.length - 1) {
+  if (
+    profileId === undefined ||
+    profileId.startsWith("-") ||
+    separator === 0 ||
+    separator === argv.length - 1
+  ) {
     io.stderr("run requires <profile> [options] -- <command...>");
     return 2;
   }
   let manifestPath = ".remote-runner.yaml";
   let mode: RunMode | undefined;
   const seen = new Set<string>();
-  for (let index = 1; index < separator; index += 1) {
+  const optionEnd = separator === -1 ? argv.length : separator;
+  for (let index = 1; index < optionEnd; index += 1) {
     const argument = argv[index];
     if (argument !== "--manifest" && argument !== "--mode") {
       io.stderr(`unknown run argument: ${argument ?? ""}`);
@@ -198,7 +218,7 @@ async function runSelectedProfile(
     }
     seen.add(argument);
     const value = argv[index + 1];
-    if (value === undefined || index + 1 >= separator) {
+    if (value === undefined || index + 1 >= optionEnd) {
       io.stderr(`run requires a value after ${argument}`);
       return 2;
     }
@@ -210,8 +230,29 @@ async function runSelectedProfile(
     }
     index += 1;
   }
-  const command = argv.slice(separator + 1);
-  if (command[0]?.length === 0 || command.some((part) => part.includes("\0"))) {
+  if (forcedMode !== undefined && mode !== undefined) {
+    io.stderr("prewarm does not accept --mode");
+    return 2;
+  }
+  if (mode === undefined && forcedMode === undefined) {
+    const environmentMode = (dependencies.environment ?? process.env).REMOTE_RUNNER_MODE;
+    if (environmentMode !== undefined && environmentMode !== "") {
+      if (
+        environmentMode !== "auto" &&
+        environmentMode !== "local" &&
+        environmentMode !== "remote"
+      ) {
+        io.stderr(`invalid REMOTE_RUNNER_MODE: ${environmentMode}`);
+        return 2;
+      }
+      mode = environmentMode;
+    }
+  }
+  const commandOverride = separator === -1 ? undefined : argv.slice(separator + 1);
+  if (
+    commandOverride !== undefined &&
+    (commandOverride[0]?.length === 0 || commandOverride.some((part) => part.includes("\0")))
+  ) {
     io.stderr("run command must be a safe argument array");
     return 2;
   }
@@ -226,15 +267,22 @@ async function runSelectedProfile(
     io.stderr(`profile not found: ${profileId}`);
     return 2;
   }
+  const command = commandOverride ?? profile.workload.command;
   if (dependencies.runProfile === undefined || dependencies.ensureController === undefined) {
     io.stderr("remote-runner execution runtime is not configured");
     return 70;
   }
-  try { await dependencies.ensureController(); } catch {
-    io.stderr("remote-runner controller repair failed");
-    return 70;
+  const effectiveMode = forcedMode ?? mode ?? profile.mode;
+  if (effectiveMode !== "local") {
+    try { await dependencies.ensureController(); } catch {
+      if (effectiveMode !== "auto" || profile.fallback !== "local") {
+        io.stderr("remote-runner controller repair failed");
+        return 70;
+      }
+      io.stderr("remote-runner controller unavailable; continuing automatic fallback policy");
+    }
   }
-  try { return await dependencies.runProfile(profile, command, mode); } catch {
+  try { return await dependencies.runProfile(profile, command, effectiveMode); } catch {
     io.stderr("remote-runner execution failed");
     return 70;
   }

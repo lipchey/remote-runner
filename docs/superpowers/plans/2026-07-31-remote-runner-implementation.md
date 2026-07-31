@@ -2,7 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> **Status:** ready for execution.
+> **Status:** implemented and live-accepted on 2026-07-31.
+>
+> **Final ownership amendment:** the package also owns manifest-workload dispatch,
+> `REMOTE_RUNNER_MODE`, fail-soft `prewarm`, and allowlisted dotenv parsing. The Ariadne pilot's
+> interim provider/adapter modules were removed; consumers retain only a manifest and minimal calls
+> from existing entry points.
 >
 > **Design owner:** `docs/specs/2026-07-31-remote-runner-design.md`.
 

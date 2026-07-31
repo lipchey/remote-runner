@@ -23,6 +23,12 @@ The installer writes an immutable self-contained application below
 `~/Library/LaunchAgents/com.lipchey.remote-runner.plist`. It uses the current absolute Node runtime,
 requires no sudo, and starts or repairs the LaunchAgent.
 
+Normal project integration needs only `remote-runner run <profile>` from the repository root. The
+runner loads the profile workload and `REMOTE_RUNNER_MODE=auto|local|remote` itself. A worktree hook
+may call `remote-runner prewarm <profile>`; failure is printed but intentionally returns success,
+and the first normal run retries preparation. Do not add project-local adapters for mode selection,
+dotenv parsing, fallback, notification, or prewarm policy.
+
 ## Stable reason-code index
 
 | Reason | Read-only diagnosis |

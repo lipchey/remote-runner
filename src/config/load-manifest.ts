@@ -217,7 +217,12 @@ function parseProfile(value: unknown): Profile {
     ["command", "childEnvironment"],
     "workload",
   );
-  const secrets = closed(source.secrets, ["allow", "provider"], "secrets");
+  const secrets = closed(source.secrets, ["allow", "provider", "dotenv"], "secrets");
+  const hasProvider = secrets.provider !== undefined;
+  const hasDotenv = secrets.dotenv !== undefined;
+  if (hasProvider === hasDotenv) {
+    throw new Error("secrets must declare exactly one of provider or dotenv");
+  }
   const notifications = closed(
     source.notifications,
     ["policy"],
@@ -294,7 +299,13 @@ function parseProfile(value: unknown): Profile {
     },
     secrets: {
       allow: secretNames(secrets.allow),
-      provider: commandArray(secrets.provider, "secrets provider"),
+      ...(hasProvider
+        ? { provider: commandArray(secrets.provider, "secrets provider") }
+        : {
+            dotenv: assertSafeRepositoryPath(
+              nonEmptyString(secrets.dotenv, "secrets dotenv"),
+            ),
+          }),
     },
     notifications: {
       policy: literal(

@@ -348,6 +348,7 @@ export async function createNodeCliDependencies(
 
   const dependencies: NodeCliDependencies = {
     identity,
+    environment: process.env,
     loadManifest,
     readFile: async (path) => readFile(path),
     ensureController: () => ensureNodeController(home),

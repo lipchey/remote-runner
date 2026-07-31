@@ -25,6 +25,29 @@ describe("loadManifestText", () => {
     expect(manifest.profiles[0]?.workspace.baseRef).toBe("origin/main");
   });
 
+  it("accepts a built-in repository dotenv secret source instead of an external provider", () => {
+    const manifest = loadManifestText(validManifest.replace(
+      'provider: ["node", "scripts/remote-runner-env.mjs"]',
+      "dotenv: .env",
+    ));
+
+    expect(manifest.profiles[0]?.secrets).toEqual({
+      allow: ["NEON_DEV_DATABASE_URL"],
+      dotenv: ".env",
+    });
+  });
+
+  it("requires exactly one secret source", () => {
+    expect(() => loadManifestText(validManifest.replace(
+      'provider: ["node", "scripts/remote-runner-env.mjs"]',
+      'provider: ["node", "scripts/remote-runner-env.mjs"], dotenv: .env',
+    ))).toThrow(/exactly one/u);
+    expect(() => loadManifestText(validManifest.replace(
+      ', provider: ["node", "scripts/remote-runner-env.mjs"]',
+      "",
+    ))).toThrow(/exactly one/u);
+  });
+
   it.each([
     ["manifest", "schemaVersion: 1", "schemaVersion: 1\nextra: true"],
     ["profile", "mode: auto", "mode: auto\n    extra: true"],
@@ -142,6 +165,7 @@ describe("loadManifestText", () => {
     ["package manager", "packageManager: package.json", "packageManager: ../package.json"],
     ["setup", 'setup: ["./scripts/ds-bootstrap.sh"]', 'setup: ["/tmp/setup.sh"]'],
     ["fingerprint", "fingerprint: [package.json, pnpm-lock.yaml]", "fingerprint: [package.json, ../../secret]"],
+    ["dotenv", 'provider: ["node", "scripts/remote-runner-env.mjs"]', "dotenv: ../.env"],
   ])("rejects unsafe %s paths", (_case, before, after) => {
     expect(() => loadManifestText(validManifest.replace(before, after))).toThrow(
       /unsafe repository path/,

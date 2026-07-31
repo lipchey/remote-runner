@@ -16,7 +16,7 @@ import { worktreeIdentity } from "../runtime/identity.js";
 import { PreparationError } from "../run/prepare.js";
 import type { RemoteExecutionResult } from "../run/run-profile.js";
 import { encodeSecretFrame } from "../secrets/frame.js";
-import { runSecretProvider } from "../secrets/provider.js";
+import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
 import { classifySshFailure } from "../ssh/probe.js";
 import {
   runSsh,
@@ -400,6 +400,16 @@ export class NodeProfileServices implements ProfileExecutionServices {
   }
 
   async collectSecrets(): Promise<Readonly<Record<string, string>>> {
+    if (this.profile.secrets.dotenv !== undefined) {
+      const contents = await readFile(
+        join(this.options.sourceRoot, this.profile.secrets.dotenv),
+        "utf8",
+      );
+      return readDotenvSecrets(contents, this.profile.secrets.allow);
+    }
+    if (this.profile.secrets.provider === undefined) {
+      throw new Error("validated profile has no secret source");
+    }
     return runSecretProvider({
       run: (request: BoundedProcessRequest) => this.processes.run({
         ...request,

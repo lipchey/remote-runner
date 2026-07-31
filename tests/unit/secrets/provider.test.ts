@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { runSecretProvider, type SecretProviderRuntime } from "../../../src/secrets/provider.js";
+import {
+  readDotenvSecrets,
+  runSecretProvider,
+  type SecretProviderRuntime,
+} from "../../../src/secrets/provider.js";
 
 const bytes = (value: string): Uint8Array => new TextEncoder().encode(value);
 
@@ -19,6 +23,24 @@ class FakeRuntime implements SecretProviderRuntime {
 }
 
 describe("secret provider", () => {
+  it("reads only allowlisted dotenv values and requires every allowed name", () => {
+    const contents = [
+      "NEON_DEV_DATABASE_URL=development-value",
+      "NEON_DATABASE_URL=production-must-not-leave",
+      "CLOUDFLARE_API_TOKEN=must-not-leave",
+    ].join("\n");
+
+    expect(readDotenvSecrets(contents, ["NEON_DEV_DATABASE_URL"])).toEqual({
+      NEON_DEV_DATABASE_URL: "development-value",
+    });
+    expect(() => readDotenvSecrets(contents, ["MISSING_SECRET"])).toThrow("MISSING_SECRET");
+  });
+
+  it("rejects invalid dotenv values without returning captured text", () => {
+    expect(() => readDotenvSecrets("SECRET=bad\0value", ["SECRET"])).toThrow();
+    expect(() => readDotenvSecrets(`SECRET=${"x".repeat(64 * 1024 + 1)}`, ["SECRET"])).toThrow();
+  });
+
   it("captures one bounded JSON object and accepts only allowlisted string values", async () => {
     const runtime = new FakeRuntime({ stdout: '{"NEON_DEV_DATABASE_URL":"canary"}' });
     await expect(runSecretProvider(runtime, ["node", "scripts/env.mjs"], ["NEON_DEV_DATABASE_URL"]))

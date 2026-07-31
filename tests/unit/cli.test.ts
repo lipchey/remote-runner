@@ -12,7 +12,8 @@ describe("runCli", () => {
     });
 
     expect(code).toBe(0);
-    expect(stdout.join("\n")).toContain("run <profile> -- <command...>");
+    expect(stdout.join("\n")).toContain("run <profile> [options] [-- <command...>]");
+    expect(stdout.join("\n")).toContain("prewarm <profile>");
     expect(stdout.join("\n")).toContain("validate [profile] [--manifest <path>]");
     expect(stdout.join("\n")).toContain("status [profile]");
     expect(stdout.join("\n")).toContain("doctor [profile]");
@@ -120,30 +121,98 @@ describe("runCli", () => {
     expect(code).toBe(29);
     expect(calls).toEqual([
       ["read", "profile.yaml"],
-      ["controller"],
       ["run", "verify-full", ["./scripts/verify", "--full"], "local"],
     ]);
   });
 
-  it("repairs the controller before every selected run and fails closed when repair fails", async () => {
+  it("uses the manifest workload and environment mode when command and mode argv are omitted", async () => {
+    const calls: unknown[] = [];
+    const code = await runCli(
+      ["run", "verify-full"],
+      { stdout: () => undefined, stderr: () => undefined },
+      {
+        readFile: async () => validManifest,
+        environment: { REMOTE_RUNNER_MODE: "remote" },
+        ensureController: async () => undefined,
+        runProfile: async (profile, command, mode) => {
+          calls.push([profile.id, command, mode]);
+          return 0;
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([["verify-full", ["./scripts/verify", "--full"], "remote"]]);
+  });
+
+  it("prewarms remotely and converts every preparation or workload failure to a visible success", async () => {
+    const calls: unknown[] = [];
+    const errors: string[] = [];
+    const code = await runCli(
+      ["prewarm", "verify-full"],
+      { stdout: () => undefined, stderr: (line) => errors.push(line) },
+      {
+        readFile: async () => validManifest,
+        environment: { REMOTE_RUNNER_MODE: "local" },
+        ensureController: async () => undefined,
+        runProfile: async (profile, command, mode) => {
+          calls.push([profile.id, command, mode]);
+          return 23;
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([["verify-full", ["./scripts/verify", "--full"], "remote"]]);
+    expect(errors).toEqual([
+      "remote-runner prewarm failed (exit 23); worktree preserved and the first manual verify will retry",
+    ]);
+  });
+
+  it("continues through the automatic fallback policy when controller repair fails", async () => {
     const calls: string[] = [];
     const code = await runCli(
-      ["run", "verify-full", "--", "./verify"],
+      ["run", "verify-full"],
       { stdout: () => undefined, stderr: (line) => calls.push(`error:${line}`) },
       {
         readFile: async () => validManifest,
         ensureController: async () => { calls.push("controller"); throw new Error("stopped"); },
-        runProfile: async () => { calls.push("run"); return 0; },
+        runProfile: async (_profile, _command, mode) => { calls.push(`run:${mode}`); return 0; },
       },
     );
-    expect(code).toBe(70);
-    expect(calls).toEqual(["controller", "error:remote-runner controller repair failed"]);
+    expect(code).toBe(0);
+    expect(calls).toEqual([
+      "controller",
+      "error:remote-runner controller unavailable; continuing automatic fallback policy",
+      "run:auto",
+    ]);
+  });
+
+  it("does not require the controller locally and fails closed when remote is forced", async () => {
+    const calls: string[] = [];
+    const io = { stdout: () => undefined, stderr: (line: string) => calls.push(`error:${line}`) };
+    const dependencies = {
+      readFile: async () => validManifest,
+      ensureController: async () => { calls.push("controller"); throw new Error("stopped"); },
+      runProfile: async (_profile: unknown, _command: readonly string[], mode?: string) => {
+        calls.push(`run:${mode}`);
+        return 0;
+      },
+    };
+
+    expect(await runCli(["run", "verify-full", "--mode", "local"], io, dependencies)).toBe(0);
+    expect(await runCli(["run", "verify-full", "--mode", "remote"], io, dependencies)).toBe(70);
+    expect(calls).toEqual([
+      "run:local",
+      "controller",
+      "error:remote-runner controller repair failed",
+    ]);
   });
 
   it("rejects malformed run syntax before reading the manifest", async () => {
     const errors: string[] = [];
     const dependencies = { readFile: async () => { throw new Error("must not read"); } };
-    expect(await runCli(["run", "verify-full"], { stdout: () => undefined, stderr: (line) => errors.push(line) }, dependencies)).toBe(2);
+    expect(await runCli(["run"], { stdout: () => undefined, stderr: (line) => errors.push(line) }, dependencies)).toBe(2);
     expect(await runCli(["run", "verify-full", "--mode", "invalid", "--", "x"], { stdout: () => undefined, stderr: (line) => errors.push(line) }, dependencies)).toBe(2);
     expect(errors).toHaveLength(2);
   });

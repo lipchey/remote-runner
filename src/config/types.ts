@@ -36,7 +36,8 @@ export interface Profile {
   };
   secrets: {
     allow: string[];
-    provider: string[];
+    provider?: string[];
+    dotenv?: string;
   };
   notifications: {
     policy: "outage-recovery";
