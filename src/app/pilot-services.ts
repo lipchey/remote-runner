@@ -308,6 +308,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
       sourceRoot: this.options.sourceRoot,
       remoteTarget: this.profile.remote.target,
       generatedRoot: paths.generatedRoot,
+      ...(this.profile.workspace.baseRef === undefined ? {} : { baseRef: this.profile.workspace.baseRef }),
       knownHostsPath: this.knownHostsPath,
       connectTimeoutSeconds: this.profile.probes.connectTimeoutSeconds,
     }, this.processes);

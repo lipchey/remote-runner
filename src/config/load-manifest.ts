@@ -6,6 +6,7 @@ import type { ManifestV1, Profile } from "./types.js";
 const PROFILE_ID = /^[a-z][a-z0-9-]*$/;
 const UPPERCASE_NAME = /^[A-Z][A-Z0-9_]*$/;
 const GENERATED_ROOT = "~/.cache/remote-runner/workspaces";
+const BASE_REF = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)+$/u;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -183,11 +184,17 @@ function parseProfile(value: unknown): Profile {
 
   const workspace = closed(
     source.workspace,
-    ["generatedRoot"],
+    ["generatedRoot", "baseRef"],
     "workspace",
   );
   if (workspace.generatedRoot !== GENERATED_ROOT) {
     throw new Error(`generated root must be ${GENERATED_ROOT}`);
+  }
+  const baseRef = workspace.baseRef === undefined
+    ? undefined
+    : nonEmptyString(workspace.baseRef, "workspace base ref");
+  if (baseRef !== undefined && !BASE_REF.test(baseRef)) {
+    throw new Error("workspace base ref must be a safe remote-tracking name");
   }
 
   const probes = closed(
@@ -251,7 +258,10 @@ function parseProfile(value: unknown): Profile {
       target: nonEmptyString(remote.target, "remote target"),
       hostKeySha256,
     },
-    workspace: { generatedRoot: GENERATED_ROOT },
+    workspace: {
+      generatedRoot: GENERATED_ROOT,
+      ...(baseRef === undefined ? {} : { baseRef }),
+    },
     probes: {
       attempts: 2,
       connectTimeoutSeconds: boundedInteger(

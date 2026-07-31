@@ -161,8 +161,16 @@ export interface GitWorkspaceOptions {
   readonly sourceRoot: string;
   readonly remoteTarget: string;
   readonly generatedRoot: string;
+  readonly baseRef?: string;
   readonly knownHostsPath: string;
   readonly connectTimeoutSeconds: number;
+}
+
+function remoteTrackingRef(baseRef: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)+$/u.test(baseRef)) {
+    throw new Error("workspace base ref must be a safe remote-tracking name");
+  }
+  return `refs/remotes/${baseRef}`;
 }
 
 export interface WorkspaceResult {
@@ -316,6 +324,21 @@ export async function reconcileWorkspace(
   if (!OBJECT_ID.test(headOid) || headOid.length !== expectedOidLength) {
     throw new Error(`local HEAD object ID must match ${objectFormat}`);
   }
+  const baseRef = options.baseRef === undefined ? undefined : remoteTrackingRef(options.baseRef);
+  let baseOid: string | undefined;
+  if (baseRef !== undefined) {
+    const baseResult = await processes.run({
+      command: "git",
+      args: ["rev-parse", "--verify", `${baseRef}^{commit}`, "--"],
+      cwd: options.sourceRoot,
+      maxOutputBytes: CAPTURE_BYTES,
+    });
+    assertBoundedSuccess(baseResult, "resolve local base ref");
+    baseOid = singleRecord(baseResult.stdout, "resolve local base ref");
+    if (!OBJECT_ID.test(baseOid) || baseOid.length !== expectedOidLength) {
+      throw new Error(`local base ref object ID must match ${objectFormat}`);
+    }
+  }
 
   const prepared = canonicalRecords(await remote(
     processes,
@@ -361,6 +384,7 @@ export async function reconcileWorkspace(
       "--",
       `${options.remoteTarget}:${prepared.mirror}`,
       `${headOid}:${privateRef}`,
+      ...(baseRef === undefined || baseOid === undefined ? [] : [`${baseOid}:${baseRef}`]),
     ],
     cwd: options.sourceRoot,
     environment: { GIT_SSH_COMMAND: encodePosixCommand(["ssh", ...transport]) },

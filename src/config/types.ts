@@ -12,6 +12,7 @@ export interface Profile {
   };
   workspace: {
     generatedRoot: "~/.cache/remote-runner/workspaces";
+    baseRef?: string;
   };
   probes: {
     attempts: 2;

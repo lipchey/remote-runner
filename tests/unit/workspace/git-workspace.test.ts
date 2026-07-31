@@ -18,6 +18,7 @@ import type { BoundedProcessRequest, BoundedProcessResult } from "../../../src/s
 const temporaryRoots: string[] = [];
 const bytes = (value: string): Uint8Array => new TextEncoder().encode(value);
 const HEAD_OID = "0123456789abcdef0123456789abcdef01234567";
+const BASE_OID = "abcdef0123456789abcdef0123456789abcdef01";
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -47,7 +48,9 @@ class FakeProcesses {
       if (request.args.includes("--show-object-format")) {
         return result(0, `${this.localObjectFormat}\n`);
       }
-      if (request.args[0] === "rev-parse") return result(0, `${this.localOid}\n`);
+      if (request.args[0] === "rev-parse") {
+        return result(0, `${request.args.includes("refs/remotes/origin/main^{commit}") ? BASE_OID : this.localOid}\n`);
+      }
       if (request.args[0] === "push") return result(0, this.pushStdout);
       return result();
     }
@@ -280,6 +283,15 @@ describe("confined Git workspace reconciliation", () => {
     expect(localGit[2]?.args.at(-1)).toBe(`${HEAD_OID}:${outcome.privateRef}`);
     expect(remote.find((command) => command.includes("reset --hard"))).toContain(HEAD_OID);
     expect(remote.find((command) => command.includes("reset --hard"))).not.toContain(outcome.privateRef);
+  });
+
+  it("propagates a declared remote-tracking base ref for history-sensitive gates", async () => {
+    const { options, processes } = await fixture();
+
+    await reconcileWorkspace({ ...options, baseRef: "origin/main" }, processes);
+    const push = processes.requests.find((request) => request.command === "git" && request.args[0] === "push");
+
+    expect(push?.args).toContain(`${BASE_OID}:refs/remotes/origin/main`);
   });
 
   it("runs reuse cleanup and recursive submodule cleanup inside one locked transaction", async () => {

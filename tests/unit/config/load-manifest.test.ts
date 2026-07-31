@@ -16,6 +16,15 @@ describe("loadManifestText", () => {
     ]);
   });
 
+  it("accepts an optional remote-tracking base ref for history-sensitive gates", () => {
+    const manifest = loadManifestText(validManifest.replace(
+      'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces" }',
+      'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces", baseRef: origin/main }',
+    ));
+
+    expect(manifest.profiles[0]?.workspace.baseRef).toBe("origin/main");
+  });
+
   it.each([
     ["manifest", "schemaVersion: 1", "schemaVersion: 1\nextra: true"],
     ["profile", "mode: auto", "mode: auto\n    extra: true"],
@@ -61,6 +70,7 @@ describe("loadManifestText", () => {
     ["fallback", "fallback: local", "fallback: remote", /profile fallback/],
     ["trusted fingerprint", 'hostKeySha256: "SHA256:trusted"', 'hostKeySha256: "MD5:bad"', /SHA256/],
     ["generated root", "~/.cache/remote-runner/workspaces", "/tmp", /generated root/],
+    ["workspace base ref", 'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces" }', 'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces", baseRef: ../main }', /base ref/],
     ["probe attempts", "attempts: 2", "attempts: 3", /attempts.*2/],
     ["probe timeout lower bound", "connectTimeoutSeconds: 4", "connectTimeoutSeconds: 0", /connectTimeoutSeconds/],
     ["probe timeout upper bound", "connectTimeoutSeconds: 4", "connectTimeoutSeconds: 301", /connectTimeoutSeconds/],
