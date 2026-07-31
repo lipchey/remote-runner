@@ -33,9 +33,9 @@ requires no sudo, and starts or repairs the LaunchAgent.
 | `transport` | `ssh -o ConnectTimeout=5 <remote> true` |
 | `remote-shell` | `ssh <remote> printf remote-shell-ok` |
 | `capacity` | `ssh <remote> df -Pk <workspace>` |
-| `bootstrap` | `ssh <remote> command -v node && command -v pnpm` |
+| `bootstrap` | `ssh <remote> test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm` |
 | `validation` | `remote-runner validate <profile>` |
-| `lock` | `ls -ld <identity-lock>` |
+| `lock` | `ls -ld <lock-root>` |
 | `sync` | `mutagen sync list <session>` |
 | `workspace` | `ssh <remote> git -C <workspace> status --short --branch` |
 | `secrets` | `ssh <remote> find <workspace> -maxdepth 1 -name .env -print` |
@@ -79,9 +79,18 @@ an outage, so clean unrelated workstation data separately; do not weaken the cap
 
 ## Bootstrap
 
-For `bootstrap`, the index command only reports current availability. A normal remote run installs the
-pinned native Node, exact pnpm, uv, gitleaks, and project dependencies under owned runner paths. Never
-sync `node_modules`, `.pnpm-store`, `.nx`, build output, or coverage from the laptop.
+For `bootstrap`, `remote-runner doctor <profile>` checks executable Node and pnpm under the
+runner-owned remote toolchain root rather than the login shell `PATH`. A normal remote run installs
+the pinned native Node, exact pnpm, uv, gitleaks, and project dependencies under owned runner paths.
+Never sync `node_modules`, `.pnpm-store`, `.nx`, build output, or coverage from the laptop.
+
+## Benchmark
+
+`remote-runner benchmark <profile>` executes the manifest-declared workload matrix locally and
+remotely and writes confined JSON and Markdown receipts below the source root. The generic runner
+does not delete undeclared user caches: a workload that needs reproducible cold-cache eviction must
+declare and own that preparation itself. Review the full matrix before starting because full-tier
+profiles can intentionally take a long time.
 
 ## Telegram
 
