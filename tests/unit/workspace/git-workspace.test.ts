@@ -180,6 +180,11 @@ describe("confined Git workspace reconciliation", () => {
     expect(processes.requests[3]?.environment?.GIT_SSH_COMMAND).toBe(
       ["ssh", ...sshArguments("admin@pop-os", ["true"], 4, "/runner/known_hosts").slice(0, -2)].join(" "),
     );
+    expect(processes.requests[3]?.environment).toMatchObject({
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: "/dev/null",
+    });
   });
 
   it("accepts bounded push protocol output above the ordinary 64 KiB command limit", async () => {

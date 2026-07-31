@@ -387,7 +387,12 @@ export async function reconcileWorkspace(
       ...(baseRef === undefined || baseOid === undefined ? [] : [`${baseOid}:${baseRef}`]),
     ],
     cwd: options.sourceRoot,
-    environment: { GIT_SSH_COMMAND: encodePosixCommand(["ssh", ...transport]) },
+    environment: {
+      GIT_SSH_COMMAND: encodePosixCommand(["ssh", ...transport]),
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: "/dev/null",
+    },
     maxOutputBytes: PUSH_CAPTURE_BYTES,
   });
   assertBoundedSuccess(push, "push HEAD object", PUSH_CAPTURE_BYTES);

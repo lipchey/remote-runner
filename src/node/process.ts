@@ -51,8 +51,9 @@ export class NodeProcessRuntime implements SshProcessRuntime {
       child.on("close", (code, signal) => {
         if (settled) return;
         settled = true;
+        const observedExitCode = spawned ? (code ?? signalExitCode(signal)) : 127;
         resolve({
-          exitCode: spawned ? (code ?? signalExitCode(signal)) : 127,
+          exitCode: outputTruncated && observedExitCode === 0 ? 75 : observedExitCode,
           stdout: Buffer.concat(stdout),
           stderr: Buffer.concat(stderr),
           outputTruncated,
