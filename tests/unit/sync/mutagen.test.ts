@@ -56,6 +56,7 @@ class FakeClock {
 
 const options: MutagenSessionOptions = {
   consumer: "ariadne",
+  profile: "verify-full",
   identity: "0123456789abcdef01234567",
   canonicalAlphaRoot: "/Users/dev/Ariadne Worktree",
   betaTarget: "runner@example.test",
@@ -63,7 +64,7 @@ const options: MutagenSessionOptions = {
   ignores: [".cache", "node_modules", "build/**", ".cache"],
 };
 
-const name = "remote-runner-ariadne-0123456789abcdef01234567";
+const name = "remote-runner-ariadne-verify-full-0123456789abcdef01234567";
 const beta = "runner@example.test:/srv/remote-runner/workspaces/ariadne";
 
 function session(
@@ -120,7 +121,7 @@ function commandNames(processes: FakeProcesses): string[] {
 
 describe("Mutagen one-way lifecycle", () => {
   it("builds a stable owned session name and rejects hostile components", () => {
-    expect(mutagenSessionName("ariadne", "0123456789abcdef01234567")).toBe(name);
+    expect(mutagenSessionName("ariadne", "verify-full", "0123456789abcdef01234567")).toBe(name);
     for (const [consumer, identity] of [
       ["../ariadne", "0123456789abcdef01234567"],
       ["Ariadne", "0123456789abcdef01234567"],
@@ -128,7 +129,7 @@ describe("Mutagen one-way lifecycle", () => {
       ["ariadne", "short"],
       ["ariadne", "ABCDEF0123456789ABCDEF01"],
     ]) {
-      expect(() => mutagenSessionName(consumer!, identity!)).toThrow();
+      expect(() => mutagenSessionName(consumer!, "verify-full", identity!)).toThrow();
     }
   });
 

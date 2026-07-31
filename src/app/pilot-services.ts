@@ -288,6 +288,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
     const paths = this.paths();
     this.pausedSession = await this.mutagen.pauseForGitReconcile({
       consumer: this.profile.consumer,
+      profile: this.profile.id,
       identity: this.identity,
       canonicalAlphaRoot: await realpath(this.options.sourceRoot),
       betaTarget: this.profile.remote.target,

@@ -31,6 +31,7 @@ export interface MonotonicClock {
 
 export interface MutagenSessionOptions {
   readonly consumer: string;
+  readonly profile: string;
   readonly identity: string;
   readonly canonicalAlphaRoot: string;
   readonly betaTarget: string;
@@ -100,10 +101,11 @@ export function compileIgnores(profilePatterns: readonly string[]): string[] {
   return [...compiled];
 }
 
-export function mutagenSessionName(consumer: string, identity: string): string {
+export function mutagenSessionName(consumer: string, profile: string, identity: string): string {
   if (!COMPONENT.test(consumer)) throw new Error("consumer must be a safe session component");
+  if (!COMPONENT.test(profile)) throw new Error("profile must be a safe session component");
   if (!IDENTITY.test(identity)) throw new Error("identity must be exactly 24 lowercase hex characters");
-  return `remote-runner-${consumer}-${identity}`;
+  return `remote-runner-${consumer}-${profile}-${identity}`;
 }
 
 function assertCanonicalAbsolutePath(value: string, label: string): void {
@@ -126,7 +128,7 @@ function betaEndpoint(target: string, root: string): string {
 }
 
 function validateOptions(options: MutagenSessionOptions): ValidatedSession {
-  const name = mutagenSessionName(options.consumer, options.identity);
+  const name = mutagenSessionName(options.consumer, options.profile, options.identity);
   assertCanonicalAbsolutePath(options.canonicalAlphaRoot, "Mutagen alpha root");
   return {
     name,
