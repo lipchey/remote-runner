@@ -42,7 +42,7 @@ class FakeProcesses {
     this.requests.push(request);
     if (request.command === "launchctl") return result("state = running\n");
     if (request.args[0] === "sync" && request.args[1] === "list") {
-      return result(`${JSON.stringify({ name: request.args.at(-1), paused: false, status: "watching" })}\n`);
+      return result(`${JSON.stringify([{ name: request.args.at(-1), paused: false, status: "watching" }])}\n`);
     }
     if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-status")) {
       return result('{"workspace":"ready","fingerprint":"current"}\n');
@@ -127,6 +127,27 @@ describe("concrete Node CLI dependencies", () => {
     ]);
     await expect(readFile(join(paths.sourceRoot, report.receiptPaths[0]!), "utf8")).resolves.toContain('"profile": "verify-full"');
     await expect(readFile(join(paths.sourceRoot, report.receiptPaths[1]!), "utf8")).resolves.toContain("| remote | full | warm |");
+  });
+
+  it("writes bounded diagnostic lifecycle records for real profile dispatch", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+      now: () => "2026-07-31T12:34:56.000Z",
+      executeProfile: async () => 23,
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.runProfile!(profile, ["ignored-secret-like-argument"], "remote")).resolves.toBe(23);
+
+    const lines = await dependencies.logsProfile?.("verify-full");
+    expect(lines).toHaveLength(2);
+    expect(lines?.[0]).toContain('"event":"run-start"');
+    expect(lines?.[1]).toContain('"event":"run-finish"');
+    expect(lines?.join("\n")).not.toContain("ignored-secret-like-argument");
   });
 
   it("refuses symlinked repair receipts and benchmark output directories", async () => {

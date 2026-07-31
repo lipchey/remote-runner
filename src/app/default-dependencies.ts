@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { arch, homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
@@ -20,6 +20,7 @@ import {
 } from "../node/managed-ssh.js";
 import { NodeProcessRuntime } from "../node/process.js";
 import { worktreeIdentity } from "../runtime/identity.js";
+import { createJsonlLogger } from "../runtime/log.js";
 import { runProfile } from "../run/run-profile.js";
 import { runSsh, type SshProcessRuntime } from "../ssh/client.js";
 import { mutagenSessionName } from "../sync/mutagen.js";
@@ -118,13 +119,17 @@ function sessionStatus(output: Uint8Array, expectedName: string): "watching" | "
   try {
     for (const line of decoder.decode(output).split(/\r?\n/u)) {
       if (line.length === 0) continue;
-      const value = JSON.parse(line) as { readonly name?: unknown; readonly paused?: unknown; readonly status?: unknown };
-      if (typeof value !== "object" || value === null) return "unknown";
-      if (value.name !== expectedName) continue;
-      sawSession = true;
-      if (value.paused === true) return "paused";
-      if (value.paused !== false || typeof value.status !== "string") return "unknown";
-      if (value.status === "watching") return "watching";
+      const parsed = JSON.parse(line) as unknown;
+      const values = Array.isArray(parsed) ? parsed : [parsed];
+      for (const value of values) {
+        if (typeof value !== "object" || value === null) return "unknown";
+        const session = value as { readonly name?: unknown; readonly paused?: unknown; readonly status?: unknown };
+        if (session.name !== expectedName) continue;
+        sawSession = true;
+        if (session.paused === true) return "paused";
+        if (session.paused !== false || typeof session.status !== "string") return "unknown";
+        if (session.status === "watching") return "watching";
+      }
     }
   } catch { return "unknown"; }
   return sawSession ? "unknown" : "missing";
@@ -207,7 +212,7 @@ async function inspectProbe(
     args = ["-F", hostFromTarget(profile.remote.target), "-f", options.knownHostsPath];
   } else if (probe.id === "runtime.lock") {
     command = "ls";
-    args = ["-ld", join(options.home, ".local", "state", "remote-runner", "locks", identity)];
+    args = ["-ld", join(options.home, ".local", "state", "remote-runner", "locks")];
   } else if (probe.id === "sync.session") {
     command = options.mutagenCommand;
     args = ["sync", "list", mutagenSessionName(profile.consumer, profile.id, identity)];
@@ -219,7 +224,10 @@ async function inspectProbe(
     const remoteArguments = probe.id === "remote.capacity"
       ? ["sh", "-ceu", "exec df -Pk \"$HOME/$1\"", "remote-runner-capacity", workspace]
       : probe.id === "remote.bootstrap"
-        ? ["sh", "-ceu", "command -v node >/dev/null && command -v pnpm >/dev/null"]
+        ? [
+            "sh", "-ceu",
+            "set -- \"$HOME\"/.local/share/remote-runner/toolchains/node-v*/bin; [ -x \"$1/node\" ] && [ -x \"$1/pnpm\" ]",
+          ]
         : probe.id === "remote.workspace"
           ? ["sh", "-ceu", "exec git -C \"$HOME/$1\" status --short --branch", "remote-runner-workspace", workspace]
           : probe.id === "secrets.persistence"
@@ -275,7 +283,7 @@ export async function createNodeCliDependencies(
     return { managedSsh, launcherSource };
   })();
 
-  const executeProfile = options.executeProfile ?? (async (
+  const executeWorkload = options.executeProfile ?? (async (
     profile: Profile,
     command: readonly string[],
     mode: RunMode,
@@ -300,6 +308,43 @@ export async function createNodeCliDependencies(
     });
     return runProfile(createProfileRuntime(services), profile, command, mode);
   });
+
+  const executeProfile = async (
+    profile: Profile,
+    command: readonly string[],
+    mode: RunMode,
+  ): Promise<number> => {
+    const root = profileRoot(home, profile, identity);
+    const logger = createJsonlLogger({
+      appendFile: (path, contents, mode) => appendFile(path, contents, { mode }),
+      stat,
+      rename,
+      remove: (path) => rm(path, { force: true }),
+    }, join(root, "runner.log"));
+    const writeLog = async (record: unknown): Promise<void> => {
+      try {
+        await mkdir(root, { recursive: true, mode: 0o700 });
+        await logger.write(record);
+      } catch {
+        // Diagnostics must never block or alter workload selection.
+      }
+    };
+    await writeLog({ at: (options.now ?? (() => new Date().toISOString()))(), event: "run-start", profile: profile.id, mode });
+    try {
+      const status = await executeWorkload(profile, command, mode);
+      await writeLog({ at: (options.now ?? (() => new Date().toISOString()))(), event: "run-finish", profile: profile.id, mode, status });
+      return status;
+    } catch (caught) {
+      await writeLog({
+        at: (options.now ?? (() => new Date().toISOString()))(),
+        event: "run-error",
+        profile: profile.id,
+        mode,
+        error: caught instanceof Error ? caught.name : "UnknownError",
+      });
+      throw caught;
+    }
+  };
 
   const dependencies: NodeCliDependencies = {
     identity,
