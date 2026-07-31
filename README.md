@@ -1,4 +1,4 @@
-# remote-execute
+# remote-runner
 
 Automatic execution of repository-defined workloads on a trusted remote workstation.
 
@@ -7,4 +7,4 @@ run on a Tailscale-connected Linux workstation when healthy and fall back locall
 alert when remote execution is unavailable.
 
 The canonical design is
-`docs/specs/2026-07-31-remote-execute-design.md`.
+`docs/specs/2026-07-31-remote-runner-design.md`.

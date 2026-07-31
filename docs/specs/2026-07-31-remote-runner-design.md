@@ -1,4 +1,4 @@
-# Remote Execute Design
+# Remote Runner Design
 
 > **Status:** design approved; implementation has not started.
 >
@@ -6,7 +6,7 @@
 
 ## 1. Mission
 
-`remote-execute` runs repository-defined workloads on a trusted, more powerful workstation while
+`remote-runner` runs repository-defined workloads on a trusted, more powerful workstation while
 editing and source control remain on the developer laptop. It synchronizes required inputs,
 prepares the remote environment, streams results, and applies an explicit fallback policy.
 
@@ -26,7 +26,7 @@ runbook, generic tests, live acceptance, and benchmark collection.
 
 A consuming repository owns only:
 
-- a versioned `.remote-execute.yaml` manifest without secret values;
+- a versioned `.remote-runner.yaml` manifest without secret values;
 - a small invocation seam from its existing command;
 - workload-specific fingerprint inputs, allowed ephemeral environment names, and exclusions;
 - adapter tests proving that existing command semantics are preserved.
@@ -38,7 +38,7 @@ adapter contract and points here for system behavior.
 
 After one installation by the implementation workflow, a macOS LaunchAgent starts the per-user
 controller at login. The controller keeps background synchronization state healthy. Every
-`remote-execute run <profile> -- <command...>` invocation also validates and repairs all required
+`remote-runner run <profile> -- <command...>` invocation also validates and repairs all required
 state, so correctness never depends solely on that background process.
 
 Output stays attached to the invoking terminal and the selected process exit status is returned
@@ -69,7 +69,7 @@ These commands support the runbook and are not part of daily management.
 
 ## 5. Profile manifest
 
-Each consumer commits a closed-schema `.remote-execute.yaml`. A profile declares its ID and schema
+Each consumer commits a closed-schema `.remote-runner.yaml`. A profile declares its ID and schema
 version, mode and fallback policy, remote target, workspace namespace, source root, synchronization
 exclusions, required remote capabilities, bootstrap versions, setup and fingerprint inputs,
 workload arguments, remote-child marker, allowed ephemeral environment names, probe timeouts,
@@ -110,7 +110,7 @@ Each local Git worktree maps to an opaque identity derived from its canonical ro
 are labels, never path input. The workstation stores a private bare mirror per consumer and
 generated worktrees below:
 
-`~/.cache/remote-execute/workspaces/<consumer>/<identity>/`
+`~/.cache/remote-runner/workspaces/<consumer>/<identity>/`
 
 Before synchronization, the system pauses the session, pushes local `HEAD` to a private workstation
 ref over SSH, resets only the confined generated worktree, and initializes required submodules.
@@ -127,7 +127,7 @@ flows back.
 
 VCS metadata, dependencies, package stores, build output, caches, coverage, artifacts, logs,
 temporary files, Python environments/caches, plaintext environment files, secret keys,
-platform-specific binaries, and remote-execute state are ignored. Manifests, lockfiles, source,
+platform-specific binaries, and remote-runner state are ignored. Manifests, lockfiles, source,
 configuration, migrations, tests, fixtures, and version metadata remain synchronized.
 
 An explicit successful flush is mandatory after Git reconciliation and before fingerprinting or
@@ -137,7 +137,7 @@ self-repair succeeds.
 ### 6.5 Native remote bootstrap
 
 Workloads run natively. Profiles declare required versions; bootstrap installs them without sudo
-below `~/.local/share/remote-execute/toolchains/`.
+below `~/.local/share/remote-runner/toolchains/`.
 
 The Node provider downloads the laptop’s exact Node version for the remote architecture from the
 official distribution, verifies its published SHA-256 manifest, extracts into a temporary
@@ -173,7 +173,7 @@ sends one recovery message regardless of its eventual workload verdict.
 Messages contain only consumer/profile labels, remote label, stable reason, timestamp, and
 fallback/recovery state. Notification failure never blocks fallback but is visible in stderr.
 
-Versioned state lives under `~/.local/state/remote-execute/` with restrictive permissions and
+Versioned state lives under `~/.local/state/remote-runner/` with restrictive permissions and
 atomic writes. Structured logs are redacted, bounded, and rotated. Corrupt records are retained for
 diagnosis before safe reconstruction.
 
@@ -196,7 +196,7 @@ Every `run`, even with a healthy controller, performs:
 9. allowed environment framing;
 10. remote child start and preparation-lock release.
 
-Linux needs no resident remote-execute daemon. Existing `sshd` and `tailscaled` services provide
+Linux needs no resident remote-runner daemon. Existing `sshd` and `tailscaled` services provide
 reboot persistence, and Mutagen deploys its matching agent over SSH.
 
 Preparation may retry bounded idempotent operations. A workload is never retried after its
