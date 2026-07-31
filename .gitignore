@@ -6,3 +6,4 @@ coverage/
 .remote-execute-state/
 .remote-runner-state/
 *.log
+.codegraph/
