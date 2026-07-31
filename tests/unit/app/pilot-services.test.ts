@@ -36,6 +36,7 @@ describe("pilot service boundaries", () => {
       "/remote/node/bin/node",
       "/remote/launcher.mjs",
       "/remote/workspace",
+      "/remote/node/bin:/remote/uv:/usr/bin:/bin",
       profile,
       ["./scripts/verify", "--full"],
     );
@@ -44,6 +45,7 @@ describe("pilot service boundaries", () => {
     expect(args.slice(0, 3)).toEqual(["sh", "-ceu", expect.any(String)]);
     expect(serialized).toContain("NEON_DEV_DATABASE_URL");
     expect(serialized).toContain("REMOTE_RUNNER_CHILD");
+    expect(args).toContain("PATH=/remote/node/bin:/remote/uv:/usr/bin:/bin");
     expect(serialized).not.toContain("secret-canary");
     expect(serialized).not.toContain("postgres://");
   });

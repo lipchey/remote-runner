@@ -88,12 +88,14 @@ export function remoteChildArguments(
   node: string,
   launcher: string,
   workspace: string,
+  pathEnvironment: string,
   profile: Pick<Profile, "workload" | "secrets">,
   command: readonly string[],
 ): readonly string[] {
   for (const [label, path] of [["remote node", node], ["remote launcher", launcher], ["remote workspace", workspace]] as const) {
     canonicalRemotePath(path, label);
   }
+  for (const path of pathEnvironment.split(":")) canonicalRemotePath(path, "remote PATH entry");
   if (command.length === 0 || command.some((argument) => argument.includes("\0"))) {
     throw new Error("remote child command is invalid");
   }
@@ -108,6 +110,7 @@ export function remoteChildArguments(
     "remote-runner-child",
     workspace,
     "/usr/bin/env",
+    `PATH=${pathEnvironment}`,
     ...childEnvironment.map(([name, value]) => `${name}=${value}`),
     node,
     launcher,
@@ -411,12 +414,28 @@ export class NodeProfileServices implements ProfileExecutionServices {
   ): Promise<RemoteExecutionResult> {
     const paths = this.paths();
     if (this.nodeRoot === undefined) throw new Error("remote Node is unavailable before bootstrap");
+    if (this.uvRoot === undefined) throw new Error("remote uv is unavailable before bootstrap");
+    const pathEnvironment = [
+      posix.join(this.nodeRoot, "bin"),
+      this.uvRoot,
+      posix.join(paths.workspace, ".tools"),
+      "/usr/local/bin",
+      "/usr/bin",
+      "/bin",
+    ].join(":");
     const frame = encodeSecretFrame(secrets, this.profile.secrets.allow);
     const result = await runStreamingProcess({
       command: "ssh",
       args: sshArguments(
         this.profile.remote.target,
-        remoteChildArguments(posix.join(this.nodeRoot, "bin", "node"), paths.launcher, paths.workspace, this.profile, command),
+        remoteChildArguments(
+          posix.join(this.nodeRoot, "bin", "node"),
+          paths.launcher,
+          paths.workspace,
+          pathEnvironment,
+          this.profile,
+          command,
+        ),
         this.profile.probes.connectTimeoutSeconds,
         this.knownHostsPath,
       ),
