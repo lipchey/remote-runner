@@ -102,4 +102,32 @@ describe("runCli", () => {
       "invalid manifest: schemaVersion must be 1",
     ]);
   });
+
+  it("loads a selected run profile and forwards the exact argv array and mode override", async () => {
+    const calls: unknown[] = [];
+    const code = await runCli(
+      ["run", "verify-full", "--mode", "local", "--manifest", "profile.yaml", "--", "./scripts/verify", "--full"],
+      { stdout: () => undefined, stderr: () => undefined },
+      {
+        readFile: async (path) => { calls.push(["read", path]); return validManifest; },
+        runProfile: async (profile, command, mode) => {
+          calls.push(["run", profile.id, command, mode]);
+          return 29;
+        },
+      },
+    );
+    expect(code).toBe(29);
+    expect(calls).toEqual([
+      ["read", "profile.yaml"],
+      ["run", "verify-full", ["./scripts/verify", "--full"], "local"],
+    ]);
+  });
+
+  it("rejects malformed run syntax before reading the manifest", async () => {
+    const errors: string[] = [];
+    const dependencies = { readFile: async () => { throw new Error("must not read"); } };
+    expect(await runCli(["run", "verify-full"], { stdout: () => undefined, stderr: (line) => errors.push(line) }, dependencies)).toBe(2);
+    expect(await runCli(["run", "verify-full", "--mode", "invalid", "--", "x"], { stdout: () => undefined, stderr: (line) => errors.push(line) }, dependencies)).toBe(2);
+    expect(errors).toHaveLength(2);
+  });
 });

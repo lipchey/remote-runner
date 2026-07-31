@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { loadManifestText } from "./config/load-manifest.js";
+import type { Profile, RunMode } from "./config/types.js";
 
 export interface CliIo {
   stdout(line: string): void;
@@ -9,6 +10,7 @@ export interface CliIo {
 
 export interface CliDependencies {
   readFile(path: string): Promise<string | Uint8Array>;
+  runProfile?(profile: Profile, command: readonly string[], mode?: RunMode): Promise<number>;
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
@@ -39,8 +41,81 @@ export async function runCli(
     return validateManifest(argv.slice(1), io, dependencies);
   }
 
+  if (argv[0] === "run") {
+    return runSelectedProfile(argv.slice(1), io, dependencies);
+  }
+
   io.stderr(`unknown command: ${argv[0]}`);
   return 2;
+}
+
+async function readManifest(path: string, dependencies: CliDependencies) {
+  const contents = await dependencies.readFile(path);
+  return loadManifestText(typeof contents === "string" ? contents : new TextDecoder().decode(contents));
+}
+
+async function runSelectedProfile(
+  argv: readonly string[],
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const profileId = argv[0];
+  const separator = argv.indexOf("--");
+  if (profileId === undefined || profileId.startsWith("-") || separator < 1 || separator === argv.length - 1) {
+    io.stderr("run requires <profile> [options] -- <command...>");
+    return 2;
+  }
+  let manifestPath = ".remote-runner.yaml";
+  let mode: RunMode | undefined;
+  const seen = new Set<string>();
+  for (let index = 1; index < separator; index += 1) {
+    const argument = argv[index];
+    if (argument !== "--manifest" && argument !== "--mode") {
+      io.stderr(`unknown run argument: ${argument ?? ""}`);
+      return 2;
+    }
+    if (seen.has(argument)) {
+      io.stderr(`duplicate run argument: ${argument}`);
+      return 2;
+    }
+    seen.add(argument);
+    const value = argv[index + 1];
+    if (value === undefined || index + 1 >= separator) {
+      io.stderr(`run requires a value after ${argument}`);
+      return 2;
+    }
+    if (argument === "--manifest") manifestPath = value;
+    else if (value === "auto" || value === "local" || value === "remote") mode = value;
+    else {
+      io.stderr(`invalid run mode: ${value}`);
+      return 2;
+    }
+    index += 1;
+  }
+  const command = argv.slice(separator + 1);
+  if (command[0]?.length === 0 || command.some((part) => part.includes("\0"))) {
+    io.stderr("run command must be a safe argument array");
+    return 2;
+  }
+  let manifest;
+  try { manifest = await readManifest(manifestPath, dependencies); } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    io.stderr(`invalid manifest: ${message}`);
+    return 2;
+  }
+  const profile = manifest.profiles.find((candidate) => candidate.id === profileId);
+  if (profile === undefined) {
+    io.stderr(`profile not found: ${profileId}`);
+    return 2;
+  }
+  if (dependencies.runProfile === undefined) {
+    io.stderr("remote-runner execution runtime is not configured");
+    return 70;
+  }
+  try { return await dependencies.runProfile(profile, command, mode); } catch {
+    io.stderr("remote-runner execution failed");
+    return 70;
+  }
 }
 
 async function validateManifest(
@@ -75,10 +150,7 @@ async function validateManifest(
 
   let manifest;
   try {
-    const contents = await dependencies.readFile(manifestPath);
-    manifest = loadManifestText(
-      typeof contents === "string" ? contents : new TextDecoder().decode(contents),
-    );
+    manifest = await readManifest(manifestPath, dependencies);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     io.stderr(`invalid manifest: ${message}`);
