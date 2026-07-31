@@ -148,10 +148,10 @@ candidate=$(confined_candidate)
 cd -- "$candidate"
 [ "$(pwd -P)" = "$candidate" ] || fail 'workspace inode changed before reconciliation'
 git reset --hard "$oid" --
-git clean -ffdx --
+git clean -ffd --
 git submodule sync --recursive
 git submodule update --init --recursive --force --
-git submodule foreach --recursive 'git reset --hard HEAD -- && git clean -ffdx --'`;
+git submodule foreach --recursive 'git reset --hard HEAD -- && git clean -ffd --'`;
 
 export type PrivateRef = `refs/remote-runner/${string}/${string}/${string}`;
 

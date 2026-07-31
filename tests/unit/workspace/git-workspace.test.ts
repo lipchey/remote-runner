@@ -295,7 +295,7 @@ describe("confined Git workspace reconciliation", () => {
     expect(transaction!.indexOf("mkdir -p --")).toBeLessThan(transaction!.indexOf("worktree add"));
     const ordered = [
       "reset --hard",
-      "clean -ffdx",
+      "clean -ffd --",
       "submodule sync --recursive",
       "submodule update --init --recursive --force",
       "submodule foreach --recursive",
@@ -306,6 +306,7 @@ describe("confined Git workspace reconciliation", () => {
       expect(next).toBeGreaterThan(cursor);
       cursor = next;
     }
+    expect(transaction).not.toContain("clean -ffdx");
   });
 
   it("captures worktree listing before testing registration so list failure cannot be masked", async () => {
