@@ -24,6 +24,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
 };
 
 const HELP = [
+  "remote-runner install",
   "remote-runner run <profile> -- <command...>",
   "remote-runner validate [profile] [--manifest <path>]",
   "remote-runner status [profile]",

@@ -64,7 +64,7 @@ const options: MutagenSessionOptions = {
 };
 
 const name = "remote-runner-ariadne-0123456789abcdef01234567";
-const beta = "ssh://runner@example.test/srv/remote-runner/workspaces/ariadne";
+const beta = "runner@example.test:/srv/remote-runner/workspaces/ariadne";
 
 function session(
   status: string,
@@ -73,6 +73,7 @@ function session(
     alpha: string;
     beta: string;
     mode: string;
+    ignores: string[];
     conflicts: unknown[];
     excludedConflicts: number;
   }> = {},
@@ -84,12 +85,33 @@ function session(
       alpha: { url: patch.alpha ?? options.canonicalAlphaRoot },
       beta: { url: patch.beta ?? beta },
       configuration: { synchronizationMode: patch.mode ?? "one-way-replica" },
+      ignore: { paths: patch.ignores ?? compileIgnores(options.ignores) },
       paused: status === "paused",
       ...(status === "paused" ? {} : { status }),
       conflicts: patch.conflicts ?? [],
       excludedConflicts: patch.excludedConflicts ?? 0,
     },
   ]);
+}
+
+function liveV018PausedSession(): string {
+  return JSON.stringify([{
+    identifier: "sync_cGg7xdiUF1jgc0sZmBFTu2ubaPJv9DU5yp7WmUr07Q8",
+    version: 1,
+    alpha: { protocol: "local", path: options.canonicalAlphaRoot, connected: false },
+    beta: {
+      protocol: "ssh",
+      user: "runner",
+      host: "example.test",
+      path: options.betaRoot,
+      connected: false,
+    },
+    mode: "one-way-replica",
+    ignore: { paths: compileIgnores(options.ignores) },
+    name,
+    paused: true,
+    status: "disconnected",
+  }]);
 }
 
 function commandNames(processes: FakeProcesses): string[] {
@@ -146,8 +168,8 @@ describe("Mutagen one-way lifecycle", () => {
     },
   );
 
-  it("starts the daemon, creates a missing one-way session with explicit ignores, then pauses it", async () => {
-    const processes = new FakeProcesses([{}, { stdout: "" }, {}, {}]);
+  it("starts the daemon and creates a missing one-way session already paused with explicit ignores", async () => {
+    const processes = new FakeProcesses([{}, { stdout: "" }, {}]);
     const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
 
     await lifecycle.pauseForGitReconcile(options);
@@ -156,7 +178,6 @@ describe("Mutagen one-way lifecycle", () => {
       "daemon start",
       "sync list",
       "sync create",
-      "sync pause",
     ]);
     const create = processes.requests[2];
     expect(processes.requests[1]?.args).toEqual(["sync", "list", "--template", "{{ json . }}"]);
@@ -168,6 +189,7 @@ describe("Mutagen one-way lifecycle", () => {
       name,
       "--sync-mode",
       "one-way-replica",
+      "--paused",
       ...compileIgnores(options.ignores).flatMap((pattern) => ["--ignore", pattern]),
       "--",
       options.canonicalAlphaRoot,
@@ -187,6 +209,15 @@ describe("Mutagen one-way lifecycle", () => {
 
   it("accepts an already-paused matching session idempotently", async () => {
     const processes = new FakeProcesses([{}, { stdout: session("paused") }]);
+    const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
+
+    await lifecycle.pauseForGitReconcile(options);
+
+    expect(commandNames(processes)).toEqual(["daemon start", "sync list"]);
+  });
+
+  it("accepts the sanitized live Mutagen 0.18.1 session JSON shape", async () => {
+    const processes = new FakeProcesses([{}, { stdout: liveV018PausedSession() }]);
     const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
 
     await lifecycle.pauseForGitReconcile(options);
@@ -217,8 +248,9 @@ describe("Mutagen one-way lifecycle", () => {
   it.each([
     ["duplicate", session("paused").replace(/\]$/u, `,${session("paused").slice(1)}`)],
     ["alpha mismatch", session("paused", { alpha: "/other" })],
-    ["beta mismatch", session("paused", { beta: "ssh://runner@example.test/other" })],
+    ["beta mismatch", session("paused", { beta: "runner@example.test:/other" })],
     ["mode mismatch", session("paused", { mode: "two-way-resolved" })],
+    ["ignore mismatch", session("paused", { ignores: [".git", "node_modules"] })],
     ["conflict", session("watching", { conflicts: [{}] })],
   ])("fails closed on %s before pausing", async (_label, listing) => {
     const processes = new FakeProcesses([{}, { stdout: listing }]);

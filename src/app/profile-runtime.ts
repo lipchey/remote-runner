@@ -11,6 +11,7 @@ export interface ProfileExecutionServices extends PreparationRuntime {
   runLocal(command: readonly string[]): Promise<number>;
   recordFallback(reason: string): Promise<void>;
   recordRemoteChildStarted(): Promise<void>;
+  reportUnavailable(reason: string): void;
 }
 
 function stableReason(reason: string): string {
@@ -22,7 +23,12 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
   return {
     async prepareRemote() {
       const result = await prepareRemote(services);
-      pendingFallbackReason = result.ok ? undefined : stableReason(result.reason);
+      if (result.ok) pendingFallbackReason = undefined;
+      else {
+        const reason = stableReason(result.reason);
+        pendingFallbackReason = reason;
+        services.reportUnavailable(reason);
+      }
       return result;
     },
     async startRemote(command, secrets, onChildStarted) {

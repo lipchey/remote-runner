@@ -23,6 +23,7 @@ class FakeServices implements ProfileExecutionServices {
   async runLocal() { this.calls.push("local"); return 17; }
   async recordFallback(reason: string) { this.calls.push(`outage:${reason}`); }
   async recordRemoteChildStarted() { this.calls.push("recovery"); }
+  reportUnavailable(reason: string) { this.calls.push(`unavailable:${reason}`); }
 }
 
 const profile = { mode: "auto" as const, fallback: "local" as const };
@@ -36,7 +37,7 @@ describe("profile runtime composition", () => {
 
     expect(code).toBe(17);
     expect(services.calls).toEqual([
-      "validate", "lock", "probe", "release",
+      "validate", "lock", "probe", "release", "unavailable:transport",
       "outage:transport", "local",
     ]);
   });

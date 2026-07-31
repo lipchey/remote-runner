@@ -32,6 +32,7 @@ class FakeProcesses {
   existingMirrorFormat?: string;
   swapAfterPrepare = false;
   worktreeRegistered = false;
+  pushStdout = "";
 
   constructor(
     private readonly root = "/cache/workspaces",
@@ -46,7 +47,9 @@ class FakeProcesses {
       if (request.args.includes("--show-object-format")) {
         return result(0, `${this.localObjectFormat}\n`);
       }
-      return request.args[0] === "rev-parse" ? result(0, `${this.localOid}\n`) : result();
+      if (request.args[0] === "rev-parse") return result(0, `${this.localOid}\n`);
+      if (request.args[0] === "push") return result(0, this.pushStdout);
+      return result();
     }
     const remote = request.args.at(-1) ?? "";
     if (remote.includes("remote-runner-git-prepare")) {
@@ -131,7 +134,7 @@ function runShell(command: string, environment: NodeJS.ProcessEnv): Promise<numb
 }
 
 async function waitForLog(path: string, fragment: string): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < 1_000; attempt++) {
     const contents = await readFile(path, "utf8").catch(() => "");
     if (contents.includes(fragment)) return;
     await delay(10);
@@ -158,8 +161,10 @@ describe("confined Git workspace reconciliation", () => {
     expect(processes.requests[3]).toMatchObject({
       command: "git",
       cwd: options.sourceRoot,
+      maxOutputBytes: 4 * 1024 * 1024,
       args: [
         "push",
+        "--quiet",
         "--force",
         expect.stringContaining("--receive-pack=sh -ceu"),
         "--",
@@ -172,6 +177,15 @@ describe("confined Git workspace reconciliation", () => {
     expect(processes.requests[3]?.environment?.GIT_SSH_COMMAND).toBe(
       ["ssh", ...sshArguments("admin@pop-os", ["true"], 4, "/runner/known_hosts").slice(0, -2)].join(" "),
     );
+  });
+
+  it("accepts bounded push protocol output above the ordinary 64 KiB command limit", async () => {
+    const { options, processes } = await fixture();
+    processes.pushStdout = "p".repeat(64 * 1024 + 1);
+
+    await expect(reconcileWorkspace(options, processes)).resolves.toMatchObject({
+      privateRef: expect.stringContaining("refs/remote-runner/"),
+    });
   });
 
   it("reuses a registered worktree without adding it again", async () => {

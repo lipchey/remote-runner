@@ -10,6 +10,7 @@ import {
 } from "../ssh/client.js";
 
 const CAPTURE_BYTES = 64 * 1024;
+const PUSH_CAPTURE_BYTES = 4 * 1024 * 1024;
 const COMPONENT = /^[a-z][a-z0-9-]{0,62}$/u;
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
@@ -190,11 +191,15 @@ export function assertConfinedWorkspace(generatedRoot: string, candidate: string
   return candidate;
 }
 
-function assertBoundedSuccess(result: BoundedProcessResult, label: string): void {
+function assertBoundedSuccess(
+  result: BoundedProcessResult,
+  label: string,
+  maximumBytes = CAPTURE_BYTES,
+): void {
   if (
     result.outputTruncated ||
-    result.stdout.byteLength > CAPTURE_BYTES ||
-    result.stderr.byteLength > CAPTURE_BYTES
+    result.stdout.byteLength > maximumBytes ||
+    result.stderr.byteLength > maximumBytes
   ) {
     throw new Error(`${label} exceeded the process output limit`);
   }
@@ -350,6 +355,7 @@ export async function reconcileWorkspace(
     command: "git",
     args: [
       "push",
+      "--quiet",
       "--force",
       `--receive-pack=${receivePack}`,
       "--",
@@ -358,9 +364,9 @@ export async function reconcileWorkspace(
     ],
     cwd: options.sourceRoot,
     environment: { GIT_SSH_COMMAND: encodePosixCommand(["ssh", ...transport]) },
-    maxOutputBytes: CAPTURE_BYTES,
+    maxOutputBytes: PUSH_CAPTURE_BYTES,
   });
-  assertBoundedSuccess(push, "push HEAD object");
+  assertBoundedSuccess(push, "push HEAD object", PUSH_CAPTURE_BYTES);
 
   await remote(
     processes,

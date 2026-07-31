@@ -62,6 +62,7 @@ interface SessionRecord {
   readonly alpha: string;
   readonly beta: string;
   readonly mode: string;
+  readonly ignores: readonly string[];
   readonly paused: boolean;
   readonly status?: string;
   readonly conflicts: number;
@@ -121,8 +122,7 @@ function betaEndpoint(target: string, root: string): string {
     throw new Error("Mutagen SSH target must be a safe user and host pair");
   }
   assertCanonicalAbsolutePath(root, "Mutagen beta root");
-  const encodedRoot = root.split("/").map(encodeURIComponent).join("/");
-  return `ssh://${target}${encodedRoot}`;
+  return `${target}:${root}`;
 }
 
 function validateOptions(options: MutagenSessionOptions): ValidatedSession {
@@ -164,10 +164,13 @@ function parseListing(contents: Uint8Array): SessionRecord[] {
   return value.map((item) => {
     if (!isRecord(item) || !text(item.identifier) || !text(item.name) || typeof item.paused !== "boolean")
       throw new Error("Mutagen session list returned a malformed session");
-    const alpha = nestedText(item.alpha, "url");
-    const betaValue = nestedText(item.beta, "url");
-    const mode = nestedText(item.configuration, "synchronizationMode");
-    if (!Array.isArray(item.conflicts) || !Number.isSafeInteger(item.excludedConflicts) || Number(item.excludedConflicts) < 0)
+    const alpha = endpointText(item.alpha);
+    const betaValue = endpointText(item.beta);
+    const mode = text(item.mode) ? item.mode : nestedText(item.configuration, "synchronizationMode");
+    const ignores = nestedStringArray(item.ignore, "paths");
+    const conflicts = item.conflicts === undefined ? [] : item.conflicts;
+    const excludedConflicts = item.excludedConflicts === undefined ? 0 : item.excludedConflicts;
+    if (!Array.isArray(conflicts) || !Number.isSafeInteger(excludedConflicts) || Number(excludedConflicts) < 0)
       throw new Error("Mutagen session list returned malformed conflict state");
     if (item.status !== undefined && typeof item.status !== "string")
       throw new Error("Mutagen session list returned malformed status");
@@ -177,10 +180,11 @@ function parseListing(contents: Uint8Array): SessionRecord[] {
       alpha,
       beta: betaValue,
       mode,
+      ignores,
       paused: item.paused,
       ...(item.status === undefined ? {} : { status: item.status }),
-      conflicts: item.conflicts.length,
-      excludedConflicts: Number(item.excludedConflicts),
+      conflicts: conflicts.length,
+      excludedConflicts: Number(excludedConflicts),
     };
   });
 }
@@ -192,6 +196,26 @@ function text(value: unknown): value is string { return typeof value === "string
 function nestedText(value: unknown, key: string): string {
   if (!isRecord(value) || !text(value[key])) throw new Error("Mutagen session list returned a malformed endpoint or configuration");
   return value[key];
+}
+
+function nestedStringArray(value: unknown, key: string): string[] {
+  if (!isRecord(value) || !Array.isArray(value[key]) || !value[key].every(text)) {
+    throw new Error("Mutagen session list returned malformed ignore configuration");
+  }
+  return [...value[key]];
+}
+
+function endpointText(value: unknown): string {
+  if (!isRecord(value)) throw new Error("Mutagen session list returned a malformed endpoint or configuration");
+  if (text(value.url)) return value.url;
+  if (value.protocol === "local" && text(value.path)) return value.path;
+  if (value.protocol === "ssh" && text(value.host) && text(value.path)) {
+    if (value.user !== undefined && !text(value.user)) {
+      throw new Error("Mutagen session list returned a malformed endpoint or configuration");
+    }
+    return `${value.user === undefined ? "" : `${value.user}@`}${value.host}:${value.path}`;
+  }
+  throw new Error("Mutagen session list returned a malformed endpoint or configuration");
 }
 
 function statusKind(record: SessionRecord): "paused" | "healthy" | "recoverable" | "conflict" {
@@ -208,6 +232,12 @@ function assertOwnedRecord(record: SessionRecord, expected: ValidatedSession): v
     throw new Error("Mutagen session endpoint mismatch");
   }
   if (record.mode !== "one-way-replica") throw new Error("Mutagen session mode mismatch");
+  if (
+    record.ignores.length !== expected.ignores.length ||
+    !expected.ignores.every((pattern) => record.ignores.includes(pattern))
+  ) {
+    throw new Error("Mutagen session ignore mismatch");
+  }
 }
 
 export class MutagenSyncLifecycle {
@@ -244,7 +274,7 @@ export class MutagenSyncLifecycle {
     return match;
   }
 
-  private createArguments(session: ValidatedSession): string[] {
+  private createArguments(session: ValidatedSession, paused: boolean): string[] {
     return [
       "sync",
       "create",
@@ -252,6 +282,7 @@ export class MutagenSyncLifecycle {
       session.name,
       "--sync-mode",
       "one-way-replica",
+      ...(paused ? ["--paused"] : []),
       ...session.ignores.flatMap((pattern) => ["--ignore", pattern]),
       "--",
       session.alpha,
@@ -259,22 +290,22 @@ export class MutagenSyncLifecycle {
     ];
   }
 
-  private async create(session: ValidatedSession): Promise<void> {
-    await this.checked(this.createArguments(session), "Mutagen session create");
+  private async create(session: ValidatedSession, paused = false): Promise<void> {
+    await this.checked(this.createArguments(session, paused), "Mutagen session create");
   }
 
   async pauseForGitReconcile(options: MutagenSessionOptions): Promise<PausedMutagenSession> {
     const expected = validateOptions(options);
     await this.checked(["daemon", "start"], "Mutagen daemon start");
     const existing = await this.listOwned(expected);
-    if (!existing) await this.create(expected);
+    if (!existing) await this.create(expected, true);
     if (existing && statusKind(existing) === "conflict") {
       throw new Error("Mutagen session has conflicts");
     }
     if (existing && statusKind(existing) === "recoverable") {
       throw new Error("Mutagen session is disconnected before Git reconciliation");
     }
-    if (!existing || statusKind(existing) !== "paused") {
+    if (existing && statusKind(existing) !== "paused") {
       await this.checked(["sync", "pause", expected.name], "Mutagen session pause");
     }
     const descriptor = {} as PausedMutagenSession;

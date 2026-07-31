@@ -9,6 +9,7 @@ import { installNode, localNodeVersion } from "../bootstrap/node.js";
 import { installUv } from "../bootstrap/uv.js";
 import type { Profile } from "../config/types.js";
 import { NodeProcessRuntime, runStreamingProcess } from "../node/process.js";
+import { ensureManagedKnownHost, mutagenSshEnvironment } from "../node/managed-ssh.js";
 import { RemoteToolchainRuntime, type RemoteCommandPort } from "../node/remote-toolchain.js";
 import { acquireProfileLock } from "../runtime/lock.js";
 import { worktreeIdentity } from "../runtime/identity.js";
@@ -17,7 +18,12 @@ import type { RemoteExecutionResult } from "../run/run-profile.js";
 import { encodeSecretFrame } from "../secrets/frame.js";
 import { runSecretProvider } from "../secrets/provider.js";
 import { classifySshFailure } from "../ssh/probe.js";
-import { enrollKnownHost, NodeKnownHostsStore, runSsh, sshArguments, type BoundedProcessRequest } from "../ssh/client.js";
+import {
+  runSsh,
+  sshArguments,
+  type BoundedProcessRequest,
+  type SshProcessRuntime,
+} from "../ssh/client.js";
 import { MutagenSyncLifecycle, type PausedMutagenSession } from "../sync/mutagen.js";
 import { reconcileWorkspace } from "../workspace/git-workspace.js";
 import type { ProfileExecutionServices } from "./profile-runtime.js";
@@ -112,6 +118,7 @@ export function remoteChildArguments(
 }
 
 const CAPTURE_BYTES = 64 * 1024;
+const LOCAL_GIT_CAPTURE_BYTES = 4 * 1024 * 1024;
 const UV_VERSION = "0.11.30";
 const UV_SHA256 = {
   x86_64: "04bc7d180d6138bf6dc08387acf507a823f397a98fea55da36b0ccc7fbce3b68",
@@ -119,12 +126,6 @@ const UV_SHA256 = {
 } as const;
 const GITLEAKS_VERSION = "8.30.1";
 const CHILD_MARKER = new TextEncoder().encode("RR_CHILD_STARTED\n");
-
-function errorCode(caught: unknown): string | undefined {
-  return typeof caught === "object" && caught !== null && "code" in caught
-    ? String((caught as { readonly code?: unknown }).code)
-    : undefined;
-}
 
 function decode(contents: Uint8Array, label: string): string {
   try { return new TextDecoder("utf-8", { fatal: true }).decode(contents); }
@@ -141,11 +142,32 @@ function parseGitlinks(output: Uint8Array): GitlinkIdentity[] {
   return result;
 }
 
+export async function listLocalGitlinks(
+  processes: SshProcessRuntime,
+  sourceRoot: string,
+): Promise<GitlinkIdentity[]> {
+  const result = await processes.run({
+    command: "git",
+    args: ["ls-files", "--stage"],
+    cwd: sourceRoot,
+    maxOutputBytes: LOCAL_GIT_CAPTURE_BYTES,
+  });
+  if (
+    result.exitCode !== 0 || result.outputTruncated ||
+    result.stdout.byteLength > LOCAL_GIT_CAPTURE_BYTES ||
+    result.stderr.byteLength > LOCAL_GIT_CAPTURE_BYTES
+  ) {
+    throw new Error("local Git inspection failed");
+  }
+  return parseGitlinks(result.stdout);
+}
+
 export interface NodeProfileServicesOptions {
   readonly home: string;
   readonly sourceRoot: string;
   readonly knownHostsPath?: string;
   readonly mutagenCommand?: string;
+  readonly managedSshPath?: string;
   readonly launcherSource: Uint8Array;
   readonly processes?: NodeProcessRuntime;
   readonly stdout?: (chunk: Uint8Array) => void;
@@ -176,12 +198,15 @@ export class NodeProfileServices implements ProfileExecutionServices {
     this.identity = worktreeIdentity(options.sourceRoot);
     this.stateRoot = join(options.home, ".local", "state", "remote-runner");
     this.lockRoot = join(this.stateRoot, "locks");
-    this.knownHostsPath = options.knownHostsPath ?? join(this.stateRoot, "known_hosts", profile.remote.label);
+    this.knownHostsPath = options.knownHostsPath ?? join(this.stateRoot, "known_hosts", "managed");
     const mutagenCommand = options.mutagenCommand ?? "mutagen";
     this.mutagen = new MutagenSyncLifecycle({
       run: (request) => this.processes.run({
         ...request,
         command: request.command === "mutagen" ? mutagenCommand : request.command,
+        ...(options.managedSshPath === undefined
+          ? {}
+          : { environment: mutagenSshEnvironment(options.managedSshPath, request.environment) }),
       }),
     }, { now: () => performance.now() });
   }
@@ -202,20 +227,12 @@ export class NodeProfileServices implements ProfileExecutionServices {
   async validate(): Promise<void> {
     await mkdir(this.lockRoot, { recursive: true, mode: 0o700 });
     await mkdir(dirname(this.knownHostsPath), { recursive: true, mode: 0o700 });
-    try {
-      await readFile(this.knownHostsPath);
-    } catch (caught) {
-      if (errorCode(caught) !== "ENOENT") throw caught;
-      const host = this.profile.remote.target.includes("@")
-        ? this.profile.remote.target.slice(this.profile.remote.target.lastIndexOf("@") + 1)
-        : this.profile.remote.target;
-      await enrollKnownHost(this.processes, new NodeKnownHostsStore(), {
-        target: host,
-        trustedFingerprint: this.profile.remote.hostKeySha256,
-        knownHostsPath: this.knownHostsPath,
-        connectTimeoutSeconds: this.profile.probes.connectTimeoutSeconds,
-      });
-    }
+    await ensureManagedKnownHost(this.processes, {
+      target: this.profile.remote.target,
+      trustedFingerprint: this.profile.remote.hostKeySha256,
+      knownHostsPath: this.knownHostsPath,
+      connectTimeoutSeconds: this.profile.probes.connectTimeoutSeconds,
+    });
   }
 
   async acquireLock(): Promise<() => Promise<void>> {
@@ -302,12 +319,6 @@ export class NodeProfileServices implements ProfileExecutionServices {
     await this.mutagen.resumeAndFlush(descriptor);
   }
 
-  private async runLocalGit(args: readonly string[]) {
-    const result = await this.processes.run({ command: "git", args, cwd: this.options.sourceRoot, maxOutputBytes: CAPTURE_BYTES });
-    if (result.exitCode !== 0 || result.outputTruncated) throw new Error("local Git inspection failed");
-    return result;
-  }
-
   private async writeRemoteState(path: string, state: HealthySetupState): Promise<void> {
     const encoded = Buffer.from(JSON.stringify(state)).toString("base64");
     const result = await this.remote().run([
@@ -358,7 +369,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
     };
     const fingerprint = await dependencyFingerprint({
       readFile: async (path) => new Uint8Array(await readFile(join(this.options.sourceRoot, path))),
-      listGitlinks: async () => parseGitlinks((await this.runLocalGit(["ls-files", "--stage"])).stdout),
+      listGitlinks: () => listLocalGitlinks(this.processes, this.options.sourceRoot),
       sha256: async (contents) => createHash("sha256").update(contents).digest("hex"),
     }, { environment, files: this.profile.bootstrap.fingerprint });
     const pathEnvironment = [posix.join(node.root, "bin"), uv.root, posix.join(paths.workspace, ".tools"), "/usr/local/bin", "/usr/bin", "/bin"].join(":");
@@ -435,5 +446,10 @@ export class NodeProfileServices implements ProfileExecutionServices {
 
   async recordRemoteChildStarted(): Promise<void> {
     await this.options.recordRemoteChildStarted?.();
+  }
+
+  reportUnavailable(reason: string): void {
+    const line = new TextEncoder().encode(`remote-runner: remote unavailable reason=${reason}\n`);
+    (this.options.stderr ?? ((chunk) => { process.stderr.write(chunk); }))(line);
   }
 }

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import process from "node:process";
 
 import { ensureController, type ControllerRuntime, type ControllerStatus } from "../controller/controller.js";
+import { mutagenSshEnvironment } from "./managed-ssh.js";
 import { NodeProcessRuntime } from "./process.js";
 
 const LABEL = "com.lipchey.remote-runner";
@@ -59,9 +60,14 @@ export async function ensureNodeController(home: string): Promise<void> {
   await ensureController(new NodeControllerRuntime(home));
 }
 
-export async function runController(mutagenCommand: string): Promise<number> {
+export async function runController(mutagenCommand: string, managedSshPath: string): Promise<number> {
   const processes = new NodeProcessRuntime();
-  const result = await processes.run({ command: mutagenCommand, args: ["daemon", "start"], maxOutputBytes: 64 * 1024 });
+  const result = await processes.run({
+    command: mutagenCommand,
+    args: ["daemon", "start"],
+    environment: mutagenSshEnvironment(managedSshPath),
+    maxOutputBytes: 64 * 1024,
+  });
   if (result.exitCode !== 0) return 70;
   await new Promise<void>((resolve) => {
     process.once("SIGTERM", resolve);

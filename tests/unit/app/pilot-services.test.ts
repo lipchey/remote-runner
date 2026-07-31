@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { parseProbeOutput, remoteChildArguments, resolveRemotePaths } from "../../../src/app/pilot-services.js";
+import {
+  listLocalGitlinks,
+  parseProbeOutput,
+  remoteChildArguments,
+  resolveRemotePaths,
+} from "../../../src/app/pilot-services.js";
 import { loadManifestText } from "../../../src/config/load-manifest.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
@@ -41,5 +46,25 @@ describe("pilot service boundaries", () => {
     expect(serialized).toContain("REMOTE_RUNNER_CHILD");
     expect(serialized).not.toContain("secret-canary");
     expect(serialized).not.toContain("postgres://");
+  });
+
+  it("bounds a large local index separately while retaining only gitlinks", async () => {
+    const regular = `100644 ${"a".repeat(40)} 0\tfile\n`.repeat(1_200);
+    const gitlink = `160000 ${"b".repeat(40)} 0\tpackages/submodule\n`;
+    const requests: Array<{ readonly maxOutputBytes: number }> = [];
+    const result = await listLocalGitlinks({
+      async run(request) {
+        requests.push(request);
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode(regular + gitlink),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+        };
+      },
+    }, "/worktree");
+
+    expect(requests.map(({ maxOutputBytes }) => maxOutputBytes)).toEqual([4 * 1024 * 1024]);
+    expect(result).toEqual([{ oid: "b".repeat(40), path: "packages/submodule" }]);
   });
 });

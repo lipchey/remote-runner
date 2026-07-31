@@ -12,6 +12,17 @@ remote-runner doctor <profile>
 remote-runner logs <profile>
 ```
 
+One-time installation or an idempotent upgrade is:
+
+```sh
+remote-runner install
+```
+
+The installer writes an immutable self-contained application below
+`~/.local/share/remote-runner/app`, the stable `~/.local/bin/remote-runner` executable, and
+`~/Library/LaunchAgents/com.lipchey.remote-runner.plist`. It uses the current absolute Node runtime,
+requires no sudo, and starts or repairs the LaunchAgent.
+
 ## Stable reason-code index
 
 | Reason | Read-only diagnosis |
@@ -50,7 +61,10 @@ after that independent comparison.
 
 For `sync`, inspect `mutagen sync list <session>` and `remote-runner status <profile>`. A missing or
 paused owned session is repaired by the confined repair flow below; do not create an ad-hoc
-bidirectional session.
+bidirectional session. Mutagen SSH is isolated from `~/.ssh/known_hosts`: managed `ssh`/`scp`
+wrappers live under `~/.local/share/remote-runner/ssh`, enforce strict checking, and use only
+`~/.local/state/remote-runner/known_hosts/managed`. The controller exports `MUTAGEN_SSH_PATH` before
+starting the daemon. Do not bypass these wrappers to accept a prompt interactively.
 
 ## Workspace
 
@@ -85,7 +99,9 @@ runner state without requiring a Linux resident daemon.
 ## Controller crash
 
 Inspect `launchctl print gui/<uid>/com.lipchey.remote-runner`. Every `run` also performs bounded
-self-healing, so a stopped controller cannot silently disable session reconciliation or alerts.
+self-healing, so a stopped controller cannot silently disable session reconciliation or alerts. A
+healthy login service reports `state = running`; repair it idempotently with `remote-runner install`
+if it is missing or stopped.
 
 ## Corrupt state
 
