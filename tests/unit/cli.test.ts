@@ -147,4 +147,67 @@ describe("runCli", () => {
     expect(await runCli(["run", "verify-full", "--mode", "invalid", "--", "x"], { stdout: () => undefined, stderr: (line) => errors.push(line) }, dependencies)).toBe(2);
     expect(errors).toHaveLength(2);
   });
+
+  it("routes status, doctor, and bounded logs through injected read-only dependencies", async () => {
+    const stdout: string[] = [];
+    const calls: string[] = [];
+    const io = { stdout: (line: string) => stdout.push(line), stderr: () => undefined };
+    const dependencies = {
+      readFile: async () => validManifest,
+      statusProfile: async (profile?: string) => {
+        calls.push(`status:${profile ?? "all"}`);
+        return "verify-full controller=running session=watching workspace=ready fingerprint=current outage=clear";
+      },
+      doctorProfile: async (profile?: string) => {
+        calls.push(`doctor:${profile ?? "all"}`);
+        return { checks: [{ id: "ssh.transport", status: "ok", next: "remote-runner doctor" }] };
+      },
+      logsProfile: async (profile?: string) => {
+        calls.push(`logs:${profile ?? "all"}`);
+        return ["line-1", "line-2"];
+      },
+    };
+
+    expect(await runCli(["status", "verify-full"], io, dependencies)).toBe(0);
+    expect(await runCli(["doctor"], io, dependencies)).toBe(0);
+    expect(await runCli(["logs", "verify-full"], io, dependencies)).toBe(0);
+    expect(calls).toEqual(["status:verify-full", "doctor:all", "logs:verify-full"]);
+    expect(stdout).toEqual([
+      "verify-full controller=running session=watching workspace=ready fingerprint=current outage=clear",
+      '{"checks":[{"id":"ssh.transport","status":"ok","next":"remote-runner doctor"}]}',
+      "line-1",
+      "line-2",
+    ]);
+  });
+
+  it("requires an exact dry-run before routing repair apply", async () => {
+    const calls: string[] = [];
+    const errors: string[] = [];
+    const dependencies = {
+      readFile: async () => validManifest,
+      repairProfile: async (profile: string, apply: boolean) => {
+        calls.push(`${profile}:${apply ? "apply" : "dry-run"}`);
+        return { profile, identity: "worktree-abc123", planHash: "abc", actions: [] };
+      },
+    };
+    const io = {
+      stdout: (line: string) => calls.push(`output:${line}`),
+      stderr: (line: string) => errors.push(line),
+    };
+
+    expect(await runCli(["repair", "verify-full", "--dry-run"], io, dependencies)).toBe(0);
+    expect(await runCli(["repair", "verify-full", "--apply"], io, dependencies)).toBe(0);
+    expect(await runCli(["repair", "verify-full"], io, dependencies)).toBe(2);
+    expect(await runCli(["repair", "verify-full", "--apply", "extra"], io, dependencies)).toBe(2);
+    expect(calls.slice(0, 4)).toEqual([
+      "verify-full:dry-run",
+      expect.stringContaining('output:{"profile":"verify-full"'),
+      "verify-full:apply",
+      expect.stringContaining('output:{"profile":"verify-full"'),
+    ]);
+    expect(errors).toEqual([
+      "repair requires <profile> --dry-run|--apply",
+      "repair requires <profile> --dry-run|--apply",
+    ]);
+  });
 });

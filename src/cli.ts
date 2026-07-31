@@ -12,6 +12,10 @@ export interface CliDependencies {
   readFile(path: string): Promise<string | Uint8Array>;
   ensureController?(): Promise<void>;
   runProfile?(profile: Profile, command: readonly string[], mode?: RunMode): Promise<number>;
+  statusProfile?(profile?: string): Promise<string>;
+  doctorProfile?(profile?: string): Promise<unknown>;
+  logsProfile?(profile?: string): Promise<readonly string[]>;
+  repairProfile?(profile: string, apply: boolean): Promise<unknown>;
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
@@ -46,8 +50,75 @@ export async function runCli(
     return runSelectedProfile(argv.slice(1), io, dependencies);
   }
 
+  if (argv[0] === "status" || argv[0] === "doctor" || argv[0] === "logs") {
+    return runReadOnlyDiagnostic(argv[0], argv.slice(1), io, dependencies);
+  }
+
+  if (argv[0] === "repair") {
+    return runRepair(argv.slice(1), io, dependencies);
+  }
+
   io.stderr(`unknown command: ${argv[0]}`);
   return 2;
+}
+
+async function runReadOnlyDiagnostic(
+  command: "status" | "doctor" | "logs",
+  argv: readonly string[],
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<number> {
+  if (argv.length > 1 || argv[0]?.startsWith("-")) {
+    io.stderr(`${command} accepts at most one profile`);
+    return 2;
+  }
+  const profile = argv[0];
+  try {
+    if (command === "status" && dependencies.statusProfile !== undefined) {
+      io.stdout(await dependencies.statusProfile(profile));
+      return 0;
+    }
+    if (command === "doctor" && dependencies.doctorProfile !== undefined) {
+      io.stdout(JSON.stringify(await dependencies.doctorProfile(profile)));
+      return 0;
+    }
+    if (command === "logs" && dependencies.logsProfile !== undefined) {
+      for (const line of await dependencies.logsProfile(profile)) io.stdout(line);
+      return 0;
+    }
+  } catch {
+    io.stderr(`remote-runner ${command} failed`);
+    return 70;
+  }
+  io.stderr(`remote-runner ${command} runtime is not configured`);
+  return 70;
+}
+
+async function runRepair(
+  argv: readonly string[],
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const profile = argv[0];
+  const mode = argv[1];
+  if (
+    argv.length !== 2 || profile === undefined || profile.startsWith("-") ||
+    (mode !== "--dry-run" && mode !== "--apply")
+  ) {
+    io.stderr("repair requires <profile> --dry-run|--apply");
+    return 2;
+  }
+  if (dependencies.repairProfile === undefined) {
+    io.stderr("remote-runner repair runtime is not configured");
+    return 70;
+  }
+  try {
+    io.stdout(JSON.stringify(await dependencies.repairProfile(profile, mode === "--apply")));
+    return 0;
+  } catch {
+    io.stderr("remote-runner repair failed");
+    return 70;
+  }
 }
 
 async function readManifest(path: string, dependencies: CliDependencies) {
