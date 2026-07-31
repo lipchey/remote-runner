@@ -110,6 +110,7 @@ describe("runCli", () => {
       { stdout: () => undefined, stderr: () => undefined },
       {
         readFile: async (path) => { calls.push(["read", path]); return validManifest; },
+        ensureController: async () => { calls.push(["controller"]); },
         runProfile: async (profile, command, mode) => {
           calls.push(["run", profile.id, command, mode]);
           return 29;
@@ -119,8 +120,24 @@ describe("runCli", () => {
     expect(code).toBe(29);
     expect(calls).toEqual([
       ["read", "profile.yaml"],
+      ["controller"],
       ["run", "verify-full", ["./scripts/verify", "--full"], "local"],
     ]);
+  });
+
+  it("repairs the controller before every selected run and fails closed when repair fails", async () => {
+    const calls: string[] = [];
+    const code = await runCli(
+      ["run", "verify-full", "--", "./verify"],
+      { stdout: () => undefined, stderr: (line) => calls.push(`error:${line}`) },
+      {
+        readFile: async () => validManifest,
+        ensureController: async () => { calls.push("controller"); throw new Error("stopped"); },
+        runProfile: async () => { calls.push("run"); return 0; },
+      },
+    );
+    expect(code).toBe(70);
+    expect(calls).toEqual(["controller", "error:remote-runner controller repair failed"]);
   });
 
   it("rejects malformed run syntax before reading the manifest", async () => {

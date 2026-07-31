@@ -10,6 +10,7 @@ export interface CliIo {
 
 export interface CliDependencies {
   readFile(path: string): Promise<string | Uint8Array>;
+  ensureController?(): Promise<void>;
   runProfile?(profile: Profile, command: readonly string[], mode?: RunMode): Promise<number>;
 }
 
@@ -108,8 +109,12 @@ async function runSelectedProfile(
     io.stderr(`profile not found: ${profileId}`);
     return 2;
   }
-  if (dependencies.runProfile === undefined) {
+  if (dependencies.runProfile === undefined || dependencies.ensureController === undefined) {
     io.stderr("remote-runner execution runtime is not configured");
+    return 70;
+  }
+  try { await dependencies.ensureController(); } catch {
+    io.stderr("remote-runner controller repair failed");
     return 70;
   }
   try { return await dependencies.runProfile(profile, command, mode); } catch {
