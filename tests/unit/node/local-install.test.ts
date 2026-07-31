@@ -19,9 +19,18 @@ class FakeLaunch implements LocalLaunchRuntime {
   readonly actions: string[] = [];
   loaded = false;
   running = false;
+  bootstrapFailures = 0;
   async status() { return { loaded: this.loaded, running: this.running }; }
   async bootout() { this.actions.push("bootout"); this.loaded = false; this.running = false; }
-  async bootstrap(_plist: string) { this.actions.push("bootstrap"); this.loaded = true; this.running = true; }
+  async bootstrap(_plist: string) {
+    this.actions.push("bootstrap");
+    if (this.bootstrapFailures > 0) {
+      this.bootstrapFailures -= 1;
+      throw new Error("launchd is still settling");
+    }
+    this.loaded = true;
+    this.running = true;
+  }
   async kickstart() { this.actions.push("kickstart"); this.running = true; }
 }
 
@@ -76,5 +85,24 @@ describe("self-contained local macOS install", () => {
       nodePath: "/usr/bin/node",
       launch: new FakeLaunch(),
     })).rejects.toThrow(/foreign/u);
+  });
+
+  it("retries bootstrap after an upgrade bootout while launchd settles", async () => {
+    const sourceRoot = await sourceFixture();
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-install-upgrade-"));
+    roots.push(home);
+    const launch = new FakeLaunch();
+    launch.loaded = true;
+    launch.running = true;
+    launch.bootstrapFailures = 1;
+
+    await expect(installLocalApplication({
+      home,
+      sourceRoot,
+      nodePath: "/usr/bin/node",
+      launch,
+      settleLaunchd: async () => undefined,
+    })).resolves.toBeDefined();
+    expect(launch.actions).toEqual(["bootout", "bootstrap", "bootstrap"]);
   });
 });

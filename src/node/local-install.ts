@@ -32,6 +32,24 @@ export interface LocalInstallOptions {
   readonly sourceRoot: string;
   readonly nodePath: string;
   readonly launch: LocalLaunchRuntime;
+  readonly settleLaunchd?: () => Promise<void>;
+}
+
+async function bootstrapLaunchAgent(
+  launch: LocalLaunchRuntime,
+  plistPath: string,
+  settle: () => Promise<void>,
+): Promise<void> {
+  const attempts = 20;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await launch.bootstrap(plistPath);
+      return;
+    } catch (error) {
+      if (attempt === attempts) throw error;
+      await settle();
+    }
+  }
 }
 
 export interface LocalInstallResult {
@@ -204,11 +222,13 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
     atomicOwnedFile(plistPath, launchPlist, 0o600, (value) => value.includes(`<string>${LABEL}</string>`)),
     options.launch.status(),
   ]);
+  const settleLaunchd = options.settleLaunchd ??
+    (() => new Promise<void>((resolve) => setTimeout(resolve, 100)));
   if (launch.loaded && (executableChanged || plistChanged)) {
     await options.launch.bootout();
-    await options.launch.bootstrap(plistPath);
+    await bootstrapLaunchAgent(options.launch, plistPath, settleLaunchd);
   } else if (!launch.loaded) {
-    await options.launch.bootstrap(plistPath);
+    await bootstrapLaunchAgent(options.launch, plistPath, settleLaunchd);
   } else if (!launch.running) {
     await options.launch.kickstart();
   }
