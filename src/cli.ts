@@ -16,6 +16,7 @@ export interface CliDependencies {
   doctorProfile?(profile?: string): Promise<unknown>;
   logsProfile?(profile?: string): Promise<readonly string[]>;
   repairProfile?(profile: string, apply: boolean): Promise<unknown>;
+  benchmarkProfile?(profile: Profile): Promise<unknown>;
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
@@ -58,8 +59,52 @@ export async function runCli(
     return runRepair(argv.slice(1), io, dependencies);
   }
 
+  if (argv[0] === "benchmark") {
+    return runBenchmarkCommand(argv.slice(1), io, dependencies);
+  }
+
   io.stderr(`unknown command: ${argv[0]}`);
   return 2;
+}
+
+async function runBenchmarkCommand(
+  argv: readonly string[],
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const profileId = argv[0];
+  let manifestPath = ".remote-runner.yaml";
+  if (
+    profileId === undefined || profileId.startsWith("-") ||
+    (argv.length !== 1 && argv.length !== 3) ||
+    (argv.length === 3 && (argv[1] !== "--manifest" || argv[2]?.startsWith("--")))
+  ) {
+    io.stderr("benchmark requires <profile> [--manifest <path>]");
+    return 2;
+  }
+  if (argv[2] !== undefined) manifestPath = argv[2];
+  let manifest;
+  try { manifest = await readManifest(manifestPath, dependencies); } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    io.stderr(`invalid manifest: ${message}`);
+    return 2;
+  }
+  const profile = manifest.profiles.find((candidate) => candidate.id === profileId);
+  if (profile === undefined) {
+    io.stderr(`profile not found: ${profileId}`);
+    return 2;
+  }
+  if (dependencies.benchmarkProfile === undefined) {
+    io.stderr("remote-runner benchmark runtime is not configured");
+    return 70;
+  }
+  try {
+    io.stdout(JSON.stringify(await dependencies.benchmarkProfile(profile)));
+    return 0;
+  } catch {
+    io.stderr("remote-runner benchmark failed");
+    return 70;
+  }
 }
 
 async function runReadOnlyDiagnostic(

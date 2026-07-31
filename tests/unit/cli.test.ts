@@ -210,4 +210,26 @@ describe("runCli", () => {
       "repair requires <profile> --dry-run|--apply",
     ]);
   });
+
+  it("loads a validated profile before routing benchmark collection", async () => {
+    const calls: unknown[] = [];
+    const stdout: string[] = [];
+    const code = await runCli(
+      ["benchmark", "verify-full", "--manifest", "profile.yaml"],
+      { stdout: (line) => stdout.push(line), stderr: () => undefined },
+      {
+        readFile: async (path) => { calls.push(["read", path]); return validManifest; },
+        benchmarkProfile: async (profile) => {
+          calls.push(["benchmark", profile.id, profile.benchmark.samples]);
+          return { profile: profile.id, rows: [], receiptPaths: ["one.json", "one.md"] };
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([["read", "profile.yaml"], ["benchmark", "verify-full", 3]]);
+    expect(stdout).toEqual([
+      '{"profile":"verify-full","rows":[],"receiptPaths":["one.json","one.md"]}',
+    ]);
+  });
 });
