@@ -60,6 +60,20 @@ export async function ensureNodeController(home: string): Promise<void> {
   await ensureController(new NodeControllerRuntime(home));
 }
 
+export function waitForControllerSignal(): Promise<void> {
+  return new Promise((resolve) => {
+    const keepAlive = setInterval(() => undefined, 60_000);
+    const finish = () => {
+      clearInterval(keepAlive);
+      process.removeListener("SIGTERM", finish);
+      process.removeListener("SIGINT", finish);
+      resolve();
+    };
+    process.once("SIGTERM", finish);
+    process.once("SIGINT", finish);
+  });
+}
+
 export async function runController(mutagenCommand: string, managedSshPath: string): Promise<number> {
   const processes = new NodeProcessRuntime();
   const result = await processes.run({
@@ -69,9 +83,6 @@ export async function runController(mutagenCommand: string, managedSshPath: stri
     maxOutputBytes: 64 * 1024,
   });
   if (result.exitCode !== 0) return 70;
-  await new Promise<void>((resolve) => {
-    process.once("SIGTERM", resolve);
-    process.once("SIGINT", resolve);
-  });
+  await waitForControllerSignal();
   return 0;
 }
