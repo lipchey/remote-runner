@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { runCli } from "../../src/cli.js";
+import { validManifest } from "./config/manifest-fixture.js";
 
 describe("runCli", () => {
   it("prints stable top-level commands without touching the system", async () => {
@@ -29,5 +30,76 @@ describe("runCli", () => {
 
     expect(code).toBe(2);
     expect(stderr).toEqual(["unknown command: unknown"]);
+  });
+
+  it("validates the default manifest through only the injected reader", async () => {
+    const stdout: string[] = [];
+    const reads: string[] = [];
+    const code = await runCli(
+      ["validate"],
+      {
+        stdout: (line) => stdout.push(line),
+        stderr: () => undefined,
+      },
+      {
+        readFile: async (path) => {
+          reads.push(path);
+          return validManifest;
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(reads).toEqual([".remote-runner.yaml"]);
+    expect(stdout).toEqual(["valid manifest: .remote-runner.yaml (1 profile)"]);
+  });
+
+  it("validates a selected profile from an explicit manifest without runtime side effects", async () => {
+    const calls: string[] = [];
+    const dependencies = {
+      readFile: async (path: string) => {
+        calls.push(`read:${path}`);
+        return validManifest;
+      },
+      probe: () => calls.push("probe"),
+      sync: () => calls.push("sync"),
+      bootstrap: () => calls.push("bootstrap"),
+      notify: () => calls.push("notify"),
+      mutateState: () => calls.push("state"),
+    };
+    const stdout: string[] = [];
+    const code = await runCli(
+      ["validate", "verify-full", "--manifest", "fixtures/profile.yaml"],
+      { stdout: (line) => stdout.push(line), stderr: () => undefined },
+      dependencies,
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toEqual(["read:fixtures/profile.yaml"]);
+    expect(stdout).toEqual([
+      "valid profile: verify-full (fixtures/profile.yaml)",
+    ]);
+  });
+
+  it("reports invalid manifests, missing profiles, and invalid validate arguments stably", async () => {
+    const errors: string[] = [];
+    const io = {
+      stdout: () => undefined,
+      stderr: (line: string) => errors.push(line),
+    };
+    const reader = { readFile: async () => validManifest };
+
+    expect(await runCli(["validate", "missing"], io, reader)).toBe(2);
+    expect(await runCli(["validate", "--manifest"], io, reader)).toBe(2);
+    expect(
+      await runCli(["validate"], io, {
+        readFile: async () => "schemaVersion: 2\nprofiles: []\n",
+      }),
+    ).toBe(2);
+    expect(errors).toEqual([
+      "profile not found: missing",
+      "validate requires a path after --manifest",
+      "invalid manifest: schemaVersion must be 1",
+    ]);
   });
 });
