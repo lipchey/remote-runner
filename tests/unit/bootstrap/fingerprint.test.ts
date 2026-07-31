@@ -46,6 +46,17 @@ describe("dependency fingerprint", () => {
     for (const variant of variants) expect(await variant).not.toBe(expected);
   });
 
+  it("accepts an explicitly declared gitlink path without reading it as a file", async () => {
+    const runtime = new FakeRuntime({ "package.json": "same" }, [
+      { path: "vendor/dev-standards", oid: "a".repeat(40) },
+    ]);
+
+    await expect(dependencyFingerprint(runtime, {
+      environment,
+      files: ["package.json", "vendor/dev-standards"],
+    })).resolves.toMatch(/^sha256:fixture:/u);
+  });
+
   it("rejects duplicate/unsafe file paths and malformed gitlinks", async () => {
     await expect(dependencyFingerprint(new FakeRuntime({ "package.json": "x" }, []), {
       environment, files: ["package.json", "package.json"],

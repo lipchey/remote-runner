@@ -72,6 +72,7 @@ export async function dependencyFingerprint(runtime: FingerprintRuntime, input: 
   }
   const parts: Uint8Array[] = [field(JSON.stringify(environmentRecord(input.environment)), "environment")];
   for (const path of [...input.files].sort()) {
+    if (seenGitlinks.has(path)) continue;
     const contents = await runtime.readFile(path);
     parts.push(field("file", "record kind"), field(path, "file path"), field(String(contents.byteLength), "file length"), contents);
   }
