@@ -14,6 +14,11 @@ export type PreparationReason =
   | "validation"
   | "lock"
   | "transport"
+  | "dns"
+  | "host-key"
+  | "authentication"
+  | "remote-shell"
+  | "capacity"
   | "sync"
   | "workspace"
   | "bootstrap"
@@ -23,6 +28,17 @@ export class RetryablePreparationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "RetryablePreparationError";
+  }
+}
+
+export class PreparationError extends Error {
+  constructor(
+    readonly reason: PreparationReason,
+    readonly retryable: boolean,
+    options?: ErrorOptions,
+  ) {
+    super(`remote preparation failed: ${reason}`, options);
+    this.name = "PreparationError";
   }
 }
 
@@ -90,8 +106,10 @@ export async function prepareRemote(runtime: PreparationRuntime): Promise<Prepar
     }
     return {
       ok: false,
-      reason: reasonFor(step),
-      retryable: caught instanceof RetryablePreparationError,
+      reason: caught instanceof PreparationError ? caught.reason : reasonFor(step),
+      retryable: caught instanceof PreparationError
+        ? caught.retryable
+        : caught instanceof RetryablePreparationError,
     };
   }
 }

@@ -1,0 +1,46 @@
+import { isNotificationReason } from "../notifications/outage.js";
+import { prepareRemote, type PreparationRuntime } from "../run/prepare.js";
+import type { RemoteExecutionResult, RunProfileRuntime } from "../run/run-profile.js";
+
+export interface ProfileExecutionServices extends PreparationRuntime {
+  startRemote(
+    command: readonly string[],
+    secrets: Readonly<Record<string, string>>,
+    onChildStarted: () => Promise<void>,
+  ): Promise<RemoteExecutionResult>;
+  runLocal(command: readonly string[]): Promise<number>;
+  recordFallback(reason: string): Promise<void>;
+  recordRemoteChildStarted(): Promise<void>;
+}
+
+function stableReason(reason: string): string {
+  return isNotificationReason(reason) ? reason : "unknown";
+}
+
+export function createProfileRuntime(services: ProfileExecutionServices): RunProfileRuntime {
+  let pendingFallbackReason: string | undefined;
+  return {
+    async prepareRemote() {
+      const result = await prepareRemote(services);
+      pendingFallbackReason = result.ok ? undefined : stableReason(result.reason);
+      return result;
+    },
+    async startRemote(command, secrets, onChildStarted) {
+      const result = await services.startRemote(command, secrets, async () => {
+        await onChildStarted();
+        pendingFallbackReason = undefined;
+        try { await services.recordRemoteChildStarted(); } catch { /* notification never blocks workload */ }
+      });
+      if (result.kind === "not-started") pendingFallbackReason = "child-start";
+      return result;
+    },
+    async runLocal(command) {
+      const reason = pendingFallbackReason;
+      pendingFallbackReason = undefined;
+      if (reason !== undefined) {
+        try { await services.recordFallback(reason); } catch { /* notification never blocks fallback */ }
+      }
+      return services.runLocal(command);
+    },
+  };
+}

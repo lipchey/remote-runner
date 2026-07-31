@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   PREPARATION_STEPS,
+  PreparationError,
   RetryablePreparationError,
   prepareRemote,
   type PreparationRuntime,
@@ -67,5 +68,26 @@ describe("remote preparation", () => {
     const result = await prepareRemote(runtime);
     expect(result).toEqual({ ok: false, reason, retryable });
     expect(runtime.calls.includes("release")).toBe(runtime.calls.includes("lock") && step !== "lock");
+  });
+
+  it("preserves an explicit stable capacity reason from the probe boundary", async () => {
+    const runtime = new FakePreparation();
+    runtime.probe = async () => {
+      runtime.calls.push("probe");
+      throw new PreparationError("capacity", false);
+    };
+
+    expect(await prepareRemote(runtime)).toEqual({ ok: false, reason: "capacity", retryable: false });
+    expect(runtime.calls).toEqual(["validate", "lock", "probe", "release"]);
+  });
+
+  it("preserves an explicit stable SSH authentication reason", async () => {
+    const runtime = new FakePreparation();
+    runtime.probe = async () => { throw new PreparationError("authentication", false); };
+    expect(await prepareRemote(runtime)).toEqual({
+      ok: false,
+      reason: "authentication",
+      retryable: false,
+    });
   });
 });
