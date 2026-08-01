@@ -145,27 +145,54 @@ describe("runCli", () => {
     expect(calls).toEqual([["verify-full", ["./scripts/verify", "--full"], "remote"]]);
   });
 
-  it("prewarms remotely and converts every preparation or workload failure to a visible success", async () => {
+  it("queues prewarm without entering the attached profile execution path", async () => {
     const calls: unknown[] = [];
     const errors: string[] = [];
+    const output: string[] = [];
     const code = await runCli(
       ["prewarm", "verify-full"],
-      { stdout: () => undefined, stderr: (line) => errors.push(line) },
+      { stdout: (line) => output.push(line), stderr: (line) => errors.push(line) },
       {
-        readFile: async () => validManifest,
+        readFile: async (path) => {
+          calls.push(["read", path]);
+          return validManifest;
+        },
         environment: { REMOTE_RUNNER_MODE: "local" },
-        ensureController: async () => undefined,
-        runProfile: async (profile, command, mode) => {
-          calls.push([profile.id, command, mode]);
-          return 23;
+        enqueuePrewarm: async (profile, manifestPath) => {
+          calls.push(["enqueue", profile.id, manifestPath]);
+          return "published";
+        },
+        runProfile: async () => {
+          throw new Error("prewarm must not run an attached profile");
         },
       },
     );
 
     expect(code).toBe(0);
-    expect(calls).toEqual([["verify-full", ["./scripts/verify", "--full"], "remote"]]);
+    expect(calls).toEqual([
+      ["read", ".remote-runner.yaml"],
+      ["enqueue", "verify-full", ".remote-runner.yaml"],
+    ]);
+    expect(output).toEqual(["prewarm queued: verify-full"]);
+    expect(errors).toEqual([]);
+  });
+
+  it("keeps enqueue failures visible and fail-soft", async () => {
+    const errors: string[] = [];
+    const code = await runCli(
+      ["prewarm", "verify-full", "--manifest", "profile.yaml"],
+      { stdout: () => undefined, stderr: (line) => errors.push(line) },
+      {
+        readFile: async () => validManifest,
+        enqueuePrewarm: async () => {
+          throw new Error("controller unavailable");
+        },
+      },
+    );
+
+    expect(code).toBe(0);
     expect(errors).toEqual([
-      "remote-runner prewarm failed (exit 23); worktree preserved and the first manual verify will retry",
+      "remote-runner prewarm failed; worktree preserved and the first manual verify will retry",
     ]);
   });
 
@@ -225,7 +252,7 @@ describe("runCli", () => {
       readFile: async () => validManifest,
       statusProfile: async (profile?: string) => {
         calls.push(`status:${profile ?? "all"}`);
-        return "verify-full controller=running session=watching workspace=ready fingerprint=current outage=clear";
+        return "verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear";
       },
       doctorProfile: async (profile?: string) => {
         calls.push(`doctor:${profile ?? "all"}`);
@@ -242,7 +269,7 @@ describe("runCli", () => {
     expect(await runCli(["logs", "verify-full"], io, dependencies)).toBe(0);
     expect(calls).toEqual(["status:verify-full", "doctor:all", "logs:verify-full"]);
     expect(stdout).toEqual([
-      "verify-full controller=running session=watching workspace=ready fingerprint=current outage=clear",
+      "verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear",
       '{"checks":[{"id":"ssh.transport","status":"ok","next":"remote-runner doctor"}]}',
       "line-1",
       "line-2",

@@ -21,6 +21,7 @@ import {
 import { NodeProcessRuntime } from "../node/process.js";
 import { worktreeIdentity } from "../runtime/identity.js";
 import { createJsonlLogger } from "../runtime/log.js";
+import { inspectPrewarmRequest, publishPrewarmRequest } from "../prewarm/queue.js";
 import { runProfile } from "../run/run-profile.js";
 import { runSsh, type SshProcessRuntime } from "../ssh/client.js";
 import { mutagenSessionName } from "../sync/mutagen.js";
@@ -353,6 +354,31 @@ export async function createNodeCliDependencies(
     readFile: async (path) => readFile(path),
     ensureController: () => ensureNodeController(home),
     runProfile: (profile, command, mode) => executeProfile(profile, command, mode ?? profile.mode),
+    async enqueuePrewarm(profile, manifestPath) {
+      await ensureNodeController(home);
+      const controller = await new NodeControllerRuntime(home, processes).inspect();
+      if (!controller.loaded || !controller.running || !controller.compatible) {
+        throw new Error("remote-runner controller is unavailable for prewarm");
+      }
+      const absoluteManifest = await realpath(resolve(sourceRoot, manifestPath));
+      const fromSource = relative(sourceRoot, absoluteManifest);
+      if (
+        fromSource === "" ||
+        fromSource === ".." ||
+        fromSource.startsWith(`..${sep}`) ||
+        isAbsolute(fromSource)
+      ) {
+        throw new Error("prewarm manifest escapes the source root");
+      }
+      return publishPrewarmRequest(home, {
+        schemaVersion: 1,
+        consumer: profile.consumer,
+        profile: profile.id,
+        identity,
+        sourceRoot,
+        manifestPath: absoluteManifest,
+      });
+    },
     async statusProfile(profileId) {
       const profiles = selectedProfiles(await loadManifest(), profileId);
       const controllerState = await new NodeControllerRuntime(home, processes).inspect();
@@ -369,7 +395,12 @@ export async function createNodeCliDependencies(
         const session = sessionResult.exitCode === 0 ? sessionStatus(sessionResult.stdout, expectedSession) : "unknown";
         const remote = await inspectRemoteStatus(processes, profile, identity, diagnosticSsh.knownHostsPath);
         const outage = await inspectOutage(join(profileRoot(home, profile, identity), "outage.json"));
-        lines.push(formatStatus({ profile: profile.id, controller, session, ...remote, outage }));
+        const prewarm = await inspectPrewarmRequest(home, {
+          consumer: profile.consumer,
+          profile: profile.id,
+          identity,
+        });
+        lines.push(formatStatus({ profile: profile.id, controller, prewarm, session, ...remote, outage }));
       }
       return lines.join("\n");
     },

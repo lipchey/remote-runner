@@ -3,6 +3,7 @@ import { join } from "node:path";
 import process from "node:process";
 
 import { ensureController, type ControllerRuntime, type ControllerStatus } from "../controller/controller.js";
+import { consumeNextPrewarmRequest, type PrewarmRequest } from "../prewarm/queue.js";
 import { mutagenSshEnvironment } from "./managed-ssh.js";
 import { NodeProcessRuntime } from "./process.js";
 
@@ -60,21 +61,55 @@ export async function ensureNodeController(home: string): Promise<void> {
   await ensureController(new NodeControllerRuntime(home));
 }
 
-export function waitForControllerSignal(): Promise<void> {
-  return new Promise((resolve) => {
-    const keepAlive = setInterval(() => undefined, 60_000);
-    const finish = () => {
-      clearInterval(keepAlive);
-      process.removeListener("SIGTERM", finish);
-      process.removeListener("SIGINT", finish);
-      resolve();
-    };
-    process.once("SIGTERM", finish);
-    process.once("SIGINT", finish);
-  });
+export async function runControllerLoop(options: {
+  readonly runPass: () => Promise<void>;
+  readonly intervalMs?: number;
+}): Promise<void> {
+  const intervalMs = options.intervalMs ?? 1_000;
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) {
+    throw new Error("controller interval must be a positive safe integer");
+  }
+  let stopped = false;
+  let wake = (): void => undefined;
+  const stop = (): void => {
+    stopped = true;
+    wake();
+  };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+  try {
+    while (!stopped) {
+      try {
+        await options.runPass();
+      } catch {
+        // A malformed or transient request must not terminate the launchd controller.
+      }
+      if (stopped) break;
+      await new Promise<void>((resolveDelay) => {
+        const timer = setTimeout(() => {
+          wake = (): void => undefined;
+          resolveDelay();
+        }, intervalMs);
+        wake = () => {
+          clearTimeout(timer);
+          wake = (): void => undefined;
+          resolveDelay();
+        };
+      });
+    }
+  } finally {
+    wake();
+    process.removeListener("SIGTERM", stop);
+    process.removeListener("SIGINT", stop);
+  }
 }
 
-export async function runController(mutagenCommand: string, managedSshPath: string): Promise<number> {
+export async function runController(
+  mutagenCommand: string,
+  managedSshPath: string,
+  home: string,
+  runPrewarm: (request: PrewarmRequest) => Promise<number>,
+): Promise<number> {
   const processes = new NodeProcessRuntime();
   const result = await processes.run({
     command: mutagenCommand,
@@ -83,6 +118,10 @@ export async function runController(mutagenCommand: string, managedSshPath: stri
     maxOutputBytes: 64 * 1024,
   });
   if (result.exitCode !== 0) return 70;
-  await waitForControllerSignal();
+  await runControllerLoop({
+    runPass: async () => {
+      await consumeNextPrewarmRequest(home, runPrewarm);
+    },
+  });
   return 0;
 }

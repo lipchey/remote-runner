@@ -26,8 +26,13 @@ requires no sudo, and starts or repairs the LaunchAgent.
 Normal project integration needs only `remote-runner run <profile>` from the repository root. The
 runner loads the profile workload and `REMOTE_RUNNER_MODE=auto|local|remote` itself. A worktree hook
 may call `remote-runner prewarm <profile>`; failure is printed but intentionally returns success,
-and the first normal run retries preparation. Do not add project-local adapters for mode selection,
-dotenv parsing, fallback, notification, or prewarm policy.
+and the first normal run retries preparation. A successful call means the controller accepted a
+durable, coalesced request; it does not mean synchronization, setup, or the workload finished.
+`remote-runner status <profile>` reports `prewarm=queued` before claim, `prewarm=running` while the
+controller owns the request, and `prewarm=idle` after completion. The final status is recorded in
+`remote-runner logs <profile>`. Do not poll this state from a worktree-creation hook or add
+project-local adapters for mode selection, dotenv parsing, fallback, notification, or prewarm
+policy.
 
 ## Stable reason-code index
 
@@ -125,7 +130,9 @@ runner state without requiring a Linux resident daemon.
 Inspect `launchctl print gui/<uid>/com.lipchey.remote-runner`. Every `run` also performs bounded
 self-healing, so a stopped controller cannot silently disable session reconciliation or alerts. A
 healthy login service reports `state = running`; repair it idempotently with `remote-runner install`
-if it is missing or stopped.
+if it is missing or stopped. A prewarm request claimed before a controller restart remains in the
+owned `.running` state and is retried by the next controller pass; an equivalent new request
+coalesces instead of starting another workload.
 
 ## Corrupt state
 

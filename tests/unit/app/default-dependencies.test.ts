@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createNodeCliDependencies } from "../../../src/app/default-dependencies.js";
+import { inspectPrewarmRequest } from "../../../src/prewarm/queue.js";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../../src/ssh/client.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
@@ -54,6 +55,34 @@ class FakeProcesses {
 }
 
 describe("concrete Node CLI dependencies", () => {
+  it("publishes a canonical prewarm request only after confirming controller health", async () => {
+    const paths = await fixture();
+    const processes = new FakeProcesses();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: {
+        changed: false,
+        directory: paths.managedSshPath,
+        knownHostsPath: paths.knownHostsPath,
+      },
+      processes,
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.enqueuePrewarm?.(profile, ".remote-runner.yaml")).resolves.toBe(
+      "published",
+    );
+    await expect(
+      inspectPrewarmRequest(paths.home, {
+        consumer: profile.consumer,
+        profile: profile.id,
+        identity: dependencies.identity,
+      }),
+    ).resolves.toBe("queued");
+    expect(processes.requests.some(({ command }) => command === "launchctl")).toBe(true);
+  });
+
   it("loads cwd manifest profiles for status, doctor, and bounded owned logs", async () => {
     const paths = await fixture();
     const processes = new FakeProcesses();
@@ -68,9 +97,11 @@ describe("concrete Node CLI dependencies", () => {
     await mkdir(profileRoot, { recursive: true });
     await writeFile(join(profileRoot, "runner.log.1"), "older\n");
     await writeFile(join(profileRoot, "runner.log"), "current\n");
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+    await dependencies.enqueuePrewarm?.(profile, ".remote-runner.yaml");
 
     await expect(dependencies.statusProfile?.("verify-full")).resolves.toMatch(
-      /^verify-full controller=running session=watching workspace=ready fingerprint=current outage=clear$/u,
+      /^verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear$/u,
     );
     const report = await dependencies.doctorProfile?.("verify-full") as { checks: readonly unknown[] };
     expect(report.checks).toHaveLength(16);

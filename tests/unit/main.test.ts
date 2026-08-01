@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import { runMain } from "../../src/main.js";
 import { launcherAssetCandidates } from "../../src/app/default-dependencies.js";
+import type { PrewarmRequest } from "../../src/prewarm/queue.js";
+import { validManifest } from "./config/manifest-fixture.js";
 
 describe("executable entrypoint", () => {
   it("routes install before ordinary profile dependencies and reports the stable executable", async () => {
@@ -33,6 +35,51 @@ describe("executable entrypoint", () => {
 
     expect(code).toBe(2);
     expect(stdout).toEqual([]);
+  });
+
+  it("routes a controller request through the existing forced-remote run command", async () => {
+    const calls: unknown[] = [];
+    const request: PrewarmRequest = {
+      schemaVersion: 1,
+      consumer: "ariadne",
+      profile: "verify-full",
+      identity: "0123456789abcdef01234567",
+      sourceRoot: "/worktrees/ariadne-feature",
+      manifestPath: "/worktrees/ariadne-feature/.remote-runner.yaml",
+    };
+    const code = await runMain(
+      ["controller"],
+      { stdout: () => undefined, stderr: () => undefined },
+      undefined,
+      {
+        installLocal: async () => ({ executablePath: "/unused" }),
+        createCliDependencies: async (sourceRoot) => {
+          calls.push(["dependencies", sourceRoot]);
+          return {
+            readFile: async (path) => {
+              calls.push(["read", path]);
+              return validManifest;
+            },
+            ensureController: async () => {
+              calls.push(["controller-health"]);
+            },
+            runProfile: async (profile, command, mode) => {
+              calls.push(["run", profile.id, command, mode]);
+              return 23;
+            },
+          };
+        },
+        runController: async (runPrewarm) => runPrewarm(request),
+      },
+    );
+
+    expect(code).toBe(23);
+    expect(calls).toEqual([
+      ["dependencies", request.sourceRoot],
+      ["read", request.manifestPath],
+      ["controller-health"],
+      ["run", "verify-full", ["./scripts/verify", "--full"], "remote"],
+    ]);
   });
 
   it("publishes the executable bin from main rather than the inert CLI module", async () => {
