@@ -9,7 +9,8 @@
 **Tech Stack:** TypeScript, Node.js filesystem/process APIs, YAML, Vitest, Bash, pnpm 11, SSH, Mutagen, GitHub CLI.
 
 **Provider status:** Completed on 2026-08-01 by
-[remote-runner PR #7](https://github.com/lipchey/remote-runner/pull/7). The final provider gate passed 464/464
+[remote-runner PR #7](https://github.com/lipchey/remote-runner/pull/7), merged as `269400a` from head
+`e36c8f7`. The final provider gate passed 464/464
 tests across 43 files plus formatting, typecheck, and build. The installed immutable receipt is
 `remote-runner 0.1.0 (app 7a8c454469133bf4e4633bef)`; both the verified build bootstrap and the
 installed CLI's idempotent reinstall returned that identity.
@@ -19,8 +20,10 @@ installed CLI's idempotent reinstall returned that identity.
 `c91549f`. Targeted tests passed
 13/13 consumer-policy and 5/5 pnpm-state; the final remote-only full gate exited 0 on Pop!_OS.
 
-**Overall status:** In progress. Ariadne PR #211 was merged first; merge remote-runner PR #7 next so
-the published provider catches up with the already-installed build and the consumer contract.
+**Overall status:** Completed on 2026-08-01. Ariadne PR #211 was merged first, followed by
+remote-runner PR #7. Both `main` branches contain the accepted heads; Ariadne CI completed
+successfully, including the full verification gate. A post-merge canary launched from Ariadne
+`main` returned `pop-os`, and the latest runner log recorded `mode=remote,status=0`.
 
 ---
 
@@ -623,7 +626,7 @@ rtk gh pr create --base main --head codex/wedged-verify-full --title "Prevent we
 Expected: a non-draft PR URL. Open it in the browser, verify the returned URL, and poll CI with
 bounded `rtk gh` status calls until all required checks pass or a concrete failure is diagnosed.
 
-- [ ] **Step 4: Close the cross-repository lifecycle record**
+- [x] **Step 4: Close the cross-repository lifecycle record**
 
 In the remote-runner worktree, update this plan with both PR URLs and final acceptance evidence,
 set `Consumer status` and `Overall status` to `Completed`, commit the reconciliation, push the
@@ -635,9 +638,9 @@ Append a `Resolution` section to the external handoff using `apply_patch`. Recor
 URLs, immutable runner receipt, live self-heal result, remote full-verification result, merge order,
 and any still-active legacy workspace. Do not rewrite the original incident evidence.
 
-- [ ] **Step 6: Final reconciliation**
+- [x] **Step 6: Final reconciliation**
 
 Require both worktrees clean, both PR heads equal local heads, runner and Ariadne CI green, the
 installed receipt equal the runner provider build, Ariadne still `mode: remote` / `fallback: fail`,
-DataAI retention still at three identities, and no new local verify event after the acceptance
-timestamps.
+DataAI retention still configured as `keep: 3` / `graceMinutes: 60` with a live prepare removing
+the oldest eligible identity, and no new local verify event after the acceptance timestamps.
