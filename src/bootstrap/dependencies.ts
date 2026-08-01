@@ -19,12 +19,18 @@ export interface DependencySetupRuntime {
     workspaceRoot: string,
     environment: EnvironmentIdentity,
   ): Promise<{ readonly exitCode: number }>;
+  runEnsure(
+    command: readonly string[],
+    workspaceRoot: string,
+    environment: EnvironmentIdentity,
+  ): Promise<{ readonly exitCode: number }>;
   writeHealthyState(state: HealthySetupState): Promise<void>;
 }
 
 export interface DependencySetupInput extends HealthySetupState {
   readonly workspaceRoot: string;
   readonly setup: readonly string[];
+  readonly ensure: readonly (readonly string[])[];
 }
 
 export interface SetupResult extends HealthySetupState {
@@ -71,11 +77,51 @@ function validate(input: DependencySetupInput): void {
     throw new Error("workspace root must be a safe canonical absolute path");
   }
   for (const script of input.setup) if (!safeRelative(script)) throw new Error("setup script must be a safe relative path");
+  for (const command of input.ensure) {
+    if (
+      command.length === 0 || command[0] === undefined || command[0].length === 0 ||
+      command.some((argument) => typeof argument !== "string" || argument.includes("\0"))
+    ) {
+      throw new Error("ensure command must be a non-empty safe argument array");
+    }
+  }
   for (const [name, value] of Object.entries(input.environment)) {
     if (typeof value !== "string" || value.length === 0 || /[\u0000-\u001f\u007f]/u.test(value)) {
       throw new Error(`environment identity ${name} is invalid`);
     }
   }
+}
+
+async function runSetup(runtime: DependencySetupRuntime, input: DependencySetupInput): Promise<void> {
+  for (const script of input.setup) {
+    const result = await runtime.runSetup(script, input.workspaceRoot, input.environment);
+    if (!Number.isSafeInteger(result.exitCode) || result.exitCode !== 0) {
+      throw new Error(`dependency setup ${script} failed with exit code ${String(result.exitCode)}`);
+    }
+  }
+}
+
+async function runEnsure(
+  runtime: DependencySetupRuntime,
+  input: DependencySetupInput,
+  failClosed: boolean,
+): Promise<boolean> {
+  for (const command of input.ensure) {
+    let result: { readonly exitCode: number };
+    try {
+      result = await runtime.runEnsure(command, input.workspaceRoot, input.environment);
+    } catch (caught) {
+      if (failClosed) throw new Error(`dependency ensure ${command[0]} failed`, { cause: caught });
+      return false;
+    }
+    if (!Number.isSafeInteger(result.exitCode) || result.exitCode !== 0) {
+      if (failClosed) {
+        throw new Error(`dependency ensure ${command[0]} failed with exit code ${String(result.exitCode)}`);
+      }
+      return false;
+    }
+  }
+  return true;
 }
 
 export async function ensureDependencySetup(
@@ -85,14 +131,12 @@ export async function ensureDependencySetup(
   validate(input);
   const previous = await runtime.readHealthyState();
   if (previous?.fingerprint === input.fingerprint && sameEnvironment(previous.environment, input.environment)) {
-    return { fingerprint: input.fingerprint, environment: input.environment, setupRan: false };
-  }
-  for (const script of input.setup) {
-    const result = await runtime.runSetup(script, input.workspaceRoot, input.environment);
-    if (!Number.isSafeInteger(result.exitCode) || result.exitCode !== 0) {
-      throw new Error(`dependency setup ${script} failed with exit code ${String(result.exitCode)}`);
+    if (await runEnsure(runtime, input, false)) {
+      return { fingerprint: input.fingerprint, environment: input.environment, setupRan: false };
     }
   }
+  await runSetup(runtime, input);
+  await runEnsure(runtime, input, true);
   const healthy = { fingerprint: input.fingerprint, environment: input.environment };
   await runtime.writeHealthyState(healthy);
   return { ...healthy, setupRan: true };

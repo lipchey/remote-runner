@@ -116,6 +116,37 @@ function safePaths(value: unknown, label: string): string[] {
   return stringArray(value, label).map(assertSafeRepositoryPath);
 }
 
+function fingerprintPatterns(value: unknown): string[] {
+  return stringArray(value, "bootstrap fingerprint patterns").map((pattern) => {
+    if (
+      pattern.startsWith("/") ||
+      pattern.includes("\\") ||
+      pattern.includes(":") ||
+      /[\u0000-\u001f\u007f]/u.test(pattern) ||
+      pattern.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) {
+      throw new Error("bootstrap fingerprint pattern must be a safe relative glob");
+    }
+    return pattern;
+  });
+}
+
+function bootstrapFingerprint(value: unknown): { files: string[]; patterns: string[] } {
+  if (Array.isArray(value)) {
+    return { files: safePaths(value, "bootstrap fingerprint"), patterns: [] };
+  }
+  const source = closed(value, ["files", "patterns"], "bootstrap fingerprint");
+  return {
+    files: safePaths(source.files, "bootstrap fingerprint files"),
+    patterns: fingerprintPatterns(source.patterns),
+  };
+}
+
+function commandArrays(value: unknown, label: string): string[][] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array of argument arrays`);
+  return value.map((entry) => commandArray(entry, label));
+}
+
 function environment(value: unknown): Record<string, string> {
   const source = record(value, "workload childEnvironment");
   const result: Record<string, string> = {};
@@ -209,7 +240,7 @@ function parseProfile(value: unknown): Profile {
   const sync = closed(source.sync, ["provider", "mode", "ignores"], "sync");
   const bootstrap = closed(
     source.bootstrap,
-    ["node", "packageManager", "setup", "fingerprint"],
+    ["node", "packageManager", "setup", "ensure", "fingerprint"],
     "bootstrap",
   );
   const workload = closed(
@@ -291,7 +322,10 @@ function parseProfile(value: unknown): Profile {
         nonEmptyString(bootstrap.packageManager, "bootstrap packageManager"),
       ),
       setup: safePaths(bootstrap.setup, "bootstrap setup"),
-      fingerprint: safePaths(bootstrap.fingerprint, "bootstrap fingerprint"),
+      ensure: bootstrap.ensure === undefined
+        ? []
+        : commandArrays(bootstrap.ensure, "bootstrap ensure command"),
+      fingerprint: bootstrapFingerprint(bootstrap.fingerprint),
     },
     workload: {
       command: commandArray(workload.command, "workload command"),

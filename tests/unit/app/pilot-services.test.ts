@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  listLocalFingerprintFiles,
   listLocalGitlinks,
   parseProbeOutput,
   remoteChildArguments,
+  remoteWorkspaceCommandArguments,
   resolveRemotePaths,
 } from "../../../src/app/pilot-services.js";
 import { loadManifestText } from "../../../src/config/load-manifest.js";
@@ -50,6 +52,26 @@ describe("pilot service boundaries", () => {
     expect(serialized).not.toContain("postgres://");
   });
 
+  it("builds fixed workspace ensure argv without shell-interpolating the command", () => {
+    const command = ["node", "scripts/pnpm-state.mjs", "argument with spaces", ""];
+    const args = remoteWorkspaceCommandArguments(
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+      "/remote/node/bin:/remote/uv:/usr/bin:/bin",
+      command,
+    );
+
+    expect(args).toEqual([
+      "sh",
+      "-ceu",
+      'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; shift 2; exec "$@"',
+      "remote-runner-workspace-command",
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+      "/remote/node/bin:/remote/uv:/usr/bin:/bin",
+      ...command,
+    ]);
+    expect(args[2]).not.toContain("pnpm-state");
+  });
+
   it("bounds a large local index separately while retaining only gitlinks", async () => {
     const regular = `100644 ${"a".repeat(40)} 0\tfile\n`.repeat(1_200);
     const gitlink = `160000 ${"b".repeat(40)} 0\tpackages/submodule\n`;
@@ -68,5 +90,57 @@ describe("pilot service boundaries", () => {
 
     expect(requests.map(({ maxOutputBytes }) => maxOutputBytes)).toEqual([4 * 1024 * 1024]);
     expect(result).toEqual([{ oid: "b".repeat(40), path: "packages/submodule" }]);
+  });
+
+  it("discovers tracked and non-ignored untracked fingerprint files while subtracting deletions", async () => {
+    const requests: Array<{ readonly args?: readonly string[]; readonly maxOutputBytes: number }> = [];
+    const encoder = new TextEncoder();
+    const result = await listLocalFingerprintFiles({
+      async run(request) {
+        requests.push(request);
+        const deleted = request.args?.includes("--deleted") ?? false;
+        return {
+          exitCode: 0,
+          stdout: encoder.encode(deleted
+            ? "packages/removed/package.json\0"
+            : [
+                "packages/new/package.json",
+                "apps/api/package.json",
+                "packages/removed/package.json",
+                "packages/new/package.json",
+                "",
+              ].join("\0")),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+        };
+      },
+    }, "/worktree", ["**/package.json", "**/uv.lock"]);
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.args).toEqual([
+      "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
+      ":(glob)**/package.json", ":(glob)**/uv.lock",
+    ]);
+    expect(requests[1]?.args).toContain("--deleted");
+    expect(requests.map(({ maxOutputBytes }) => maxOutputBytes)).toEqual([
+      4 * 1024 * 1024,
+      4 * 1024 * 1024,
+    ]);
+    expect(result).toEqual(["apps/api/package.json", "packages/new/package.json"]);
+  });
+
+  it("fails closed on malformed or truncated fingerprint discovery", async () => {
+    const result = (stdout: Uint8Array, outputTruncated = false) => ({
+      exitCode: 0,
+      stdout,
+      stderr: new Uint8Array(),
+      outputTruncated,
+    });
+    await expect(listLocalFingerprintFiles({
+      async run() { return result(new Uint8Array([0xff, 0])); },
+    }, "/worktree", ["**/package.json"])).rejects.toThrow(/UTF-8/u);
+    await expect(listLocalFingerprintFiles({
+      async run() { return result(new Uint8Array(), true); },
+    }, "/worktree", ["**/package.json"])).rejects.toThrow(/Git inspection/u);
   });
 });

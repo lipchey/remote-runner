@@ -14,6 +14,7 @@ import { RemoteToolchainRuntime, type RemoteCommandPort } from "../node/remote-t
 import { acquireProfileLock } from "../runtime/lock.js";
 import { worktreeIdentity } from "../runtime/identity.js";
 import { PreparationError } from "../run/prepare.js";
+import { assertSafeRepositoryPath } from "../runtime/paths.js";
 import type { RemoteExecutionResult } from "../run/run-profile.js";
 import { encodeSecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
@@ -120,6 +121,30 @@ export function remoteChildArguments(
   ];
 }
 
+export function remoteWorkspaceCommandArguments(
+  workspace: string,
+  pathEnvironment: string,
+  command: readonly string[],
+): readonly string[] {
+  canonicalRemotePath(workspace, "remote workspace");
+  for (const path of pathEnvironment.split(":")) canonicalRemotePath(path, "remote PATH entry");
+  if (
+    command.length === 0 || command[0] === undefined || command[0].length === 0 ||
+    command.some((argument) => argument.includes("\0"))
+  ) {
+    throw new Error("remote workspace command is invalid");
+  }
+  return [
+    "sh",
+    "-ceu",
+    'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; shift 2; exec "$@"',
+    "remote-runner-workspace-command",
+    workspace,
+    pathEnvironment,
+    ...command,
+  ];
+}
+
 const CAPTURE_BYTES = 64 * 1024;
 const LOCAL_GIT_CAPTURE_BYTES = 4 * 1024 * 1024;
 const UV_VERSION = "0.11.30";
@@ -163,6 +188,65 @@ export async function listLocalGitlinks(
     throw new Error("local Git inspection failed");
   }
   return parseGitlinks(result.stdout);
+}
+
+function checkedGitOutput(
+  result: Awaited<ReturnType<SshProcessRuntime["run"]>>,
+  label: string,
+): Uint8Array {
+  if (
+    result.exitCode !== 0 || result.outputTruncated ||
+    result.stdout.byteLength > LOCAL_GIT_CAPTURE_BYTES ||
+    result.stderr.byteLength > LOCAL_GIT_CAPTURE_BYTES
+  ) {
+    throw new Error(`local Git inspection failed for ${label}`);
+  }
+  return result.stdout;
+}
+
+function parseNulPaths(output: Uint8Array, label: string): string[] {
+  const value = decode(output, label);
+  if (value.length === 0) return [];
+  if (!value.endsWith("\0")) throw new Error(`${label} returned a malformed path list`);
+  return value.slice(0, -1).split("\0").map((path) => {
+    const normalized = assertSafeRepositoryPath(path);
+    if (normalized !== path || /[\u0000-\u001f\u007f]/u.test(path)) {
+      throw new Error(`${label} returned an unsafe repository path`);
+    }
+    return path;
+  });
+}
+
+export async function listLocalFingerprintFiles(
+  processes: SshProcessRuntime,
+  sourceRoot: string,
+  patterns: readonly string[],
+): Promise<string[]> {
+  if (patterns.length === 0) return [];
+  const pathspecs = patterns.map((pattern) => `:(glob)${pattern}`);
+  const [availableResult, deletedResult] = await Promise.all([
+    processes.run({
+      command: "git",
+      args: ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...pathspecs],
+      cwd: sourceRoot,
+      maxOutputBytes: LOCAL_GIT_CAPTURE_BYTES,
+    }),
+    processes.run({
+      command: "git",
+      args: ["ls-files", "-z", "--deleted", "--", ...pathspecs],
+      cwd: sourceRoot,
+      maxOutputBytes: LOCAL_GIT_CAPTURE_BYTES,
+    }),
+  ]);
+  const available = parseNulPaths(
+    checkedGitOutput(availableResult, "fingerprint file listing"),
+    "fingerprint file listing",
+  );
+  const deleted = new Set(parseNulPaths(
+    checkedGitOutput(deletedResult, "fingerprint deletion listing"),
+    "fingerprint deletion listing",
+  ));
+  return [...new Set(available.filter((path) => !deleted.has(path)))].sort();
 }
 
 export interface NodeProfileServicesOptions {
@@ -372,11 +456,20 @@ export class NodeProfileServices implements ProfileExecutionServices {
       uv: UV_VERSION,
       gitleaks: `${GITLEAKS_VERSION}-linux-${machine}`,
     };
+    const discoveredFingerprintFiles = await listLocalFingerprintFiles(
+      this.processes,
+      this.options.sourceRoot,
+      this.profile.bootstrap.fingerprint.patterns,
+    );
+    const fingerprintFiles = [...new Set([
+      ...this.profile.bootstrap.fingerprint.files,
+      ...discoveredFingerprintFiles,
+    ])];
     const fingerprint = await dependencyFingerprint({
       readFile: async (path) => new Uint8Array(await readFile(join(this.options.sourceRoot, path))),
       listGitlinks: () => listLocalGitlinks(this.processes, this.options.sourceRoot),
       sha256: async (contents) => createHash("sha256").update(contents).digest("hex"),
-    }, { environment, files: this.profile.bootstrap.fingerprint });
+    }, { environment, files: fingerprintFiles });
     const pathEnvironment = [posix.join(node.root, "bin"), uv.root, posix.join(paths.workspace, ".tools"), "/usr/local/bin", "/usr/bin", "/bin"].join(":");
     await ensureDependencySetup({
       readHealthyState: async () => {
@@ -386,16 +479,28 @@ export class NodeProfileServices implements ProfileExecutionServices {
         catch { return undefined; }
       },
       runSetup: async (script, workspaceRoot) => {
-        const result = await remote.run([
-          "sh", "-ceu",
-          'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; exec "$3"',
-          "remote-runner-setup", workspaceRoot, pathEnvironment, script,
-        ]);
+        const result = await remote.run(remoteWorkspaceCommandArguments(
+          workspaceRoot,
+          pathEnvironment,
+          [script],
+        ));
+        return { exitCode: result.exitCode };
+      },
+      runEnsure: async (command, workspaceRoot) => {
+        const result = await remote.run(remoteWorkspaceCommandArguments(
+          workspaceRoot,
+          pathEnvironment,
+          command,
+        ));
         return { exitCode: result.exitCode };
       },
       writeHealthyState: (state) => this.writeRemoteState(paths.setupState, state),
     }, {
-      fingerprint, environment, workspaceRoot: paths.workspace, setup: this.profile.bootstrap.setup,
+      fingerprint,
+      environment,
+      workspaceRoot: paths.workspace,
+      setup: this.profile.bootstrap.setup,
+      ensure: this.profile.bootstrap.ensure,
     });
   }
 

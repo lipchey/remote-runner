@@ -90,6 +90,15 @@ runner-owned remote toolchain root rather than the login shell `PATH`. A normal 
 the pinned native Node, exact pnpm, uv, gitleaks, and project dependencies under owned runner paths.
 Never sync `node_modules`, `.pnpm-store`, `.nx`, build output, or coverage from the laptop.
 
+The dependency fingerprint is only the fast invalidation path. On every preparation the profile's
+fixed-argv ensure commands validate the synchronized workspace against its installed environment.
+When an ensure command fails, the runner performs the full declared setup once and reruns all ensure
+commands; a second failure is reported as `dependency ensure <command> failed` and remains
+fail-closed. Diagnose that command in the generated workspace with the same managed toolchain
+`PATH`; do not repair it by adding individual package paths to a manual fingerprint list. Pattern
+discovery already includes tracked and non-ignored untracked matching manifests and excludes
+Git-ignored generated dependencies.
+
 ## Benchmark
 
 `remote-runner benchmark <profile>` executes the manifest-declared workload matrix locally and

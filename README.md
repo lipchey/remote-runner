@@ -37,6 +37,30 @@ For allowlisted development secrets, a profile may declare `dotenv: .env`. The r
 the named keys locally, never synchronizes the file, and sends values through framed SSH input. An
 argv `provider` remains available for consumers that cannot use a dotenv file.
 
+## Bootstrap convergence
+
+Dependency fingerprints are a performance optimization, not the final correctness gate. Exact
+files cover setup entry points and root lock/workspace configuration; safe patterns automatically
+include tracked and non-ignored untracked manifests as packages are added or removed. Gitlink OIDs
+are always included without listing submodule paths manually.
+
+```yaml
+bootstrap:
+  node: local-exact
+  packageManager: package.json
+  setup: [./scripts/ds-bootstrap.sh]
+  ensure:
+    - [node, scripts/pnpm-state.mjs]
+  fingerprint:
+    files: [package.json, pnpm-lock.yaml, pnpm-workspace.yaml, scripts/ds-bootstrap.sh]
+    patterns: ["**/package.json", "**/pyproject.toml", "**/uv.lock"]
+```
+
+Every remote preparation runs each fixed-argv `ensure` command. A matching fingerprint plus a
+successful ensure reuses the installed environment. A failed ensure triggers the full setup once
+and then retries every ensure command from the beginning; persistent failure is fail-closed and no
+new healthy state is recorded. Legacy fingerprint arrays remain accepted as exact-file lists.
+
 - Design: `docs/specs/2026-07-31-remote-runner-design.md`
 - Diagnostic runbook: `docs/RUNBOOK.md`
 - Implementation plan: `docs/superpowers/plans/2026-07-31-remote-runner-implementation.md`

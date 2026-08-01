@@ -28,7 +28,11 @@ export interface Profile {
     node: "local-exact";
     packageManager: string;
     setup: string[];
-    fingerprint: string[];
+    ensure: string[][];
+    fingerprint: {
+      files: string[];
+      patterns: string[];
+    };
   };
   workload: {
     command: string[];

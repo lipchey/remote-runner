@@ -25,6 +25,31 @@ describe("loadManifestText", () => {
     expect(manifest.profiles[0]?.workspace.baseRef).toBe("origin/main");
   });
 
+  it("accepts ensure commands and object-form fingerprint discovery", () => {
+    const manifest = loadManifestText(validManifest.replace(
+      'setup: ["./scripts/ds-bootstrap.sh"], fingerprint: [package.json, pnpm-lock.yaml]',
+      'setup: ["./scripts/ds-bootstrap.sh"], ensure: [["node", "scripts/pnpm-state.mjs"]], fingerprint: { files: [package.json, pnpm-lock.yaml], patterns: ["**/package.json", "**/uv.lock"] }',
+    ));
+
+    expect(manifest.profiles[0]?.bootstrap).toMatchObject({
+      ensure: [["node", "scripts/pnpm-state.mjs"]],
+      fingerprint: {
+        files: ["package.json", "pnpm-lock.yaml"],
+        patterns: ["**/package.json", "**/uv.lock"],
+      },
+    });
+  });
+
+  it("normalizes the legacy fingerprint list and omitted ensure commands", () => {
+    const manifest = loadManifestText(validManifest);
+
+    expect(manifest.profiles[0]?.bootstrap.ensure).toEqual([]);
+    expect(manifest.profiles[0]?.bootstrap.fingerprint).toEqual({
+      files: ["package.json", "pnpm-lock.yaml"],
+      patterns: [],
+    });
+  });
+
   it("accepts a built-in repository dotenv secret source instead of an external provider", () => {
     const manifest = loadManifestText(validManifest.replace(
       'provider: ["node", "scripts/remote-runner-env.mjs"]',
@@ -56,6 +81,7 @@ describe("loadManifestText", () => {
     ["probes", "minimumFreeBytes: 10737418240", "minimumFreeBytes: 10737418240, extra: true"],
     ["sync", "ignores: [node_modules, .git]", "ignores: [node_modules, .git], extra: true"],
     ["bootstrap", "fingerprint: [package.json, pnpm-lock.yaml]", "fingerprint: [package.json, pnpm-lock.yaml], extra: true"],
+    ["fingerprint", "fingerprint: [package.json, pnpm-lock.yaml]", "fingerprint: { files: [package.json], patterns: [], extra: true }"],
     ["workload", 'childEnvironment: { REMOTE_RUNNER_CHILD: "1" }', 'childEnvironment: { REMOTE_RUNNER_CHILD: "1" }, extra: true'],
     ["secrets", 'provider: ["node", "scripts/remote-runner-env.mjs"]', 'provider: ["node", "scripts/remote-runner-env.mjs"], extra: true'],
     ["notifications", "policy: outage-recovery", "policy: outage-recovery, extra: true"],
@@ -129,6 +155,10 @@ describe("loadManifestText", () => {
     expect(() => loadManifestText(validManifest.replace('command: ["./scripts/verify", "--full"]', "command: []"))).toThrow(
       /argument array/,
     );
+    expect(() => loadManifestText(validManifest.replace(
+      'setup: ["./scripts/ds-bootstrap.sh"], fingerprint:',
+      'setup: ["./scripts/ds-bootstrap.sh"], ensure: [[]], fingerprint:',
+    ))).toThrow(/argument array/);
   });
 
   it.each([
@@ -137,6 +167,8 @@ describe("loadManifestText", () => {
     ["provider executable", '"node", "scripts/remote-runner-env.mjs"', '"no\\0de", "scripts/remote-runner-env.mjs"'],
     ["provider argument", "scripts/remote-runner-env.mjs", "scripts/remote-runner-env\\0.mjs"],
     ["child environment value", 'REMOTE_RUNNER_CHILD: "1"', 'REMOTE_RUNNER_CHILD: "1\\0bad"'],
+    ["ensure executable", 'setup: ["./scripts/ds-bootstrap.sh"], fingerprint:', 'setup: ["./scripts/ds-bootstrap.sh"], ensure: [["no\\0de"]], fingerprint:'],
+    ["ensure argument", 'setup: ["./scripts/ds-bootstrap.sh"], fingerprint:', 'setup: ["./scripts/ds-bootstrap.sh"], ensure: [["node", "bad\\0arg"]], fingerprint:'],
   ])("rejects NUL in a %s", (_case, before, after) => {
     expect(() => loadManifestText(validManifest.replace(before, after))).toThrow(
       /NUL/,
@@ -170,5 +202,19 @@ describe("loadManifestText", () => {
     expect(() => loadManifestText(validManifest.replace(before, after))).toThrow(
       /unsafe repository path/,
     );
+  });
+
+  it.each([
+    "/absolute/**/package.json",
+    "../**/package.json",
+    "packages/../package.json",
+    "C:/packages/*/package.json",
+    ":(top)**/package.json",
+    "packages\\*/package.json",
+  ])("rejects unsafe fingerprint pattern %s", (pattern) => {
+    expect(() => loadManifestText(validManifest.replace(
+      "fingerprint: [package.json, pnpm-lock.yaml]",
+      `fingerprint: { files: [package.json], patterns: [${JSON.stringify(pattern)}] }`,
+    ))).toThrow(/fingerprint pattern/u);
   });
 });
