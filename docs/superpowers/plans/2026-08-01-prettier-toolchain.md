@@ -8,6 +8,8 @@
 
 **Tech Stack:** Node.js 22+, pnpm 11.9.0, Prettier 3.9.5, TypeScript, Vitest
 
+**Status:** Complete in this PR. Acceptance: `pnpm verify` passed with formatting, typecheck, 414/414 unit tests, and build; a deliberate formatting violation was rejected before exact restoration. Next action: review and merge this PR.
+
 ---
 
 ## File Responsibilities
@@ -29,7 +31,7 @@
 - Modify: `package.json`
 - Modify: `pnpm-lock.yaml`
 
-- [ ] **Step 1: Add the pinned development dependency**
+- [x] **Step 1: Add the pinned development dependency**
 
 Run:
 
@@ -39,7 +41,7 @@ pnpm add --save-dev --save-exact prettier@3.9.5
 
 Expected: `package.json` contains `"prettier": "3.9.5"` and pnpm updates the lockfile.
 
-- [ ] **Step 2: Add formatter configuration**
+- [x] **Step 2: Add formatter configuration**
 
 Create `.prettierrc.json`:
 
@@ -60,7 +62,7 @@ node_modules/
 pnpm-lock.yaml
 ```
 
-- [ ] **Step 3: Add formatter scripts without enabling the verify gate yet**
+- [x] **Step 3: Add formatter scripts without enabling the verify gate yet**
 
 Add these entries to `package.json` before `test`:
 
@@ -71,7 +73,7 @@ Add these entries to `package.json` before `test`:
 
 Keep the existing `verify` command unchanged until the repository baseline is formatted.
 
-- [ ] **Step 4: Validate the toolchain files**
+- [x] **Step 4: Validate the toolchain files**
 
 Run:
 
@@ -82,7 +84,7 @@ pnpm typecheck
 
 Expected: both commands exit 0.
 
-- [ ] **Step 5: Commit the formatter toolchain**
+- [x] **Step 5: Commit the formatter toolchain**
 
 ```bash
 git add .prettierrc.json .prettierignore package.json pnpm-lock.yaml
@@ -95,7 +97,7 @@ git commit -m "chore: add Prettier toolchain"
 
 - Modify: maintained files selected by `prettier . --write --ignore-unknown`
 
-- [ ] **Step 1: Prove the unformatted baseline is red**
+- [x] **Step 1: Prove the unformatted baseline is red**
 
 Run:
 
@@ -105,7 +107,7 @@ pnpm format:check
 
 Expected: non-zero exit with maintained files listed as formatting violations.
 
-- [ ] **Step 2: Format the repository**
+- [x] **Step 2: Format the repository**
 
 Run:
 
@@ -116,7 +118,7 @@ pnpm format:check
 
 Expected: the write command succeeds and the following check exits 0.
 
-- [ ] **Step 3: Review the mechanical diff**
+- [x] **Step 3: Review the mechanical diff**
 
 Run:
 
@@ -128,7 +130,7 @@ git diff --word-diff=porcelain -- src tests README.md docs assets tsconfig.json 
 
 Expected: no whitespace errors and only layout, quoting, wrapping, or trailing-comma changes; no identifiers, literals, commands, or behavior change.
 
-- [ ] **Step 4: Re-run existing verification before committing the rewrite**
+- [x] **Step 4: Re-run existing verification before committing the rewrite**
 
 Run:
 
@@ -138,7 +140,7 @@ pnpm verify
 
 Expected: typecheck, 414 unit tests, and build pass.
 
-- [ ] **Step 5: Commit only the mechanical rewrite**
+- [x] **Step 5: Commit only the mechanical rewrite**
 
 ```bash
 git add README.md assets docs src tests tsconfig.json vitest.config.ts pnpm-workspace.yaml
@@ -153,7 +155,7 @@ git commit -m "style: format repository with Prettier"
 - Modify: `package.json`
 - Modify: `README.md`
 
-- [ ] **Step 1: Record the exact formatting revision**
+- [x] **Step 1: Record the exact formatting revision**
 
 Run `git rev-parse HEAD`. Create `.git-blame-ignore-revs` with the following comment on the first line and the exact 40-character command output on the second line:
 
@@ -161,7 +163,7 @@ Run `git rev-parse HEAD`. Create `.git-blame-ignore-revs` with the following com
 # Repository-wide Prettier baseline (2026-08-01)
 ```
 
-- [ ] **Step 2: Enable the verify gate**
+- [x] **Step 2: Enable the verify gate**
 
 Change the `verify` script in `package.json` to:
 
@@ -169,7 +171,7 @@ Change the `verify` script in `package.json` to:
 "verify": "pnpm format:check && pnpm typecheck && pnpm test && pnpm build"
 ```
 
-- [ ] **Step 3: Document the contributor interface**
+- [x] **Step 3: Document the contributor interface**
 
 Add a README development section that documents:
 
@@ -182,7 +184,7 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 State that `format` writes maintained files, `format:check` is read-only, and `verify` is the required full local gate.
 
-- [ ] **Step 4: Prove the formatting gate fails closed**
+- [x] **Step 4: Prove the formatting gate fails closed**
 
 Temporarily change a formatter-owned file to a known non-canonical layout using `apply_patch`, then run:
 
@@ -192,7 +194,7 @@ pnpm format:check
 
 Expected: non-zero exit naming the deliberately changed file. Restore the exact file content with `apply_patch` and rerun `pnpm format:check`; expected exit 0.
 
-- [ ] **Step 5: Commit enforcement and documentation**
+- [x] **Step 5: Commit enforcement and documentation**
 
 ```bash
 git add .git-blame-ignore-revs package.json README.md
@@ -205,7 +207,7 @@ git commit -m "chore: enforce Prettier formatting"
 
 - Verify: complete committed branch
 
-- [ ] **Step 1: Run final acceptance**
+- [x] **Step 1: Run final acceptance**
 
 Run:
 
@@ -217,7 +219,7 @@ git status --short
 
 Expected: formatter check, typecheck, all unit tests, and build pass; diff check and status are clean.
 
-- [ ] **Step 2: Audit commit separation**
+- [x] **Step 2: Audit commit separation**
 
 Run:
 
@@ -228,7 +230,7 @@ git show --stat --oneline HEAD~1
 
 Expected: design, toolchain, mechanical formatting, and enforcement are distinct commits; the mechanical commit contains no policy or dependency changes.
 
-- [ ] **Step 3: Push and open a ready pull request**
+- [x] **Step 3: Push and open a ready pull request**
 
 ```bash
 git push -u origin codex/prettier-toolchain
