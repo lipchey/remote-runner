@@ -8,7 +8,11 @@
 
 **Tech Stack:** TypeScript, Node.js filesystem/process APIs, YAML, Vitest, Bash, pnpm 11, SSH, Mutagen, GitHub CLI.
 
-**Status:** Planned on 2026-08-01 from design commit `de0323a`.
+**Provider status:** Planned on 2026-08-01 from design commit `de0323a`.
+
+**Consumer status:** Planned; starts after the verified provider build is installed.
+
+**Overall status:** Planned.
 
 ---
 
@@ -385,9 +389,10 @@ checkout idempotently.
 
 - [ ] **Step 3: Record provider acceptance before publication**
 
-Update this plan to `Status: Completed`, record the verified test count, installed app identity,
-and state that publication is this PR. Run `rtk git diff --check`, commit the evidence, and require a
-clean worktree.
+Update `Provider status` to `Completed`, keep `Consumer status` explicit as the next active
+milestone, record the verified test count and installed app identity, and state that provider
+publication is this PR. Do not mark the overall plan complete. Run `rtk git diff --check`, commit
+the evidence, and require a clean worktree.
 
 - [ ] **Step 4: Push and open a ready runner PR**
 
@@ -608,13 +613,19 @@ rtk gh pr create --base main --head codex/wedged-verify-full --title "Prevent we
 Expected: a non-draft PR URL. Open it in the browser, verify the returned URL, and poll CI with
 bounded `rtk gh` status calls until all required checks pass or a concrete failure is diagnosed.
 
-- [ ] **Step 4: Close the external handoff with evidence**
+- [ ] **Step 4: Close the cross-repository lifecycle record**
+
+In the remote-runner worktree, update this plan with both PR URLs and final acceptance evidence,
+set `Consumer status` and `Overall status` to `Completed`, commit the reconciliation, push the
+runner branch again, and require its CI to return green on the new head.
+
+- [ ] **Step 5: Close the external handoff with evidence**
 
 Append a `Resolution` section to the external handoff using `apply_patch`. Record both ready PR
 URLs, immutable runner receipt, live self-heal result, remote full-verification result, merge order,
 and any still-active legacy workspace. Do not rewrite the original incident evidence.
 
-- [ ] **Step 5: Final reconciliation**
+- [ ] **Step 6: Final reconciliation**
 
 Require both worktrees clean, both PR heads equal local heads, runner and Ariadne CI green, the
 installed receipt equal the runner provider build, Ariadne still `mode: remote` / `fallback: fail`,
