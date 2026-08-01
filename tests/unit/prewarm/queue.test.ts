@@ -1,4 +1,13 @@
-import { mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -103,5 +112,36 @@ describe("durable prewarm queue", () => {
     ).resolves.toBe("discarded");
 
     expect(calls).toBe(0);
+  });
+
+  it("discards a payload whose identity does not match its queue filename", async () => {
+    const { home, request, queueRoot } = await fixture();
+    await mkdir(queueRoot, { recursive: true });
+    await writeFile(join(queueRoot, "other-profile-0123456789abcdef01234567.json"), JSON.stringify(request), {
+      mode: 0o600,
+    });
+    let calls = 0;
+
+    await expect(
+      consumeNextPrewarmRequest(home, async () => {
+        calls += 1;
+        return 0;
+      }),
+    ).resolves.toBe("discarded");
+
+    expect(calls).toBe(0);
+  });
+
+  it("refuses a symlinked queue root without touching its target", async () => {
+    const { home, request, queueRoot } = await fixture();
+    const outside = join(home, "outside");
+    await mkdir(join(queueRoot, ".."), { recursive: true });
+    await mkdir(outside);
+    await symlink(outside, queueRoot);
+
+    await expect(publishPrewarmRequest(home, request)).rejects.toThrow(/queue root/u);
+    await expect(readFile(join(outside, `${request.consumer}-${request.profile}-${request.identity}.json`))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 });

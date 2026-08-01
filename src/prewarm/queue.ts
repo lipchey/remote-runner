@@ -10,7 +10,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const COMPONENT = /^[a-z][a-z0-9-]{0,62}$/u;
 const IDENTITY = /^[0-9a-f]{24}$/u;
@@ -35,6 +35,28 @@ function errorCode(caught: unknown): string | undefined {
 function queueRoot(home: string): string {
   if (!isAbsolute(home) || resolve(home) !== home) throw new Error("home must be an absolute path");
   return join(home, ".local", "state", "remote-runner", "prewarm");
+}
+
+async function verifiedQueueRoot(home: string, create: boolean): Promise<string> {
+  const root = queueRoot(home);
+  if (create) {
+    await mkdir(dirname(root), { recursive: true, mode: 0o700 });
+    try {
+      await mkdir(root, { mode: 0o700 });
+    } catch (caught) {
+      if (errorCode(caught) !== "EEXIST") throw caught;
+    }
+  }
+  try {
+    const status = await lstat(root);
+    if (!status.isDirectory() || status.isSymbolicLink()) {
+      throw new Error("prewarm queue root is unsafe");
+    }
+  } catch (caught) {
+    if (!create && errorCode(caught) === "ENOENT") return root;
+    throw caught;
+  }
+  return root;
 }
 
 function requestBasename(
@@ -101,7 +123,7 @@ export async function inspectPrewarmRequest(
   home: string,
   request: Pick<PrewarmRequest, "consumer" | "profile" | "identity">,
 ): Promise<"idle" | "queued" | "running" | "unknown"> {
-  const root = queueRoot(home);
+  const root = await verifiedQueueRoot(home, false);
   const basename = requestBasename(request);
   const running = await entryKind(join(root, `${basename}.running`));
   if (running === "file") return "running";
@@ -116,8 +138,7 @@ export async function publishPrewarmRequest(
   value: PrewarmRequest,
 ): Promise<"published" | "coalesced"> {
   const request = await validateRequest(value);
-  const root = queueRoot(home);
-  await mkdir(root, { recursive: true, mode: 0o700 });
+  const root = await verifiedQueueRoot(home, true);
   const basename = requestBasename(request);
   const pendingPath = join(root, `${basename}.json`);
   const runningPath = join(root, `${basename}.running`);
@@ -167,8 +188,11 @@ export async function consumeNextPrewarmRequest(
   home: string,
   run: (request: PrewarmRequest) => Promise<number>,
 ): Promise<"idle" | "processed" | "discarded"> {
-  const root = queueRoot(home);
+  const root = await verifiedQueueRoot(home, false);
   for (const name of await ownedEntries(root)) {
+    const claimedBasename = name.endsWith(".running")
+      ? name.slice(0, -".running".length)
+      : name.slice(0, -".json".length);
     const sourcePath = join(root, name);
     const runningPath = name.endsWith(".running")
       ? sourcePath
@@ -192,6 +216,9 @@ export async function consumeNextPrewarmRequest(
       request = await validateRequest(
         JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(contents)),
       );
+      if (requestBasename(request) !== claimedBasename) {
+        throw new Error("prewarm request does not match its queue filename");
+      }
     } catch {
       await rm(runningPath, { force: true });
       return "discarded";
