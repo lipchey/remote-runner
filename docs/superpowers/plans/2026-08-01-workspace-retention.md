@@ -325,7 +325,7 @@ gh pr view --web
 
 Expected: a non-draft PR URL that contains the implementation, tests, design, completed plan, and acceptance evidence.
 
-- [ ] **Step 5: Verify CI and install the accepted build**
+- [x] **Step 5: Verify CI and install the accepted build**
 
 Poll the PR checks with bounded `gh pr checks`/API snapshots. After the required branch state is accepted, run `pnpm build && node dist/src/main.js install` from the verified worktree and verify `remote-runner --help` plus the immutable app target recorded below `~/.local/share/remote-runner/app`.
 
@@ -340,5 +340,6 @@ In a dedicated Ariadne worktree, write `docs/superpowers/plans/2026-08-01-dataai
 - Implementation branch: `codex/workspace-retention`; publication target: this ready-for-review PR.
 - PR #6 is open and ready for review; the repository exposes no CI checks for this branch.
 - The first DataAI live canary reached `pop-os`, then exposed a Node 26 unhandled-rejection window when retention's marker callback failed. Regression test observed RED, the marker promise was made immediately handled, and full `pnpm verify` passed again with 443/443 tests plus typecheck/build.
+- Corrected verified head `489fe3c` installed successfully; immutable app receipt: `25c71f15971baad76acbc6ca`.
 - The dependent Ariadne plan is committed at `1e8543d` on `codex/dataai-runner-migration`.
 - Next action: publish and install the corrected immutable runner build, then continue the dependent DataAI canaries.
