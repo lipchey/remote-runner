@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  NodeProfileServices,
   listLocalFingerprintFiles,
   listLocalGitlinks,
   NodeProfileServices,
@@ -30,6 +31,38 @@ const retainedDataAiProfile = loadManifestText(
 ).profiles[0]!;
 
 describe("pilot service boundaries", () => {
+  it("applies the manifest child environment to a local workload", async () => {
+    const chunks: Uint8Array[] = [];
+    const services = new NodeProfileServices(
+      {
+        ...profile,
+        workload: {
+          ...profile.workload,
+          childEnvironment: {
+            ...profile.workload.childEnvironment,
+            LOCAL_FALLBACK_CANARY: "manifest",
+          },
+        },
+      },
+      {
+        home: "/tmp/remote-runner-test-home",
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array(),
+        stdout: (chunk) => chunks.push(chunk),
+        stderr: () => undefined,
+      },
+    );
+
+    const exitCode = await services.runLocal([
+      process.execPath,
+      "-e",
+      'process.stdout.write(process.env.LOCAL_FALLBACK_CANARY ?? "missing")',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("manifest");
+  });
+
   it("resolves every generated target below the canonical remote home", () => {
     const paths = resolveRemotePaths("/home/admin", profile, "0123456789abcdef01234567");
 
