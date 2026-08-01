@@ -4,8 +4,8 @@ import {
   NodeProfileServices,
   listLocalFingerprintFiles,
   listLocalGitlinks,
-  NodeProfileServices,
   parseProbeOutput,
+  remoteArtifactCheckArguments,
   remoteChildArguments,
   remoteWorkspaceCommandArguments,
   resolveRemotePaths,
@@ -212,6 +212,28 @@ describe("pilot service boundaries", () => {
       ...command,
     ]);
     expect(args[2]).not.toContain("pnpm-state");
+  });
+
+  it("builds fixed artifact-check argv without shell-interpolating the path", () => {
+    const artifact = "vendor/dev-standards/runner/dist/verify-runner.mjs";
+    const args = remoteArtifactCheckArguments(
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+      "/remote/node/bin:/remote/uv:/usr/bin:/bin",
+      artifact,
+    );
+
+    expect(args).toEqual([
+      "sh",
+      "-ceu",
+      'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; shift 2; exec "$@"',
+      "remote-runner-workspace-command",
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+      "/remote/node/bin:/remote/uv:/usr/bin:/bin",
+      "test",
+      "-f",
+      artifact,
+    ]);
+    expect(args[2]).not.toContain(artifact);
   });
 
   it("touches activity and prunes after a marker-seen nonzero workload without changing its exit", async () => {

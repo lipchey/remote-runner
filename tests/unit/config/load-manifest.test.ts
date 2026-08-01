@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { loadManifestText } from "../../../src/config/load-manifest.js";
-import { validManifest } from "./manifest-fixture.js";
+import { validArtifactManifest, validManifest } from "./manifest-fixture.js";
 
 describe("loadManifestText", () => {
   it("accepts the v1 example and normalizes declared repository paths", () => {
@@ -63,9 +63,19 @@ describe("loadManifestText", () => {
     });
   });
 
-  it("normalizes the legacy fingerprint list and omitted ensure commands", () => {
+  it("accepts exact bootstrap artifact files", () => {
+    const manifest = loadManifestText(validArtifactManifest);
+
+    expect(manifest.profiles[0]?.bootstrap.artifacts).toEqual([
+      "vendor/dev-standards/runner/dist/verify-runner.mjs",
+      "vendor/dev-standards/runner/dist/.built-from",
+    ]);
+  });
+
+  it("normalizes omitted bootstrap artifacts and ensure commands", () => {
     const manifest = loadManifestText(validManifest);
 
+    expect(manifest.profiles[0]?.bootstrap.artifacts).toEqual([]);
     expect(manifest.profiles[0]?.bootstrap.ensure).toEqual([]);
     expect(manifest.profiles[0]?.bootstrap.fingerprint).toEqual({
       files: ["package.json", "pnpm-lock.yaml"],
@@ -312,4 +322,15 @@ describe("loadManifestText", () => {
       ),
     ).toThrow(/fingerprint pattern/u);
   });
+
+  it.each(["/tmp/bundle", "../bundle", "runner/./bundle", "runner//bundle", "runner\\bundle", "runner/\0bundle"])(
+    "rejects unsafe bootstrap artifact %s",
+    (artifact) => {
+      expect(() =>
+        loadManifestText(
+          validArtifactManifest.replace("vendor/dev-standards/runner/dist/verify-runner.mjs", JSON.stringify(artifact)),
+        ),
+      ).toThrow(/bootstrap artifact|unsafe repository path/u);
+    },
+  );
 });

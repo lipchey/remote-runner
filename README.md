@@ -11,11 +11,16 @@ closed `.remote-runner.yaml` manifest and a thin call to the installed executabl
 pnpm install
 pnpm verify
 node dist/src/main.js install
+remote-runner --version
 ```
 
-The installer publishes the stable `~/.local/bin/remote-runner` command and the login LaunchAgent.
-That one installation is shared by every consumer project; projects do not copy or link runner
-source files into their repositories.
+The first installation, and the first upgrade from a runner that predates checkout-selected
+installs, must use the built `node dist/src/main.js install` entry point. Later upgrades may run
+`remote-runner install` from a built checkout. The installer hashes that checkout, publishes an
+immutable self-contained application plus a closed receipt, and updates the stable
+`~/.local/bin/remote-runner` command and login LaunchAgent. `remote-runner --version` reports the
+installed package version and immutable application identity. That one installation is shared by
+every consumer project; projects do not copy or link runner source files into their repositories.
 
 ## Development
 
@@ -93,15 +98,21 @@ bootstrap:
   setup: [./scripts/ds-bootstrap.sh]
   ensure:
     - [node, scripts/pnpm-state.mjs]
+  artifacts:
+    - vendor/dev-standards/runner/dist/verify-runner.mjs
+    - vendor/dev-standards/runner/dist/.built-from
   fingerprint:
     files: [package.json, pnpm-lock.yaml, pnpm-workspace.yaml, scripts/ds-bootstrap.sh]
     patterns: ["**/package.json", "**/pyproject.toml", "**/uv.lock"]
 ```
 
-Every remote preparation runs each fixed-argv `ensure` command. A matching fingerprint plus a
-successful ensure reuses the installed environment. A failed ensure triggers the full setup once
-and then retries every ensure command from the beginning; persistent failure is fail-closed and no
-new healthy state is recorded. Legacy fingerprint arrays remain accepted as exact-file lists.
+Every remote preparation checks each declared repository-relative artifact and then runs each
+fixed-argv `ensure` command. A missing artifact or failed ensure triggers the full setup once. All
+artifacts are checked again before every ensure command is retried; a persistently missing artifact,
+artifact inspection error, or second ensure failure is fail-closed and no new healthy state is
+recorded. A matching fingerprint plus present artifacts and successful ensure reuses the installed
+environment. Existing manifests that omit `artifacts` retain the empty-list behavior. Legacy
+fingerprint arrays remain accepted as exact-file lists.
 
 - Design: `docs/specs/2026-07-31-remote-runner-design.md`
 - Diagnostic runbook: `docs/RUNBOOK.md`

@@ -14,6 +14,7 @@ export interface HealthySetupState {
 
 export interface DependencySetupRuntime {
   readHealthyState(): Promise<HealthySetupState | undefined>;
+  checkArtifact?(artifact: string, workspaceRoot: string): Promise<{ readonly exitCode: number }>;
   runSetup(
     script: string,
     workspaceRoot: string,
@@ -30,6 +31,7 @@ export interface DependencySetupRuntime {
 export interface DependencySetupInput extends HealthySetupState {
   readonly workspaceRoot: string;
   readonly setup: readonly string[];
+  readonly artifacts?: readonly string[];
   readonly ensure: readonly (readonly string[])[];
 }
 
@@ -91,6 +93,8 @@ function validate(input: DependencySetupInput): void {
   }
   for (const script of input.setup)
     if (!safeRelative(script)) throw new Error("setup script must be a safe relative path");
+  for (const artifact of input.artifacts ?? [])
+    if (!safeRelative(artifact)) throw new Error("bootstrap artifact must be a safe relative path");
   for (const command of input.ensure) {
     if (
       command.length === 0 ||
@@ -106,6 +110,34 @@ function validate(input: DependencySetupInput): void {
       throw new Error(`environment identity ${name} is invalid`);
     }
   }
+}
+
+async function checkArtifacts(
+  runtime: DependencySetupRuntime,
+  input: DependencySetupInput,
+  failClosed: boolean,
+): Promise<boolean> {
+  const artifacts = input.artifacts ?? [];
+  if (artifacts.length === 0) return true;
+  if (runtime.checkArtifact === undefined) {
+    throw new Error("bootstrap artifact inspection runtime is unavailable");
+  }
+  for (const artifact of artifacts) {
+    let result: { readonly exitCode: number };
+    try {
+      result = await runtime.checkArtifact(artifact, input.workspaceRoot);
+    } catch (caught) {
+      throw new Error(`bootstrap artifact inspection failed: ${artifact}`, { cause: caught });
+    }
+    if (!Number.isSafeInteger(result.exitCode) || (result.exitCode !== 0 && result.exitCode !== 1)) {
+      throw new Error(`bootstrap artifact inspection failed with exit code ${String(result.exitCode)}: ${artifact}`);
+    }
+    if (result.exitCode === 1) {
+      if (failClosed) throw new Error(`bootstrap artifact is still missing after setup: ${artifact}`);
+      return false;
+    }
+  }
+  return true;
 }
 
 async function runSetup(runtime: DependencySetupRuntime, input: DependencySetupInput): Promise<void> {
@@ -147,11 +179,12 @@ export async function ensureDependencySetup(
   validate(input);
   const previous = await runtime.readHealthyState();
   if (previous?.fingerprint === input.fingerprint && sameEnvironment(previous.environment, input.environment)) {
-    if (await runEnsure(runtime, input, false)) {
+    if ((await checkArtifacts(runtime, input, false)) && (await runEnsure(runtime, input, false))) {
       return { fingerprint: input.fingerprint, environment: input.environment, setupRan: false };
     }
   }
   await runSetup(runtime, input);
+  await checkArtifacts(runtime, input, true);
   await runEnsure(runtime, input, true);
   const healthy = { fingerprint: input.fingerprint, environment: input.environment };
   await runtime.writeHealthyState(healthy);

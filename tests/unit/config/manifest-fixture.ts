@@ -15,3 +15,8 @@ profiles:
     notifications: { policy: outage-recovery }
     benchmark: { samples: 3, workloads: [{ id: full, command: ["./scripts/verify", "--full"] }] }
 `;
+
+export const validArtifactManifest = validManifest.replace(
+  'setup: ["./scripts/ds-bootstrap.sh"], fingerprint:',
+  'setup: ["./scripts/ds-bootstrap.sh"], artifacts: [vendor/dev-standards/runner/dist/verify-runner.mjs, vendor/dev-standards/runner/dist/.built-from], fingerprint:',
+);

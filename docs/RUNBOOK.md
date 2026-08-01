@@ -12,16 +12,26 @@ remote-runner doctor <profile>
 remote-runner logs <profile>
 ```
 
-One-time installation or an idempotent upgrade is:
+Build the checkout whose source should become the installed application, then install and inspect
+its immutable receipt:
 
 ```sh
+cd <built-checkout>
+pnpm build
 remote-runner install
+remote-runner --version
 ```
+
+For the first upgrade from a runner that predates checkout-selected installs, replace
+`remote-runner install` above with `node dist/src/main.js install`; the old installed executable
+cannot contain the installer correction. Subsequent installs resolve the current built checkout,
+not the previously installed application.
 
 The installer writes an immutable self-contained application below
 `~/.local/share/remote-runner/app`, the stable `~/.local/bin/remote-runner` executable, and
-`~/Library/LaunchAgents/com.lipchey.remote-runner.plist`. It uses the current absolute Node runtime,
-requires no sudo, and starts or repairs the LaunchAgent.
+`~/Library/LaunchAgents/com.lipchey.remote-runner.plist`. Its closed receipt records the package
+version and application identity reported by `remote-runner --version`. It uses the current
+absolute Node runtime, requires no sudo, and starts or repairs the LaunchAgent.
 
 Normal project integration needs only `remote-runner run <profile>` from the repository root. The
 runner loads the profile workload and `REMOTE_RUNNER_MODE=auto|local|remote` itself. A worktree hook
@@ -113,14 +123,20 @@ runner-owned remote toolchain root rather than the login shell `PATH`. A normal 
 the pinned native Node, exact pnpm, uv, gitleaks, and project dependencies under owned runner paths.
 Never sync `node_modules`, `.pnpm-store`, `.nx`, build output, or coverage from the laptop.
 
-The dependency fingerprint is only the fast invalidation path. On every preparation the profile's
-fixed-argv ensure commands validate the synchronized workspace against its installed environment.
-When an ensure command fails, the runner performs the full declared setup once and reruns all ensure
-commands; a second failure is reported as `dependency ensure <command> failed` and remains
-fail-closed. Diagnose that command in the generated workspace with the same managed toolchain
-`PATH`; do not repair it by adding individual package paths to a manual fingerprint list. Pattern
-discovery already includes tracked and non-ignored untracked matching manifests and excludes
-Git-ignored generated dependencies.
+The dependency fingerprint is only the fast invalidation path. On every preparation the runner
+checks every declared repository-relative bootstrap artifact, then the profile's fixed-argv ensure
+commands validate the synchronized workspace against its installed environment. A changed
+fingerprint, missing artifact, or failed ensure command runs the full declared setup once. The
+runner then checks every artifact again before rerunning all ensure commands.
+
+A normal missing artifact is self-healed by that single setup attempt. A persistently missing
+artifact is reported as `dependency artifact <path> missing after setup`; an artifact inspection
+error, such as an SSH protocol failure, is reported separately and does not masquerade as absence.
+A second ensure failure is reported as `dependency ensure <command> failed`. All remain fail-closed
+and no healthy state is written. Diagnose the declared setup or ensure command in the generated
+workspace with the same managed toolchain `PATH`; do not create bundles manually or add individual
+package paths to a fingerprint list. Pattern discovery already includes tracked and non-ignored
+untracked matching manifests and excludes Git-ignored generated dependencies.
 
 ## Benchmark
 

@@ -187,6 +187,14 @@ export function remoteWorkspaceCommandArguments(
   ];
 }
 
+export function remoteArtifactCheckArguments(
+  workspace: string,
+  pathEnvironment: string,
+  artifact: string,
+): readonly string[] {
+  return remoteWorkspaceCommandArguments(workspace, pathEnvironment, ["test", "-f", artifact]);
+}
+
 const CAPTURE_BYTES = 64 * 1024;
 const LOCAL_GIT_CAPTURE_BYTES = 4 * 1024 * 1024;
 const UV_VERSION = "0.11.30";
@@ -679,6 +687,10 @@ export class NodeProfileServices implements ProfileExecutionServices {
             return undefined;
           }
         },
+        checkArtifact: async (artifact, workspaceRoot) => {
+          const result = await remote.run(remoteArtifactCheckArguments(workspaceRoot, pathEnvironment, artifact));
+          return { exitCode: result.exitCode };
+        },
         runSetup: async (script, workspaceRoot) => {
           const result = await remote.run(remoteWorkspaceCommandArguments(workspaceRoot, pathEnvironment, [script]));
           return { exitCode: result.exitCode };
@@ -694,6 +706,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
         environment,
         workspaceRoot: paths.workspace,
         setup: this.profile.bootstrap.setup,
+        artifacts: this.profile.bootstrap.artifacts,
         ensure: this.profile.bootstrap.ensure,
       },
     );
