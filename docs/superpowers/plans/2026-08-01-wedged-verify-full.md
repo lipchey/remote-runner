@@ -8,11 +8,15 @@
 
 **Tech Stack:** TypeScript, Node.js filesystem/process APIs, YAML, Vitest, Bash, pnpm 11, SSH, Mutagen, GitHub CLI.
 
-**Provider status:** Planned on 2026-08-01 from design commit `de0323a`.
+**Provider status:** Completed on 2026-08-01 by this PR. The final provider gate passed 464/464
+tests across 43 files plus formatting, typecheck, and build. The installed immutable receipt is
+`remote-runner 0.1.0 (app 7a8c454469133bf4e4633bef)`; both the verified build bootstrap and the
+installed CLI's idempotent reinstall returned that identity.
 
-**Consumer status:** Planned; starts after the verified provider build is installed.
+**Consumer status:** Active; the verified provider build is installed and Ariadne integration is
+the next milestone.
 
-**Overall status:** Planned.
+**Overall status:** In progress pending Ariadne live acceptance and consumer publication.
 
 ---
 
@@ -25,7 +29,7 @@
 - Modify: `tests/unit/config/manifest-fixture.ts`
 - Test: `tests/unit/config/load-manifest.test.ts`
 
-- [ ] **Step 1: Write failing manifest tests**
+- [x] **Step 1: Write failing manifest tests**
 
 Add a valid fixture shape and assertions equivalent to:
 
@@ -48,14 +52,14 @@ expect(manifest.profiles[0]?.bootstrap.artifacts).toEqual([
 Also prove omission normalizes to `[]`, and reject `/tmp/bundle`, `../bundle`,
 `runner/./bundle`, `runner//bundle`, a backslash path, and a NUL-containing path.
 
-- [ ] **Step 2: Run the parser tests and observe RED**
+- [x] **Step 2: Run the parser tests and observe RED**
 
 Run: `rtk pnpm exec vitest run tests/unit/config/load-manifest.test.ts`
 
 Expected: FAIL because `bootstrap.artifacts` is an unknown field and the normalized type has no
 artifact list.
 
-- [ ] **Step 3: Implement the normalized contract**
+- [x] **Step 3: Implement the normalized contract**
 
 Extend the bootstrap type with `artifacts: string[]`. Add `artifacts` to the closed bootstrap keys
 and parse it with the existing safe repository-path validator:
@@ -72,13 +76,13 @@ artifacts: bootstrap.artifacts === undefined ? [] : safePaths(bootstrap.artifact
 
 Keep schema version 1 and preserve every existing manifest through the empty-list default.
 
-- [ ] **Step 4: Run the parser tests and observe GREEN**
+- [x] **Step 4: Run the parser tests and observe GREEN**
 
 Run: `rtk pnpm exec vitest run tests/unit/config/load-manifest.test.ts`
 
 Expected: all manifest tests pass.
 
-- [ ] **Step 5: Commit the contract slice**
+- [x] **Step 5: Commit the contract slice**
 
 ```bash
 rtk git add -- src/config/types.ts src/config/load-manifest.ts tests/unit/config/manifest-fixture.ts tests/unit/config/load-manifest.test.ts
@@ -92,7 +96,7 @@ rtk git commit -m "feat: declare bootstrap artifacts"
 - Modify: `src/bootstrap/dependencies.ts`
 - Test: `tests/unit/bootstrap/dependencies.test.ts`
 
-- [ ] **Step 1: Write failing convergence tests**
+- [x] **Step 1: Write failing convergence tests**
 
 Extend `FakeRuntime` with a deterministic artifact result queue and record calls as
 `artifact:<path>:<workspace>`. Add tests proving:
@@ -126,13 +130,13 @@ Add one test for an artifact check exit code other than `0` or `1`; it must fail
 inspection error and must not guess that setup is safe. Preserve the existing empty-artifact and
 empty-ensure behavior.
 
-- [ ] **Step 2: Run the dependency tests and observe RED**
+- [x] **Step 2: Run the dependency tests and observe RED**
 
 Run: `rtk pnpm exec vitest run tests/unit/bootstrap/dependencies.test.ts`
 
 Expected: FAIL because the runtime and input have no artifact-check seam.
 
-- [ ] **Step 3: Implement one-shot artifact convergence**
+- [x] **Step 3: Implement one-shot artifact convergence**
 
 Add these interfaces:
 
@@ -164,13 +168,13 @@ After `runSetup`, call `checkArtifacts(..., true)` before `runEnsure(..., true)`
 state only after both succeed. Validate every artifact with the same `safeRelative` predicate used
 for setup scripts.
 
-- [ ] **Step 4: Run the dependency tests and observe GREEN**
+- [x] **Step 4: Run the dependency tests and observe GREEN**
 
 Run: `rtk pnpm exec vitest run tests/unit/bootstrap/dependencies.test.ts`
 
 Expected: all convergence tests pass, including old fingerprint-only compatibility.
 
-- [ ] **Step 5: Commit the convergence slice**
+- [x] **Step 5: Commit the convergence slice**
 
 ```bash
 rtk git add -- src/bootstrap/dependencies.ts tests/unit/bootstrap/dependencies.test.ts
@@ -184,7 +188,7 @@ rtk git commit -m "feat: self-heal missing bootstrap artifacts"
 - Modify: `src/app/pilot-services.ts`
 - Test: `tests/unit/app/pilot-services.test.ts`
 
-- [ ] **Step 1: Write a failing fixed-argv test**
+- [x] **Step 1: Write a failing fixed-argv test**
 
 Extend the existing preparation test to declare one artifact and assert that the remote process
 request executes `test -f` as separate arguments from the canonical workspace:
@@ -198,13 +202,13 @@ expect(request.args).toEqual(
 Assert the artifact check occurs before setup is skipped and that no joined/interpolated command
 contains the artifact path.
 
-- [ ] **Step 2: Run the pilot-service test and observe RED**
+- [x] **Step 2: Run the pilot-service test and observe RED**
 
 Run: `rtk pnpm exec vitest run tests/unit/app/pilot-services.test.ts`
 
 Expected: FAIL because profile preparation never checks declared artifacts.
 
-- [ ] **Step 3: Wire the remote runtime**
+- [x] **Step 3: Wire the remote runtime**
 
 Pass `this.profile.bootstrap.artifacts` into `ensureDependencySetup`. Implement the runtime method
 with the existing fixed workspace command wrapper:
@@ -220,13 +224,13 @@ checkArtifact: async (artifact, workspaceRoot) => {
 
 Do not add a shell-interpolated path or an Ariadne-specific bundle check.
 
-- [ ] **Step 4: Run focused runner tests and observe GREEN**
+- [x] **Step 4: Run focused runner tests and observe GREEN**
 
 Run: `rtk pnpm exec vitest run tests/unit/app/pilot-services.test.ts tests/unit/bootstrap/dependencies.test.ts`
 
 Expected: both files pass.
 
-- [ ] **Step 5: Commit the Linux wiring**
+- [x] **Step 5: Commit the Linux wiring**
 
 ```bash
 rtk git add -- src/app/pilot-services.ts tests/unit/app/pilot-services.test.ts
@@ -244,7 +248,7 @@ rtk git commit -m "feat: check remote bootstrap artifacts"
 - Modify: `tests/unit/node/local-install.test.ts`
 - Modify: `tests/unit/main.test.ts`
 
-- [ ] **Step 1: Write failing receipt and install-source tests**
+- [x] **Step 1: Write failing receipt and install-source tests**
 
 Define the wished-for receipt contract in tests:
 
@@ -274,13 +278,13 @@ expect(installSourceRoots).toEqual([process.cwd()]);
 
 Also assert `install extra` is rejected and an install failure includes its bounded error message.
 
-- [ ] **Step 2: Run the receipt/install tests and observe RED**
+- [x] **Step 2: Run the receipt/install tests and observe RED**
 
 Run: `rtk pnpm exec vitest run tests/unit/node/install-receipt.test.ts tests/unit/node/local-install.test.ts tests/unit/main.test.ts`
 
 Expected: FAIL because receipts, checkout provenance, and `--version` do not exist.
 
-- [ ] **Step 3: Implement the immutable receipt**
+- [x] **Step 3: Implement the immutable receipt**
 
 Create `install-receipt.ts` with a closed parser/formatter for:
 
@@ -300,7 +304,7 @@ Change `installCurrentApplication` to accept `sourceRoot = process.cwd()` and re
 `<sourceRoot>/dist/src/main.js`, launcher assets, yaml runtime dependency, and package metadata.
 Do not fall back to the currently installed module URL when the requested checkout is invalid.
 
-- [ ] **Step 4: Add main command semantics**
+- [x] **Step 4: Add main command semantics**
 
 Extend `MainDependencies` with an install function receiving `sourceRoot` and a receipt reader.
 Handle exact `--version` before delegating to `runCli`. Handle exact `install` by passing
@@ -313,13 +317,13 @@ installed remote-runner 0.1.0 (app <identity>): <executable path>
 On failure print `remote-runner install failed: <bounded cause>` and return 70. Reject arguments
 after `install` with exit 2.
 
-- [ ] **Step 5: Run the receipt/install tests and observe GREEN**
+- [x] **Step 5: Run the receipt/install tests and observe GREEN**
 
 Run: `rtk pnpm exec vitest run tests/unit/node/install-receipt.test.ts tests/unit/node/local-install.test.ts tests/unit/main.test.ts`
 
 Expected: all receipt and install tests pass.
 
-- [ ] **Step 6: Commit the installer slice**
+- [x] **Step 6: Commit the installer slice**
 
 ```bash
 rtk git add -- src/node/install-receipt.ts src/node/local-install.ts src/main.ts tests/unit/node/install-receipt.test.ts tests/unit/node/local-install.test.ts tests/unit/main.test.ts
@@ -335,24 +339,24 @@ rtk git commit -m "fix: install the current runner checkout"
 - Modify: `docs/specs/2026-07-31-remote-runner-design.md`
 - Modify: `docs/superpowers/plans/2026-08-01-wedged-verify-full.md`
 
-- [ ] **Step 1: Document artifacts and install receipts**
+- [x] **Step 1: Document artifacts and install receipts**
 
 Add the optional `bootstrap.artifacts` example and state that artifacts are checked on every
 preparation, missing files trigger setup once, and persistent absence fails closed. Update install
 instructions to require a built checkout and show `remote-runner --version` as the receipt check.
 
-- [ ] **Step 2: Add runbook diagnosis**
+- [x] **Step 2: Add runbook diagnosis**
 
 Document the difference among fingerprint drift, ensure failure, missing bootstrap artifact, and
 artifact inspection failure. Do not recommend manual remote bundle creation as a durable fix.
 
-- [ ] **Step 3: Run documentation checks**
+- [x] **Step 3: Run documentation checks**
 
 Run: `rtk pnpm exec prettier --check README.md docs/RUNBOOK.md docs/specs/2026-07-31-remote-runner-design.md docs/superpowers/specs/2026-08-01-wedged-verify-full-design.md docs/superpowers/plans/2026-08-01-wedged-verify-full.md`
 
 Expected: all matched files use Prettier code style.
 
-- [ ] **Step 4: Commit runner documentation**
+- [x] **Step 4: Commit runner documentation**
 
 ```bash
 rtk git add -- README.md docs/RUNBOOK.md docs/specs/2026-07-31-remote-runner-design.md docs/superpowers/plans/2026-08-01-wedged-verify-full.md
@@ -366,13 +370,13 @@ rtk git commit -m "docs: explain bootstrap artifact recovery"
 - Verify all files in `/Users/admin/Projects/worktrees/remote-runner-wedged-verify-full`.
 - Update: `docs/superpowers/plans/2026-08-01-wedged-verify-full.md`
 
-- [ ] **Step 1: Run the complete runner gate**
+- [x] **Step 1: Run the complete runner gate**
 
 Run: `rtk pnpm verify`
 
 Expected: format check, typecheck, all Vitest tests, and build pass.
 
-- [ ] **Step 2: Exercise the upgrade bootstrap path**
+- [x] **Step 2: Exercise the upgrade bootstrap path**
 
 The old installed binary cannot contain the new source-selection fix, so perform this first upgrade
 through the verified build:
@@ -387,7 +391,7 @@ that immutable app directory. Then run `/Users/admin/.local/bin/remote-runner in
 the worktree and require the same identity to prove the fixed installed CLI now selects the current
 checkout idempotently.
 
-- [ ] **Step 3: Record provider acceptance before publication**
+- [x] **Step 3: Record provider acceptance before publication**
 
 Update `Provider status` to `Completed`, keep `Consumer status` explicit as the next active
 milestone, record the verified test count and installed app identity, and state that provider
