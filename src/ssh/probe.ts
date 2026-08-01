@@ -1,11 +1,5 @@
 export type UnavailableReason =
-  | "dns"
-  | "host-key"
-  | "authentication"
-  | "transport"
-  | "remote-shell"
-  | "capacity"
-  | "bootstrap";
+  "dns" | "host-key" | "authentication" | "transport" | "remote-shell" | "capacity" | "bootstrap";
 
 export type ProbeResult = { readonly ok: true } | { readonly ok: false; readonly reason: UnavailableReason };
 
@@ -20,7 +14,11 @@ export function classifySshFailure(stderr: string, exitCode: number): Unavailabl
   if (/permission denied|authentication failed|too many authentication failures/iu.test(stderr)) {
     return "authentication";
   }
-  if (/connection (?:timed out|refused|reset|closed)|no route to host|network is unreachable|operation timed out|connection to .* port .* timed out/iu.test(stderr)) {
+  if (
+    /connection (?:timed out|refused|reset|closed)|no route to host|network is unreachable|operation timed out|connection to .* port .* timed out/iu.test(
+      stderr,
+    )
+  ) {
     return "transport";
   }
   return "remote-shell";

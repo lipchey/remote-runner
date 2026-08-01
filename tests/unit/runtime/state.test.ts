@@ -4,11 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-  readVersionedState,
-  type StateFileSystem,
-  writeVersionedState,
-} from "../../../src/runtime/state.js";
+import { readVersionedState, type StateFileSystem, writeVersionedState } from "../../../src/runtime/state.js";
 
 const temporaryRoots: string[] = [];
 
@@ -101,9 +97,9 @@ describe("versioned state", () => {
           ? `sync:${temporaryPath}`
           : `rename:${temporaryPath}->${path}`;
 
-    await expect(
-      writeVersionedState(files, path, 1, { ready: true }, () => "failure-token"),
-    ).rejects.toMatchObject({ code: "EIO" });
+    await expect(writeVersionedState(files, path, 1, { ready: true }, () => "failure-token")).rejects.toMatchObject({
+      code: "EIO",
+    });
 
     expect(await readdir(root)).toEqual([]);
     expect(files.events.at(-1)).toBe(`remove:${temporaryPath}`);
@@ -118,9 +114,9 @@ describe("versioned state", () => {
     files.failCode = "EEXIST";
     files.failEvent = `rename:${temporaryPath}->${path}`;
 
-    await expect(
-      writeVersionedState(files, path, 1, { ready: true }, () => "rename-collision"),
-    ).rejects.toMatchObject({ code: "EEXIST" });
+    await expect(writeVersionedState(files, path, 1, { ready: true }, () => "rename-collision")).rejects.toMatchObject({
+      code: "EEXIST",
+    });
 
     expect(await readdir(root)).toEqual([]);
     expect(files.events.at(-1)).toBe(`remove:${temporaryPath}`);
@@ -134,9 +130,9 @@ describe("versioned state", () => {
     const files = new NodeStateFiles();
     await writeFile(temporaryPath, "pre-existing", { mode: 0o600 });
 
-    await expect(
-      writeVersionedState(files, path, 1, { ready: true }, () => "create-collision"),
-    ).rejects.toMatchObject({ code: "EEXIST" });
+    await expect(writeVersionedState(files, path, 1, { ready: true }, () => "create-collision")).rejects.toMatchObject({
+      code: "EEXIST",
+    });
 
     expect(await readFile(temporaryPath, "utf8")).toBe("pre-existing");
     expect(files.events.some((event) => event === `remove:${temporaryPath}`)).toBe(false);

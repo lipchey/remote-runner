@@ -26,21 +26,71 @@ export interface DoctorRuntime {
 }
 
 export const DIAGNOSTIC_PROBES = [
-  { id: "network.dns", reason: "dns", readOnly: true, command: ["dscacheutil", "-q", "host", "-a", "name", "<remote>"] },
+  {
+    id: "network.dns",
+    reason: "dns",
+    readOnly: true,
+    command: ["dscacheutil", "-q", "host", "-a", "name", "<remote>"],
+  },
   { id: "ssh.host-key", reason: "host-key", readOnly: true, command: ["ssh-keygen", "-F", "<remote>"] },
-  { id: "ssh.authentication", reason: "authentication", readOnly: true, command: ["ssh", "-o", "BatchMode=yes", "<remote>", "true"] },
-  { id: "ssh.transport", reason: "transport", readOnly: true, command: ["ssh", "-o", "ConnectTimeout=5", "<remote>", "true"] },
-  { id: "ssh.remote-shell", reason: "remote-shell", readOnly: true, command: ["ssh", "<remote>", "printf remote-shell-ok"] },
+  {
+    id: "ssh.authentication",
+    reason: "authentication",
+    readOnly: true,
+    command: ["ssh", "-o", "BatchMode=yes", "<remote>", "true"],
+  },
+  {
+    id: "ssh.transport",
+    reason: "transport",
+    readOnly: true,
+    command: ["ssh", "-o", "ConnectTimeout=5", "<remote>", "true"],
+  },
+  {
+    id: "ssh.remote-shell",
+    reason: "remote-shell",
+    readOnly: true,
+    command: ["ssh", "<remote>", "printf remote-shell-ok"],
+  },
   { id: "remote.capacity", reason: "capacity", readOnly: true, command: ["ssh", "<remote>", "df -Pk <workspace>"] },
-  { id: "remote.bootstrap", reason: "bootstrap", readOnly: true, command: ["ssh", "<remote>", "test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm"] },
-  { id: "profile.validation", reason: "validation", readOnly: true, command: ["remote-runner", "validate", "<profile>"] },
+  {
+    id: "remote.bootstrap",
+    reason: "bootstrap",
+    readOnly: true,
+    command: ["ssh", "<remote>", "test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm"],
+  },
+  {
+    id: "profile.validation",
+    reason: "validation",
+    readOnly: true,
+    command: ["remote-runner", "validate", "<profile>"],
+  },
   { id: "runtime.lock", reason: "lock", readOnly: true, command: ["ls", "-ld", "<lock-root>"] },
   { id: "sync.session", reason: "sync", readOnly: true, command: ["mutagen", "sync", "list", "<session>"] },
-  { id: "remote.workspace", reason: "workspace", readOnly: true, command: ["ssh", "<remote>", "git -C <workspace> status --short --branch"] },
-  { id: "secrets.persistence", reason: "secrets", readOnly: true, command: ["ssh", "<remote>", "find <workspace> -maxdepth 1 -name .env -print"] },
-  { id: "controller.health", reason: "controller", readOnly: true, command: ["launchctl", "print", "gui/<uid>/com.lipchey.remote-runner"] },
+  {
+    id: "remote.workspace",
+    reason: "workspace",
+    readOnly: true,
+    command: ["ssh", "<remote>", "git -C <workspace> status --short --branch"],
+  },
+  {
+    id: "secrets.persistence",
+    reason: "secrets",
+    readOnly: true,
+    command: ["ssh", "<remote>", "find <workspace> -maxdepth 1 -name .env -print"],
+  },
+  {
+    id: "controller.health",
+    reason: "controller",
+    readOnly: true,
+    command: ["launchctl", "print", "gui/<uid>/com.lipchey.remote-runner"],
+  },
   { id: "workload.child-start", reason: "child-start", readOnly: true, command: ["tail", "-n", "50", "<runner-log>"] },
-  { id: "network.timeout", reason: "timeout", readOnly: true, command: ["ssh", "-o", "ConnectTimeout=2", "<remote>", "true"] },
+  {
+    id: "network.timeout",
+    reason: "timeout",
+    readOnly: true,
+    command: ["ssh", "-o", "ConnectTimeout=2", "<remote>", "true"],
+  },
   { id: "runtime.unknown", reason: "unknown", readOnly: true, command: ["remote-runner", "status", "<profile>"] },
 ] as const satisfies readonly DiagnosticProbe[];
 

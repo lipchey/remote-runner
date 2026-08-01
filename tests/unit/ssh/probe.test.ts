@@ -1,11 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  capacityProbe,
-  classifySshFailure,
-  probeTwice,
-  type ProbeResult,
-} from "../../../src/ssh/probe.js";
+import { capacityProbe, classifySshFailure, probeTwice, type ProbeResult } from "../../../src/ssh/probe.js";
 
 describe("SSH availability reasons", () => {
   it.each([
@@ -18,16 +13,16 @@ describe("SSH availability reasons", () => {
     expect(classifySshFailure(stderr, 255)).toBe(reason);
   });
 
-  it.each([
-    "Permission denied (publickey).",
-    "Connection closed by remote host",
-    "Host key verification failed.",
-  ])("treats remote command stderr as remote-shell for non-255 exit: %s", (stderr) => {
-    expect(classifySshFailure(stderr, 23)).toBe("remote-shell");
-  });
+  it.each(["Permission denied (publickey).", "Connection closed by remote host", "Host key verification failed."])(
+    "treats remote command stderr as remote-shell for non-255 exit: %s",
+    (stderr) => {
+      expect(classifySshFailure(stderr, 23)).toBe("remote-shell");
+    },
+  );
 
   it("does not declare an outage after one transient failure", async () => {
-    const once = vi.fn<() => Promise<ProbeResult>>()
+    const once = vi
+      .fn<() => Promise<ProbeResult>>()
       .mockResolvedValueOnce({ ok: false, reason: "transport" })
       .mockResolvedValueOnce({ ok: true });
 
@@ -42,7 +37,8 @@ describe("SSH availability reasons", () => {
   });
 
   it("reports only the second reason after two failed probes", async () => {
-    const once = vi.fn<() => Promise<ProbeResult>>()
+    const once = vi
+      .fn<() => Promise<ProbeResult>>()
       .mockResolvedValueOnce({ ok: false, reason: "dns" })
       .mockResolvedValueOnce({ ok: false, reason: "authentication" });
 

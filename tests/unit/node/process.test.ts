@@ -41,14 +41,19 @@ describe("runStreamingProcess", () => {
 
     const result = await runStreamingProcess({
       command: process.execPath,
-      args: ["-e", [
-        "process.stdin.resume();",
-        "process.stderr.write('before\\nRR_CHILD_STARTED\\nafter\\n');",
-        "process.stdout.write('visible');",
-      ].join("")],
+      args: [
+        "-e",
+        [
+          "process.stdin.resume();",
+          "process.stderr.write('before\\nRR_CHILD_STARTED\\nafter\\n');",
+          "process.stdout.write('visible');",
+        ].join(""),
+      ],
       stdin: input,
       marker: new TextEncoder().encode("RR_CHILD_STARTED\n"),
-      onMarker: async () => { markers += 1; },
+      onMarker: async () => {
+        markers += 1;
+      },
       stdout: (chunk) => stdout.push(chunk),
       stderr: (chunk) => stderr.push(chunk),
     });

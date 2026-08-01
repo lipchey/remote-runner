@@ -9,14 +9,37 @@ class FakeRuntime implements MacInstallRuntime {
   statuses = new Map<string, Status>();
   launch = { loaded: false, running: false };
   uid = 501;
-  async currentUid() { return this.uid; }
-  async inspectArtifact(path: string) { this.calls.push(`inspect:${path}`); return this.statuses.get(path) ?? "missing"; }
-  async writeOwned(path: string, _contents: Uint8Array, mode: number) { this.calls.push(`write:${path}:${mode.toString(8)}`); this.statuses.set(path, "compatible"); }
-  async launchStatus() { this.calls.push("launch-status"); return this.launch; }
-  async bootstrap(domain: string, path: string) { this.calls.push(`bootstrap:${domain}:${path}`); this.launch = { loaded: true, running: true }; }
-  async bootout(domain: string, label: string) { this.calls.push(`bootout:${domain}:${label}`); this.launch = { loaded: false, running: false }; }
-  async kickstart(domain: string, label: string) { this.calls.push(`kickstart:${domain}:${label}`); this.launch.running = true; }
-  async removeOwned(path: string) { this.calls.push(`remove:${path}`); this.statuses.set(path, "missing"); }
+  async currentUid() {
+    return this.uid;
+  }
+  async inspectArtifact(path: string) {
+    this.calls.push(`inspect:${path}`);
+    return this.statuses.get(path) ?? "missing";
+  }
+  async writeOwned(path: string, _contents: Uint8Array, mode: number) {
+    this.calls.push(`write:${path}:${mode.toString(8)}`);
+    this.statuses.set(path, "compatible");
+  }
+  async launchStatus() {
+    this.calls.push("launch-status");
+    return this.launch;
+  }
+  async bootstrap(domain: string, path: string) {
+    this.calls.push(`bootstrap:${domain}:${path}`);
+    this.launch = { loaded: true, running: true };
+  }
+  async bootout(domain: string, label: string) {
+    this.calls.push(`bootout:${domain}:${label}`);
+    this.launch = { loaded: false, running: false };
+  }
+  async kickstart(domain: string, label: string) {
+    this.calls.push(`kickstart:${domain}:${label}`);
+    this.launch.running = true;
+  }
+  async removeOwned(path: string) {
+    this.calls.push(`remove:${path}`);
+    this.statuses.set(path, "missing");
+  }
 }
 
 const options = {
@@ -84,7 +107,9 @@ describe("macOS lifecycle install", () => {
     runtime.statuses.set("~/.local/bin/remote-runner-user", "foreign");
     runtime.launch = { loaded: true, running: true };
     await uninstallMac(runtime);
-    expect(runtime.calls.filter((call) => call.startsWith("remove:")).map((call) => call.slice(7))).toEqual([...OWNED_MAC_PATHS].reverse());
+    expect(runtime.calls.filter((call) => call.startsWith("remove:")).map((call) => call.slice(7))).toEqual(
+      [...OWNED_MAC_PATHS].reverse(),
+    );
     expect(runtime.calls.join("\n")).not.toContain("remote-runner-user");
   });
 });

@@ -37,9 +37,13 @@ export class NodeTelegramRuntime implements TelegramRuntime {
       const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0);
       const after = await handle.stat();
       if (
-        bytesRead > MAX_CONFIG_BYTES || before.dev !== after.dev || before.ino !== after.ino ||
-        before.size !== after.size || after.size !== bytesRead
-      ) throw new Error("Telegram config changed while reading");
+        bytesRead > MAX_CONFIG_BYTES ||
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        after.size !== bytesRead
+      )
+        throw new Error("Telegram config changed while reading");
       return {
         contents: buffer.subarray(0, bytesRead),
         uid: after.uid,
@@ -84,7 +88,10 @@ export class NodeTelegramRuntime implements TelegramRuntime {
       }
       const body = new Uint8Array(total);
       let offset = 0;
-      for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+      for (const chunk of chunks) {
+        body.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
       return { status: response.status, body };
     } finally {
       clearTimeout(timeout);
@@ -107,9 +114,16 @@ export function createNodeNotificationCallbacks(options: NodeNotificationOptions
   const telegram = options.telegram ?? new NodeTelegramRuntime();
   const runtime: OutageRuntime = {
     async readState() {
-      try { return JSON.parse(await readFile(options.statePath, "utf8")) as OutageState; }
-      catch (caught) {
-        if (typeof caught === "object" && caught !== null && "code" in caught && (caught as { code?: unknown }).code === "ENOENT") return undefined;
+      try {
+        return JSON.parse(await readFile(options.statePath, "utf8")) as OutageState;
+      } catch (caught) {
+        if (
+          typeof caught === "object" &&
+          caught !== null &&
+          "code" in caught &&
+          (caught as { code?: unknown }).code === "ENOENT"
+        )
+          return undefined;
         throw caught;
       }
     },
@@ -126,7 +140,9 @@ export function createNodeNotificationCallbacks(options: NodeNotificationOptions
     },
   };
 
-  const visible = async (operation: () => Promise<{ readonly delivered: boolean; readonly pending: number }>): Promise<void> => {
+  const visible = async (
+    operation: () => Promise<{ readonly delivered: boolean; readonly pending: number }>,
+  ): Promise<void> => {
     try {
       const result = await operation();
       if (!result.delivered || result.pending > 0) options.stderr("remote-runner: Telegram notification pending");

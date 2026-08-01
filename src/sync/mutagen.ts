@@ -139,11 +139,7 @@ function validateOptions(options: MutagenSessionOptions): ValidatedSession {
 }
 
 function bounded(result: BoundedProcessResult, label: string): void {
-  if (
-    result.outputTruncated ||
-    result.stdout.byteLength > CAPTURE_BYTES ||
-    result.stderr.byteLength > CAPTURE_BYTES
-  ) {
+  if (result.outputTruncated || result.stdout.byteLength > CAPTURE_BYTES || result.stderr.byteLength > CAPTURE_BYTES) {
     throw new Error(`${label} exceeded the process output limit`);
   }
 }
@@ -160,7 +156,11 @@ function parseListing(contents: Uint8Array): SessionRecord[] {
   const output = decode(contents, "Mutagen session list");
   if (output.length === 0) return [];
   let value: unknown;
-  try { value = JSON.parse(output); } catch { throw new Error("Mutagen session list returned malformed JSON"); }
+  try {
+    value = JSON.parse(output);
+  } catch {
+    throw new Error("Mutagen session list returned malformed JSON");
+  }
   if (!Array.isArray(value)) throw new Error("Mutagen session list must return a JSON array");
   // Mirrors Mutagen's public Session JSON emitted by sync/list.go via `{{ json . }}`.
   return value.map((item) => {
@@ -194,9 +194,12 @@ function parseListing(contents: Uint8Array): SessionRecord[] {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function text(value: unknown): value is string { return typeof value === "string" && value.length > 0; }
+function text(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
 function nestedText(value: unknown, key: string): string {
-  if (!isRecord(value) || !text(value[key])) throw new Error("Mutagen session list returned a malformed endpoint or configuration");
+  if (!isRecord(value) || !text(value[key]))
+    throw new Error("Mutagen session list returned a malformed endpoint or configuration");
   return value[key];
 }
 
@@ -225,7 +228,21 @@ function statusKind(record: SessionRecord): "paused" | "healthy" | "recoverable"
   if (record.paused) return "paused";
   const status = record.status!;
   if (status === "disconnected" || status.startsWith("halted-")) return "recoverable";
-  if (["watching", "scanning", "waiting-for-rescan", "reconciling", "staging-alpha", "staging-beta", "transitioning", "saving", "connecting-alpha", "connecting-beta"].includes(status)) return "healthy";
+  if (
+    [
+      "watching",
+      "scanning",
+      "waiting-for-rescan",
+      "reconciling",
+      "staging-alpha",
+      "staging-beta",
+      "transitioning",
+      "saving",
+      "connecting-alpha",
+      "connecting-beta",
+    ].includes(status)
+  )
+    return "healthy";
   throw new Error(`Mutagen session has unrecognized status: ${status}`);
 }
 

@@ -22,15 +22,17 @@ export interface FingerprintInput {
 }
 
 const encoder = new TextEncoder();
-const compareText = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
+const compareText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
 
 function safeRelative(value: string): boolean {
-  return value.length > 0 &&
+  return (
+    value.length > 0 &&
     !value.startsWith("/") &&
     !value.includes("\\") &&
     !/[\u0000-\u001f\u007f]/u.test(value) &&
     !/^[A-Za-z]:/u.test(value) &&
-    value.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+    value.split("/").every((part) => part !== "" && part !== "." && part !== "..")
+  );
 }
 
 function field(value: string, label: string): Uint8Array {
@@ -43,7 +45,10 @@ function concatenate(parts: readonly Uint8Array[]): Uint8Array {
   const length = parts.reduce((total, part) => total + part.byteLength, 0);
   const result = new Uint8Array(length);
   let offset = 0;
-  for (const part of parts) { result.set(part, offset); offset += part.byteLength; }
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.byteLength;
+  }
   return result;
 }
 
@@ -61,11 +66,16 @@ function environmentRecord(environment: EnvironmentIdentity): Record<string, str
 export async function dependencyFingerprint(runtime: FingerprintRuntime, input: FingerprintInput): Promise<string> {
   const uniqueFiles = new Set(input.files);
   if (uniqueFiles.size !== input.files.length) throw new Error("fingerprint file list contains a duplicate");
-  for (const path of input.files) if (!safeRelative(path)) throw new Error("fingerprint file must be a safe relative path");
-  const gitlinks = [...await runtime.listGitlinks()].sort((left, right) => compareText(left.path, right.path));
+  for (const path of input.files)
+    if (!safeRelative(path)) throw new Error("fingerprint file must be a safe relative path");
+  const gitlinks = [...(await runtime.listGitlinks())].sort((left, right) => compareText(left.path, right.path));
   const seenGitlinks = new Set<string>();
   for (const gitlink of gitlinks) {
-    if (!safeRelative(gitlink.path) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(gitlink.oid) || seenGitlinks.has(gitlink.path)) {
+    if (
+      !safeRelative(gitlink.path) ||
+      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(gitlink.oid) ||
+      seenGitlinks.has(gitlink.path)
+    ) {
       throw new Error("fingerprint gitlink is malformed or duplicated");
     }
     seenGitlinks.add(gitlink.path);
@@ -74,7 +84,12 @@ export async function dependencyFingerprint(runtime: FingerprintRuntime, input: 
   for (const path of [...input.files].sort()) {
     if (seenGitlinks.has(path)) continue;
     const contents = await runtime.readFile(path);
-    parts.push(field("file", "record kind"), field(path, "file path"), field(String(contents.byteLength), "file length"), contents);
+    parts.push(
+      field("file", "record kind"),
+      field(path, "file path"),
+      field(String(contents.byteLength), "file length"),
+      contents,
+    );
   }
   for (const gitlink of gitlinks) {
     parts.push(field("gitlink", "record kind"), field(gitlink.path, "gitlink path"), field(gitlink.oid, "gitlink OID"));

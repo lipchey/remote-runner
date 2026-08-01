@@ -37,7 +37,11 @@ function exactDigest(manifest: string, archive: string): string {
 
 export async function installMutagen(runtime: MutagenInstallRuntime, options: MutagenInstallOptions) {
   if (!VERSION.test(options.version)) throw new Error("Mutagen version must be exact semver");
-  if (!posix.isAbsolute(options.installRoot) || posix.normalize(options.installRoot) !== options.installRoot || options.installRoot === "/") {
+  if (
+    !posix.isAbsolute(options.installRoot) ||
+    posix.normalize(options.installRoot) !== options.installRoot ||
+    options.installRoot === "/"
+  ) {
     throw new Error("Mutagen install root must be a canonical absolute path");
   }
   const arch = mutagenDarwinArchitecture(options.machine);

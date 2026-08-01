@@ -11,9 +11,7 @@ import {
 class FakeDoctorRuntime implements DoctorRuntime {
   readonly observed: string[] = [];
 
-  constructor(
-    private readonly outcomes: Readonly<Record<string, "ok" | "warn" | "fail">> = {},
-  ) {}
+  constructor(private readonly outcomes: Readonly<Record<string, "ok" | "warn" | "fail">> = {}) {}
 
   async inspect(probe: (typeof DIAGNOSTIC_PROBES)[number]) {
     this.observed.push(probe.id);
@@ -30,11 +28,13 @@ describe("doctor", () => {
 
     const report = await doctor(runtime);
 
-    expect(report.checks).toContainEqual(expect.objectContaining({
-      id: "ssh.transport",
-      status: "fail",
-      reason: "transport",
-    }));
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        id: "ssh.transport",
+        status: "fail",
+        reason: "transport",
+      }),
+    );
     expect(JSON.stringify(report)).not.toContain("secret-canary");
   });
 
@@ -45,9 +45,7 @@ describe("doctor", () => {
 
     expect(runtime.observed).toEqual(DIAGNOSTIC_PROBES.map((probe) => probe.id));
     expect(DIAGNOSTIC_PROBES.every((probe) => probe.readOnly)).toBe(true);
-    expect(new Set(DIAGNOSTIC_PROBES.map((probe) => probe.reason)).size).toBe(
-      DIAGNOSTIC_PROBES.length,
-    );
+    expect(new Set(DIAGNOSTIC_PROBES.map((probe) => probe.reason)).size).toBe(DIAGNOSTIC_PROBES.length);
     expect(DIAGNOSTIC_PROBES.every((probe) => probe.command.length > 0)).toBe(true);
   });
 
@@ -61,11 +59,13 @@ describe("doctor", () => {
 
     const report = await doctor(runtime);
 
-    expect(report.checks).toContainEqual(expect.objectContaining({
-      id: "sync.session",
-      status: "fail",
-      reason: "sync",
-    }));
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        id: "sync.session",
+        status: "fail",
+        reason: "sync",
+      }),
+    );
     expect(JSON.stringify(report)).not.toContain("secret-canary");
   });
 });
@@ -91,19 +91,29 @@ describe("status formatting", () => {
 describe("bounded log tail", () => {
   it("reads only the owned rotation set and returns the newest bounded lines", async () => {
     const reads: number[] = [];
-    const lines = await tailLogs({
-      async readRotation(index) {
-        reads.push(index);
-        return index === 0 ? "current-a\ncurrent-b\n" : `old-${index}\n`;
+    const lines = await tailLogs(
+      {
+        async readRotation(index) {
+          reads.push(index);
+          return index === 0 ? "current-a\ncurrent-b\n" : `old-${index}\n`;
+        },
       },
-    }, 3);
+      3,
+    );
 
     expect(reads).toEqual([3, 2, 1, 0]);
     expect(lines).toEqual(["old-1", "current-a", "current-b"]);
   });
 
   it("truncates an individual log line before returning it", async () => {
-    const [line] = await tailLogs({ async readRotation() { return "x".repeat(10_000); } }, 1);
+    const [line] = await tailLogs(
+      {
+        async readRotation() {
+          return "x".repeat(10_000);
+        },
+      },
+      1,
+    );
     expect(line).toHaveLength(4_096);
   });
 });

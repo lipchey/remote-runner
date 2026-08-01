@@ -5,10 +5,10 @@ import { SECRET_FRAME_MAGIC, encodeSecretFrame } from "../../../src/secrets/fram
 describe("secret frame", () => {
   it("frames only allowlisted names and keeps values out of metadata", () => {
     const canary = "postgres://secret-canary";
-    const result = encodeSecretFrame(
-      { SECOND_SECRET: "two", NEON_DEV_DATABASE_URL: canary },
-      ["NEON_DEV_DATABASE_URL", "SECOND_SECRET"],
-    );
+    const result = encodeSecretFrame({ SECOND_SECRET: "two", NEON_DEV_DATABASE_URL: canary }, [
+      "NEON_DEV_DATABASE_URL",
+      "SECOND_SECRET",
+    ]);
     expect(result.metadata).toEqual({
       names: ["NEON_DEV_DATABASE_URL", "SECOND_SECRET"],
       bytes: result.stdin.byteLength,

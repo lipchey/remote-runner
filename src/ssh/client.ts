@@ -6,7 +6,8 @@ import type { ProcessRequest, ProcessResult } from "../runtime/contracts.js";
 
 const MAX_CONNECT_TIMEOUT_SECONDS = 300;
 const DEFAULT_CAPTURE_BYTES = 64 * 1024;
-const HOST_KEY_TYPE = /^(?:ssh-(?:rsa|dss|ed25519)|ecdsa-sha2-nistp(?:256|384|521)|sk-(?:ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$/u;
+const HOST_KEY_TYPE =
+  /^(?:ssh-(?:rsa|dss|ed25519)|ecdsa-sha2-nistp(?:256|384|521)|sk-(?:ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$/u;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/u;
 
 export interface BoundedProcessRequest extends ProcessRequest {
@@ -99,11 +100,7 @@ export function encodePosixCommand(remoteArguments: readonly string[]): string {
 }
 
 function assertBoundedResult(result: BoundedProcessResult, maximumBytes: number): void {
-  if (
-    result.outputTruncated ||
-    result.stdout.byteLength > maximumBytes ||
-    result.stderr.byteLength > maximumBytes
-  ) {
+  if (result.outputTruncated || result.stdout.byteLength > maximumBytes || result.stderr.byteLength > maximumBytes) {
     throw new Error("process output limit exceeded");
   }
 }
@@ -187,11 +184,7 @@ export async function enrollKnownHost(
     throw new Error(matching.length === 0 ? "trusted host key not found" : "ambiguous trusted host key");
   }
 
-  await store.persistAtomically(
-    options.knownHostsPath,
-    new TextEncoder().encode(`${matching[0]?.line}\n`),
-    0o600,
-  );
+  await store.persistAtomically(options.knownHostsPath, new TextEncoder().encode(`${matching[0]?.line}\n`), 0o600);
 }
 
 const nodeKnownHostsFiles: KnownHostsFileSystem = {
@@ -255,10 +248,7 @@ export class NodeKnownHostsStore implements KnownHostsStore {
         try {
           await this.files.remove(temporaryPath);
         } catch (cleanupError) {
-          throw new AggregateError(
-            [error, cleanupError],
-            "known_hosts persistence and cleanup failed",
-          );
+          throw new AggregateError([error, cleanupError], "known_hosts persistence and cleanup failed");
         }
       }
       throw error;

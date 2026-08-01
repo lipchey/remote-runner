@@ -23,6 +23,7 @@
 ### Task 1: Add the repository-owned formatter
 
 **Files:**
+
 - Create: `.prettierrc.json`
 - Create: `.prettierignore`
 - Modify: `package.json`
@@ -91,6 +92,7 @@ git commit -m "chore: add Prettier toolchain"
 ### Task 2: Establish the mechanical formatting baseline
 
 **Files:**
+
 - Modify: maintained files selected by `prettier . --write --ignore-unknown`
 
 - [ ] **Step 1: Prove the unformatted baseline is red**
@@ -146,6 +148,7 @@ git commit -m "style: format repository with Prettier"
 ### Task 3: Enforce formatting and preserve blame history
 
 **Files:**
+
 - Create: `.git-blame-ignore-revs`
 - Modify: `package.json`
 - Modify: `README.md`
@@ -199,6 +202,7 @@ git commit -m "chore: enforce Prettier formatting"
 ### Task 4: Acceptance and publication
 
 **Files:**
+
 - Verify: complete committed branch
 
 - [ ] **Step 1: Run final acceptance**

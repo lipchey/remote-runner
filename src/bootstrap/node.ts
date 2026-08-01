@@ -29,9 +29,7 @@ export interface InstalledNode {
   readonly packageManager: string;
 }
 
-export function localNodeVersion(
-  versions: Readonly<{ node?: string }> = process.versions,
-): string {
+export function localNodeVersion(versions: Readonly<{ node?: string }> = process.versions): string {
   const version = versions.node;
   if (version === undefined || !VERSION.test(version)) {
     throw new Error("local Node version must be exact semver");
@@ -46,7 +44,12 @@ export function nodeLinuxArchitecture(machine: string): "x64" | "arm64" {
 }
 
 function assertRoot(root: string): void {
-  if (!posix.isAbsolute(root) || posix.normalize(root) !== root || root === "/" || /[\u0000-\u001f\u007f]/u.test(root)) {
+  if (
+    !posix.isAbsolute(root) ||
+    posix.normalize(root) !== root ||
+    root === "/" ||
+    /[\u0000-\u001f\u007f]/u.test(root)
+  ) {
     throw new Error("toolchain root must be a canonical absolute path");
   }
 }
@@ -70,10 +73,7 @@ function manifestDigest(manifest: string, archive: string): string {
   return matches[0]!;
 }
 
-export async function installNode(
-  runtime: NodeInstallRuntime,
-  options: NodeInstallOptions,
-): Promise<InstalledNode> {
+export async function installNode(runtime: NodeInstallRuntime, options: NodeInstallOptions): Promise<InstalledNode> {
   if (!VERSION.test(options.version)) throw new Error("Node version must be exact semver");
   if (!PACKAGE_MANAGER.test(options.packageManager)) {
     throw new Error("package manager must be an exact package@version specifier");

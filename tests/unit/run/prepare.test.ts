@@ -12,17 +12,34 @@ class FakePreparation implements PreparationRuntime {
   readonly calls: string[] = [];
   failAt?: string;
   retryable = false;
-  async validate() { return this.step("validate"); }
+  async validate() {
+    return this.step("validate");
+  }
   async acquireLock() {
     this.step("lock");
-    return async () => { this.calls.push("release"); };
+    return async () => {
+      this.calls.push("release");
+    };
   }
-  async probe() { return this.step("probe"); }
-  async pauseSync() { return this.step("sync-pause"); }
-  async reconcileWorkspace() { return this.step("git-workspace"); }
-  async resumeAndFlush() { return this.step("sync-resume-flush"); }
-  async bootstrap() { return this.step("bootstrap"); }
-  async collectSecrets() { this.step("secrets"); return { SECRET: "canary" }; }
+  async probe() {
+    return this.step("probe");
+  }
+  async pauseSync() {
+    return this.step("sync-pause");
+  }
+  async reconcileWorkspace() {
+    return this.step("git-workspace");
+  }
+  async resumeAndFlush() {
+    return this.step("sync-resume-flush");
+  }
+  async bootstrap() {
+    return this.step("bootstrap");
+  }
+  async collectSecrets() {
+    this.step("secrets");
+    return { SECRET: "canary" };
+  }
   private step(name: string) {
     this.calls.push(name);
     if (this.failAt === name) {
@@ -35,8 +52,15 @@ class FakePreparation implements PreparationRuntime {
 describe("remote preparation", () => {
   it("declares the exact preparation and child boundary order", () => {
     expect(PREPARATION_STEPS).toEqual([
-      "validate", "lock", "probe", "sync-pause", "git-workspace",
-      "sync-resume-flush", "bootstrap", "secrets", "child-start",
+      "validate",
+      "lock",
+      "probe",
+      "sync-pause",
+      "git-workspace",
+      "sync-resume-flush",
+      "bootstrap",
+      "secrets",
+      "child-start",
     ]);
   });
 
@@ -83,7 +107,9 @@ describe("remote preparation", () => {
 
   it("preserves an explicit stable SSH authentication reason", async () => {
     const runtime = new FakePreparation();
-    runtime.probe = async () => { throw new PreparationError("authentication", false); };
+    runtime.probe = async () => {
+      throw new PreparationError("authentication", false);
+    };
     expect(await prepareRemote(runtime)).toEqual({
       ok: false,
       reason: "authentication",

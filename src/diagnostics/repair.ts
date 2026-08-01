@@ -55,7 +55,12 @@ function validatedActions(runtime: RepairRuntime, actions: readonly RepairAction
       throw new Error("repair target must be an absolute normalized path");
     }
     const pathFromRoot = relative(runtime.identityRoot, action.target);
-    if (pathFromRoot === "" || pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
+    if (
+      pathFromRoot === "" ||
+      pathFromRoot === ".." ||
+      pathFromRoot.startsWith(`..${sep}`) ||
+      isAbsolute(pathFromRoot)
+    ) {
       throw new Error("repair target escapes identity root");
     }
     if (ids.has(action.id) || targets.has(action.target)) throw new Error("repair actions must be unique");
@@ -102,7 +107,8 @@ export async function repair(
     receipt.profile !== profile ||
     receipt.identity !== runtime.identity ||
     receipt.planHash !== plan.planHash
-  ) throw new Error("repair plan changed; run repair --dry-run first");
+  )
+    throw new Error("repair plan changed; run repair --dry-run first");
 
   for (const action of plan.actions) await runtime.apply(action);
   return plan;

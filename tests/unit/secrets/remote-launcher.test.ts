@@ -9,11 +9,15 @@ import { SECRET_FRAME_MAGIC, encodeSecretFrame } from "../../../src/secrets/fram
 const launcher = fileURLToPath(new URL("../../../assets/remote-launcher.mjs", import.meta.url));
 const concat = (parts: readonly Uint8Array[]) => Buffer.concat(parts.map((part) => Buffer.from(part)));
 
-async function runLauncher(frame: Uint8Array, allow = ["SECRET"], command = [
-  process.execPath,
-  "-e",
-  "process.stdout.write(process.env.SECRET === 'secret-canary' ? 'present' : 'missing')",
-]) {
+async function runLauncher(
+  frame: Uint8Array,
+  allow = ["SECRET"],
+  command = [
+    process.execPath,
+    "-e",
+    "process.stdout.write(process.env.SECRET === 'secret-canary' ? 'present' : 'missing')",
+  ],
+) {
   const child = spawn(process.execPath, [launcher, JSON.stringify(allow), "--", ...command], {
     stdio: ["pipe", "pipe", "pipe", "pipe"],
     env: { PATH: process.env.PATH ?? "" },
@@ -25,7 +29,7 @@ async function runLauncher(frame: Uint8Array, allow = ["SECRET"], command = [
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
   child.stdio[3]!.on("data", (chunk: Buffer) => marker.push(chunk));
   child.stdin.end(frame);
-  const [code, signal] = await once(child, "exit") as [number | null, NodeJS.Signals | null];
+  const [code, signal] = (await once(child, "exit")) as [number | null, NodeJS.Signals | null];
   return {
     code,
     signal,
@@ -57,7 +61,11 @@ describe("fixed remote launcher", () => {
 
   it("keeps secret values out of argv and launcher diagnostics", async () => {
     const canary = "secret-canary";
-    const command = [process.execPath, "-e", "process.stdout.write(process.argv.includes('secret-canary') ? 'leaked' : 'clean')"];
+    const command = [
+      process.execPath,
+      "-e",
+      "process.stdout.write(process.argv.includes('secret-canary') ? 'leaked' : 'clean')",
+    ];
     const result = await runLauncher(encodeSecretFrame({ SECRET: canary }, ["SECRET"]).stdin, ["SECRET"], command);
     expect(result.stdout).toBe("clean");
     expect(result.stderr).not.toContain(canary);
@@ -70,7 +78,11 @@ describe("fixed remote launcher", () => {
   });
 
   it("does not claim child start when the executable cannot spawn", async () => {
-    const result = await runLauncher(encodeSecretFrame({ SECRET: "secret-canary" }, ["SECRET"]).stdin, ["SECRET"], ["/definitely/missing"]);
+    const result = await runLauncher(
+      encodeSecretFrame({ SECRET: "secret-canary" }, ["SECRET"]).stdin,
+      ["SECRET"],
+      ["/definitely/missing"],
+    );
     expect(result.code).toBe(70);
     expect(result.marker).toBe("");
     expect(result.stderr).not.toContain("secret-canary");

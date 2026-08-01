@@ -93,16 +93,14 @@ function failedSample(execution: BenchmarkExecution): BenchmarkSample {
   };
 }
 
-function normalizeSample(
-  execution: BenchmarkExecution,
-  result: BenchmarkSampleResult,
-): BenchmarkSample {
+function normalizeSample(execution: BenchmarkExecution, result: BenchmarkSampleResult): BenchmarkSample {
   if (
     !finiteNonNegative(result.syncMs) ||
     !finiteNonNegative(result.setupMs) ||
     !finiteNonNegative(result.workloadMs) ||
     !validStatus(result.status)
-  ) return failedSample(execution);
+  )
+    return failedSample(execution);
   return {
     location: execution.location,
     workloadId: execution.workloadId,
@@ -122,9 +120,7 @@ function median(values: readonly number[]): number {
   if (values.length === 0) throw new Error("cannot aggregate an empty benchmark sample set");
   const sorted = [...values].sort((left, right) => left - right);
   const midpoint = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1
-    ? sorted[midpoint]!
-    : (sorted[midpoint - 1]! + sorted[midpoint]!) / 2;
+  return sorted.length % 2 === 1 ? sorted[midpoint]! : (sorted[midpoint - 1]! + sorted[midpoint]!) / 2;
 }
 
 function optionalMedian(samples: readonly BenchmarkSample[], field: keyof BenchmarkSample): number | undefined {
@@ -180,7 +176,9 @@ function markdown(report: BenchmarkReport): string {
     "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: |",
   ];
   for (const row of report.rows) {
-    lines.push(`| ${row.location} | ${row.workloadId} | ${row.cache} | ${row.samples} | ${row.successfulSamples} | ${row.status} | ${row.wallMedianMs} | ${row.medianMs} | ${row.minMs}–${row.maxMs} | ${row.syncMedianMs} | ${row.setupMedianMs} |`);
+    lines.push(
+      `| ${row.location} | ${row.workloadId} | ${row.cache} | ${row.samples} | ${row.successfulSamples} | ${row.status} | ${row.wallMedianMs} | ${row.medianMs} | ${row.minMs}–${row.maxMs} | ${row.syncMedianMs} | ${row.setupMedianMs} |`,
+    );
   }
   return `${lines.join("\n")}\n`;
 }
@@ -190,7 +188,11 @@ export async function runBenchmark(
   profile: Pick<Profile, "id" | "benchmark">,
 ): Promise<BenchmarkReport> {
   if (!PROFILE_ID.test(profile.id)) throw new Error("benchmark profile id is invalid");
-  if (!Number.isSafeInteger(profile.benchmark.samples) || profile.benchmark.samples < 3 || profile.benchmark.samples > 1_000) {
+  if (
+    !Number.isSafeInteger(profile.benchmark.samples) ||
+    profile.benchmark.samples < 3 ||
+    profile.benchmark.samples > 1_000
+  ) {
     throw new Error("benchmark samples must be an integer between 3 and 1000");
   }
   const createdAt = new Date(runtime.now()).toISOString();
@@ -225,14 +227,16 @@ export async function runBenchmark(
         samples.push(sample);
       }
       for (const cache of ["cold", "warm"] as const) {
-        rows.push(aggregate(
-          location,
-          workload.id,
-          cache,
-          samples.filter((sample) =>
-            sample.location === location && sample.workloadId === workload.id && sample.cache === cache,
+        rows.push(
+          aggregate(
+            location,
+            workload.id,
+            cache,
+            samples.filter(
+              (sample) => sample.location === location && sample.workloadId === workload.id && sample.cache === cache,
+            ),
           ),
-        ));
+        );
       }
     }
   }

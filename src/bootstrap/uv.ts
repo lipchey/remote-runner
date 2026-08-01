@@ -28,7 +28,11 @@ export function uvLinuxTarget(machine: string): "x86_64-unknown-linux-gnu" | "aa
 function validate(options: UvInstallOptions): void {
   if (!VERSION.test(options.version)) throw new Error("uv version must be exact semver");
   if (!SHA256.test(options.sha256)) throw new Error("uv checksum must be pinned SHA-256");
-  if (!posix.isAbsolute(options.toolchainRoot) || posix.normalize(options.toolchainRoot) !== options.toolchainRoot || options.toolchainRoot === "/") {
+  if (
+    !posix.isAbsolute(options.toolchainRoot) ||
+    posix.normalize(options.toolchainRoot) !== options.toolchainRoot ||
+    options.toolchainRoot === "/"
+  ) {
     throw new Error("toolchain root must be a canonical absolute path");
   }
 }
@@ -47,7 +51,10 @@ export async function installUv(runtime: UvInstallRuntime, options: UvInstallOpt
   const stagedRoot = posix.join(extractRoot, `uv-${target}`);
   const finalRoot = posix.join(options.toolchainRoot, `uv-${options.version}-${target}`);
   try {
-    await runtime.download(`https://github.com/astral-sh/uv/releases/download/${options.version}/${archive}`, archivePath);
+    await runtime.download(
+      `https://github.com/astral-sh/uv/releases/download/${options.version}/${archive}`,
+      archivePath,
+    );
     if ((await runtime.sha256(archivePath)) !== options.sha256) throw new Error("uv archive checksum mismatch");
     await runtime.extract(archivePath, extractRoot);
     await runtime.promote(stagedRoot, finalRoot);

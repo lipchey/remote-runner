@@ -64,12 +64,15 @@ class FakeProcesses {
         return result(73, "", "mirror object format mismatch");
       }
       const identity = worktreeIdentity(this.sourceRoot());
-      return result(0, [
-        `root=${this.root}`,
-        `candidate=${this.candidateCanonical ?? `${this.root}/${this.consumer}/${this.profile}/${identity}`}`,
-        `mirror=${this.root}/${this.consumer}/.mirror.git`,
-        "",
-      ].join("\n"));
+      return result(
+        0,
+        [
+          `root=${this.root}`,
+          `candidate=${this.candidateCanonical ?? `${this.root}/${this.consumer}/${this.profile}/${identity}`}`,
+          `mirror=${this.root}/${this.consumer}/.mirror.git`,
+          "",
+        ].join("\n"),
+      );
     }
     if (remote.includes("remote-runner-git-reconcile")) {
       return this.swapAfterPrepare ? result(73, "", "candidate escaped after lock") : result();
@@ -203,13 +206,17 @@ describe("confined Git workspace reconciliation", () => {
     await reconcileWorkspace(options, processes);
 
     expect(processes.requests.filter((request) => request.command === "ssh").map(remoteCommand)).toHaveLength(2);
-    expect(processes.requests.map(remoteCommand).filter((command) => command.includes("remote-runner-git-reconcile"))).toHaveLength(1);
+    expect(
+      processes.requests.map(remoteCommand).filter((command) => command.includes("remote-runner-git-reconcile")),
+    ).toHaveLength(1);
   });
 
   it("rejects root, sibling, prefix-trick, and relative candidates", () => {
     expect(() => assertConfinedWorkspace("/cache/workspaces", "/cache/workspaces")).toThrow("strict descendant");
     expect(() => assertConfinedWorkspace("/cache/workspaces", "/cache/sibling")).toThrow("strict descendant");
-    expect(() => assertConfinedWorkspace("/cache/workspaces", "/cache/workspaces-evil/item")).toThrow("strict descendant");
+    expect(() => assertConfinedWorkspace("/cache/workspaces", "/cache/workspaces-evil/item")).toThrow(
+      "strict descendant",
+    );
     expect(() => assertConfinedWorkspace("/cache/workspaces", "cache/workspaces/item")).toThrow("absolute");
   });
 
@@ -268,8 +275,8 @@ describe("confined Git workspace reconciliation", () => {
     expect(resets).toHaveLength(1);
     expect(resets[0]).toContain("candidate=$(confined_candidate)");
     expect(remoteRoot).toContain(`/ariadne/verify-full/`);
-    expect(resets[0]).not.toContain("--git-dir=\"$mirror\" reset");
-    expect(resets[0]).not.toContain("git -C \"$root\" reset");
+    expect(resets[0]).not.toContain('--git-dir="$mirror" reset');
+    expect(resets[0]).not.toContain('git -C "$root" reset');
     expect(resets[0]).not.toContain(options.sourceRoot);
   });
 
@@ -377,10 +384,7 @@ describe("confined Git workspace reconciliation", () => {
     const { options, processes } = await fixture();
     const identity = worktreeIdentity(options.sourceRoot);
 
-    await Promise.all([
-      reconcileWorkspace(options, processes),
-      reconcileWorkspace(options, processes),
-    ]);
+    await Promise.all([reconcileWorkspace(options, processes), reconcileWorkspace(options, processes)]);
     const transactions = processes.requests
       .filter((request) => request.command === "ssh")
       .map(remoteCommand)
@@ -427,10 +431,11 @@ describe("confined Git workspace reconciliation", () => {
       reconcileWorkspace(second.options, second.processes),
       reconcileWorkspace(other.options, other.processes),
     ]);
-    const lockArgument = (processes: FakeProcesses): string => processes.requests
-      .filter((request) => request.command === "ssh")
-      .map(remoteCommand)
-      .find((command) => command.includes("remote-runner-git-reconcile"))!;
+    const lockArgument = (processes: FakeProcesses): string =>
+      processes.requests
+        .filter((request) => request.command === "ssh")
+        .map(remoteCommand)
+        .find((command) => command.includes("remote-runner-git-reconcile"))!;
 
     expect(lockArgument(first.processes)).toContain(".locks/ariadne.lock");
     expect(lockArgument(second.processes)).toContain(".locks/ariadne.lock");
@@ -441,9 +446,7 @@ describe("confined Git workspace reconciliation", () => {
     const { options, processes } = await fixture();
 
     await reconcileWorkspace(options, processes);
-    const [prepare, reconcile] = processes.requests
-      .filter((request) => request.command === "ssh")
-      .map(remoteCommand);
+    const [prepare, reconcile] = processes.requests.filter((request) => request.command === "ssh").map(remoteCommand);
 
     expect(prepare).toContain('cd -- "$mirror"');
     expect(prepare).toContain('[ "$(pwd -P)" = "$mirror" ]');
@@ -467,7 +470,7 @@ describe("confined Git workspace reconciliation", () => {
 
     expect(localGit[0]?.args).toEqual(["rev-parse", "--show-object-format"]);
     expect(localGit[1]?.args).toEqual(["rev-parse", "--verify", "HEAD^{commit}", "--"]);
-    expect(prepare).toContain("git init --bare --object-format=\"$object_format\" -- .");
+    expect(prepare).toContain('git init --bare --object-format="$object_format" -- .');
     expect(prepare).toContain("rev-parse --show-object-format");
     expect(prepare).toContain(` ${format}`);
   });
@@ -501,10 +504,11 @@ describe("confined Git workspace reconciliation", () => {
     const second = await fixture(root, "ariadne", "quick");
     const firstResult = await reconcileWorkspace(first.options, first.processes);
     const secondResult = await reconcileWorkspace(second.options, second.processes);
-    const transaction = (processes: FakeProcesses): string => processes.requests
-      .filter((request) => request.command === "ssh")
-      .map(remoteCommand)
-      .find((command) => command.includes("remote-runner-git-reconcile"))!;
+    const transaction = (processes: FakeProcesses): string =>
+      processes.requests
+        .filter((request) => request.command === "ssh")
+        .map(remoteCommand)
+        .find((command) => command.includes("remote-runner-git-reconcile"))!;
     const mirror = join(root, "ariadne", ".mirror.git");
     const lockDirectory = join(root, ".locks");
     const tools = join(root, "test-bin");
@@ -521,20 +525,31 @@ describe("confined Git workspace reconciliation", () => {
       mkdir(trap, { mode: 0o700 }),
       writeFile(hold, "hold"),
     ]);
-    await writeExecutable(join(tools, "realpath"), `#!/usr/bin/python3
+    await writeExecutable(
+      join(tools, "realpath"),
+      `#!/usr/bin/python3
 import os, sys
 print(os.path.realpath(sys.argv[-1]))
-`);
-    await writeExecutable(join(tools, "stat"), `#!/usr/bin/python3
+`,
+    );
+    await writeExecutable(
+      join(tools, "stat"),
+      `#!/usr/bin/python3
 import os, stat, sys
 value = os.stat(sys.argv[-1])
 print(value.st_uid if "%u" in sys.argv else format(stat.S_IMODE(value.st_mode), "o"))
-`);
-    await writeExecutable(join(tools, "flock"), `#!/usr/bin/python3
+`,
+    );
+    await writeExecutable(
+      join(tools, "flock"),
+      `#!/usr/bin/python3
 import fcntl, sys
 fcntl.flock(int(sys.argv[-1]), fcntl.LOCK_EX)
-`);
-    await writeExecutable(join(tools, "git"), `#!/bin/sh
+`,
+    );
+    await writeExecutable(
+      join(tools, "git"),
+      `#!/bin/sh
 printf '%s|%s\n' "$(pwd -P)" "$*" >> "$RR_LOG"
 case " $* " in
   *" rev-parse --is-bare-repository "*) printf 'true\n' ;;
@@ -547,7 +562,8 @@ case " $* " in
     while [ -e "$RR_HOLD" ]; do sleep 0.01; done
     ;;
 esac
-`);
+`,
+    );
     const baseEnvironment = {
       ...process.env,
       PATH: `${tools}:${process.env.PATH ?? ""}`,

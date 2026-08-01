@@ -14,10 +14,7 @@ export interface CliDependencies {
   readonly environment?: Readonly<Record<string, string | undefined>>;
   ensureController?(): Promise<void>;
   runProfile?(profile: Profile, command: readonly string[], mode?: RunMode): Promise<number>;
-  enqueuePrewarm?(
-    profile: Profile,
-    manifestPath: string,
-  ): Promise<"published" | "coalesced">;
+  enqueuePrewarm?(profile: Profile, manifestPath: string): Promise<"published" | "coalesced">;
   statusProfile?(profile?: string): Promise<string>;
   doctorProfile?(profile?: string): Promise<unknown>;
   logsProfile?(profile?: string): Promise<readonly string[]>;
@@ -79,15 +76,12 @@ export async function runCli(
   return 2;
 }
 
-async function runBenchmarkCommand(
-  argv: readonly string[],
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<number> {
+async function runBenchmarkCommand(argv: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
   const profileId = argv[0];
   let manifestPath = ".remote-runner.yaml";
   if (
-    profileId === undefined || profileId.startsWith("-") ||
+    profileId === undefined ||
+    profileId.startsWith("-") ||
     (argv.length !== 1 && argv.length !== 3) ||
     (argv.length === 3 && (argv[1] !== "--manifest" || argv[2]?.startsWith("--")))
   ) {
@@ -96,7 +90,9 @@ async function runBenchmarkCommand(
   }
   if (argv[2] !== undefined) manifestPath = argv[2];
   let manifest;
-  try { manifest = await readManifest(manifestPath, dependencies); } catch (error) {
+  try {
+    manifest = await readManifest(manifestPath, dependencies);
+  } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     io.stderr(`invalid manifest: ${message}`);
     return 2;
@@ -151,15 +147,13 @@ async function runReadOnlyDiagnostic(
   return 70;
 }
 
-async function runRepair(
-  argv: readonly string[],
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<number> {
+async function runRepair(argv: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
   const profile = argv[0];
   const mode = argv[1];
   if (
-    argv.length !== 2 || profile === undefined || profile.startsWith("-") ||
+    argv.length !== 2 ||
+    profile === undefined ||
+    profile.startsWith("-") ||
     (mode !== "--dry-run" && mode !== "--apply")
   ) {
     io.stderr("repair requires <profile> --dry-run|--apply");
@@ -184,9 +178,7 @@ async function readManifest(path: string, dependencies: CliDependencies) {
 }
 
 function reportPrewarmFailure(io: CliIo): number {
-  io.stderr(
-    "remote-runner prewarm failed; worktree preserved and the first manual verify will retry",
-  );
+  io.stderr("remote-runner prewarm failed; worktree preserved and the first manual verify will retry");
   return 0;
 }
 
@@ -200,8 +192,7 @@ async function enqueueSelectedPrewarm(
     profileId === undefined ||
     profileId.startsWith("-") ||
     (argv.length !== 1 && argv.length !== 3) ||
-    (argv.length === 3 &&
-      (argv[1] !== "--manifest" || argv[2] === undefined || argv[2].startsWith("--")))
+    (argv.length === 3 && (argv[1] !== "--manifest" || argv[2] === undefined || argv[2].startsWith("--")))
   ) {
     return reportPrewarmFailure(io);
   }
@@ -218,30 +209,17 @@ async function enqueueSelectedPrewarm(
   }
   try {
     const outcome = await dependencies.enqueuePrewarm(profile, manifestPath);
-    io.stdout(
-      outcome === "published"
-        ? `prewarm queued: ${profile.id}`
-        : `prewarm already queued: ${profile.id}`,
-    );
+    io.stdout(outcome === "published" ? `prewarm queued: ${profile.id}` : `prewarm already queued: ${profile.id}`);
     return 0;
   } catch {
     return reportPrewarmFailure(io);
   }
 }
 
-async function runSelectedProfile(
-  argv: readonly string[],
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<number> {
+async function runSelectedProfile(argv: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
   const profileId = argv[0];
   const separator = argv.indexOf("--");
-  if (
-    profileId === undefined ||
-    profileId.startsWith("-") ||
-    separator === 0 ||
-    separator === argv.length - 1
-  ) {
+  if (profileId === undefined || profileId.startsWith("-") || separator === 0 || separator === argv.length - 1) {
     io.stderr("run requires <profile> [options] -- <command...>");
     return 2;
   }
@@ -276,11 +254,7 @@ async function runSelectedProfile(
   if (mode === undefined) {
     const environmentMode = (dependencies.environment ?? process.env).REMOTE_RUNNER_MODE;
     if (environmentMode !== undefined && environmentMode !== "") {
-      if (
-        environmentMode !== "auto" &&
-        environmentMode !== "local" &&
-        environmentMode !== "remote"
-      ) {
+      if (environmentMode !== "auto" && environmentMode !== "local" && environmentMode !== "remote") {
         io.stderr(`invalid REMOTE_RUNNER_MODE: ${environmentMode}`);
         return 2;
       }
@@ -296,7 +270,9 @@ async function runSelectedProfile(
     return 2;
   }
   let manifest;
-  try { manifest = await readManifest(manifestPath, dependencies); } catch (error) {
+  try {
+    manifest = await readManifest(manifestPath, dependencies);
+  } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     io.stderr(`invalid manifest: ${message}`);
     return 2;
@@ -313,7 +289,9 @@ async function runSelectedProfile(
   }
   const effectiveMode = mode ?? profile.mode;
   if (effectiveMode !== "local") {
-    try { await dependencies.ensureController(); } catch {
+    try {
+      await dependencies.ensureController();
+    } catch {
       if (effectiveMode !== "auto" || profile.fallback !== "local") {
         io.stderr("remote-runner controller repair failed");
         return 70;
@@ -321,17 +299,15 @@ async function runSelectedProfile(
       io.stderr("remote-runner controller unavailable; continuing automatic fallback policy");
     }
   }
-  try { return await dependencies.runProfile(profile, command, effectiveMode); } catch {
+  try {
+    return await dependencies.runProfile(profile, command, effectiveMode);
+  } catch {
     io.stderr("remote-runner execution failed");
     return 70;
   }
 }
 
-async function validateManifest(
-  argv: readonly string[],
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<number> {
+async function validateManifest(argv: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
   let manifestPath = ".remote-runner.yaml";
   let profileId: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {

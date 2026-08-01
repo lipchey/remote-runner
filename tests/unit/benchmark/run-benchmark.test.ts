@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { loadManifestText } from "../../../src/config/load-manifest.js";
-import {
-  runBenchmark,
-  type BenchmarkExecution,
-  type BenchmarkRuntime,
-} from "../../../src/benchmark/run-benchmark.js";
+import { runBenchmark, type BenchmarkExecution, type BenchmarkRuntime } from "../../../src/benchmark/run-benchmark.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
 class FakeBenchmarkRuntime implements BenchmarkRuntime {
@@ -14,7 +10,10 @@ class FakeBenchmarkRuntime implements BenchmarkRuntime {
   private counters = new Map<string, number>();
 
   constructor(
-    private readonly executeSample: (execution: BenchmarkExecution, index: number) => Promise<{
+    private readonly executeSample: (
+      execution: BenchmarkExecution,
+      index: number,
+    ) => Promise<{
       syncMs: number;
       setupMs: number;
       workloadMs: number;
@@ -35,7 +34,9 @@ class FakeBenchmarkRuntime implements BenchmarkRuntime {
     }),
   ) {}
 
-  now() { return "2026-07-31T12:34:56.000Z"; }
+  now() {
+    return "2026-07-31T12:34:56.000Z";
+  }
 
   async runSample(execution: BenchmarkExecution) {
     this.executions.push(execution);
@@ -64,12 +65,8 @@ describe("runBenchmark", () => {
 
     const report = await runBenchmark(runtime, profile);
 
-    expect(runtime.samples("local", "full")).toEqual([
-      "warmup", "cold", "cold", "cold", "warm", "warm", "warm",
-    ]);
-    expect(runtime.samples("remote", "full")).toEqual([
-      "warmup", "cold", "cold", "cold", "warm", "warm", "warm",
-    ]);
+    expect(runtime.samples("local", "full")).toEqual(["warmup", "cold", "cold", "cold", "warm", "warm", "warm"]);
+    expect(runtime.samples("remote", "full")).toEqual(["warmup", "cold", "cold", "cold", "warm", "warm", "warm"]);
     expect(report.rows[0]).toMatchObject({
       location: "local",
       workloadId: "full",
@@ -92,8 +89,8 @@ describe("runBenchmark", () => {
     }));
 
     const report = await runBenchmark(runtime, profile);
-    const localCold = report.rows.find((row) =>
-      row.location === "local" && row.workloadId === "full" && row.cache === "cold",
+    const localCold = report.rows.find(
+      (row) => row.location === "local" && row.workloadId === "full" && row.cache === "cold",
     );
 
     expect(localCold).toMatchObject({
@@ -113,9 +110,11 @@ describe("runBenchmark", () => {
 
     const report = await runBenchmark(runtime, profile);
 
-    expect(runtime.executions.every((execution) =>
-      execution.command.join("\0") === profile.benchmark.workloads[0]!.command.join("\0"),
-    )).toBe(true);
+    expect(
+      runtime.executions.every(
+        (execution) => execution.command.join("\0") === profile.benchmark.workloads[0]!.command.join("\0"),
+      ),
+    ).toBe(true);
     expect(runtime.writes.map((write) => write.path)).toEqual([
       "benchmark/20260731T123456Z-verify-full.json",
       "benchmark/20260731T123456Z-verify-full.md",

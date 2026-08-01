@@ -2,12 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 
-import {
-  enrollKnownHost,
-  NodeKnownHostsStore,
-  type SshProcessRuntime,
-} from "../ssh/client.js";
-
+import { enrollKnownHost, NodeKnownHostsStore, type SshProcessRuntime } from "../ssh/client.js";
 
 const TARGET = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$/u;
 
@@ -18,7 +13,12 @@ export interface ManagedSshTransport {
 }
 
 function assertHome(home: string): void {
-  if (!posix.isAbsolute(home) || posix.normalize(home) !== home || home === "/" || /[\u0000-\u001f\u007f]/u.test(home)) {
+  if (
+    !posix.isAbsolute(home) ||
+    posix.normalize(home) !== home ||
+    home === "/" ||
+    /[\u0000-\u001f\u007f]/u.test(home)
+  ) {
     throw new Error("managed SSH home must be a canonical non-root absolute path");
   }
 }
@@ -38,10 +38,17 @@ function wrapper(tool: "ssh" | "scp", knownHostsPath: string): string {
 async function replaceIfChanged(path: string, contents: string): Promise<boolean> {
   try {
     const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("refusing to replace a non-file managed SSH artifact");
-    if ((metadata.mode & 0o777) === 0o700 && await readFile(path, "utf8") === contents) return false;
+    if (!metadata.isFile() || metadata.isSymbolicLink())
+      throw new Error("refusing to replace a non-file managed SSH artifact");
+    if ((metadata.mode & 0o777) === 0o700 && (await readFile(path, "utf8")) === contents) return false;
   } catch (caught) {
-    if (!(typeof caught === "object" && caught !== null && "code" in caught && (caught as { code?: unknown }).code === "ENOENT")) throw caught;
+    if (!(
+      typeof caught === "object" &&
+      caught !== null &&
+      "code" in caught &&
+      (caught as { code?: unknown }).code === "ENOENT"
+    ))
+      throw caught;
   }
   const temporary = `${path}.tmp-${randomUUID()}`;
   try {
@@ -64,10 +71,12 @@ export async function ensureManagedSshTransport(home: string): Promise<ManagedSs
     mkdir(knownHostsDirectory, { recursive: true, mode: 0o700 }),
   ]);
   await Promise.all([chmod(directory, 0o700), chmod(knownHostsDirectory, 0o700)]);
-  const changed = (await Promise.all([
-    replaceIfChanged(join(directory, "ssh"), wrapper("ssh", knownHostsPath)),
-    replaceIfChanged(join(directory, "scp"), wrapper("scp", knownHostsPath)),
-  ])).some(Boolean);
+  const changed = (
+    await Promise.all([
+      replaceIfChanged(join(directory, "ssh"), wrapper("ssh", knownHostsPath)),
+      replaceIfChanged(join(directory, "scp"), wrapper("scp", knownHostsPath)),
+    ])
+  ).some(Boolean);
   return { changed, directory, knownHostsPath };
 }
 
@@ -75,7 +84,11 @@ export function mutagenSshEnvironment(
   directory: string,
   existing: Readonly<Record<string, string>> = {},
 ): Readonly<Record<string, string>> {
-  if (!posix.isAbsolute(directory) || posix.normalize(directory) !== directory || /[\u0000-\u001f\u007f]/u.test(directory)) {
+  if (
+    !posix.isAbsolute(directory) ||
+    posix.normalize(directory) !== directory ||
+    /[\u0000-\u001f\u007f]/u.test(directory)
+  ) {
     throw new Error("managed Mutagen SSH directory must be canonical and absolute");
   }
   return { ...existing, MUTAGEN_SSH_PATH: directory };
@@ -95,7 +108,8 @@ export function managedKnownHostsContains(contents: string, target: string): boo
 
 export function mergeManagedKnownHosts(existing: string, addition: string): string {
   if (existing.includes("\0") || addition.includes("\0")) throw new Error("managed known_hosts contains NUL");
-  if (addition.length === 0 || !addition.endsWith("\n")) throw new Error("managed known_hosts addition must be line terminated");
+  if (addition.length === 0 || !addition.endsWith("\n"))
+    throw new Error("managed known_hosts addition must be line terminated");
   const existingLines = new Set(existing.split(/\r?\n/u).filter((line) => line.length > 0));
   const additions = addition.split(/\r?\n/u).filter((line) => line.length > 0);
   const missing = additions.filter((line) => !existingLines.has(line));
@@ -116,9 +130,16 @@ export async function ensureManagedKnownHost(
   options: EnsureManagedKnownHostOptions,
 ): Promise<void> {
   let existing = "";
-  try { existing = await readFile(options.knownHostsPath, "utf8"); }
-  catch (caught) {
-    if (!(typeof caught === "object" && caught !== null && "code" in caught && (caught as { code?: unknown }).code === "ENOENT")) throw caught;
+  try {
+    existing = await readFile(options.knownHostsPath, "utf8");
+  } catch (caught) {
+    if (!(
+      typeof caught === "object" &&
+      caught !== null &&
+      "code" in caught &&
+      (caught as { code?: unknown }).code === "ENOENT"
+    ))
+      throw caught;
   }
   if (managedKnownHostsContains(existing, options.target)) return;
   const host = options.target.includes("@")
@@ -134,11 +155,7 @@ export async function ensureManagedKnownHost(
     });
     const addition = await readFile(enrolledPath, "utf8");
     const merged = mergeManagedKnownHosts(existing, addition);
-    await new NodeKnownHostsStore().persistAtomically(
-      options.knownHostsPath,
-      new TextEncoder().encode(merged),
-      0o600,
-    );
+    await new NodeKnownHostsStore().persistAtomically(options.knownHostsPath, new TextEncoder().encode(merged), 0o600);
   } finally {
     await rm(enrolledPath, { force: true });
   }

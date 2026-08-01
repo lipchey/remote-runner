@@ -54,7 +54,7 @@ export async function runMain(
       );
     });
   }
-  return runCli(argv, io, dependencies ?? await createNodeCliDependencies());
+  return runCli(argv, io, dependencies ?? (await createNodeCliDependencies()));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

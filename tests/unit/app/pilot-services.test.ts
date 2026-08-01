@@ -76,17 +76,20 @@ describe("pilot service boundaries", () => {
     const regular = `100644 ${"a".repeat(40)} 0\tfile\n`.repeat(1_200);
     const gitlink = `160000 ${"b".repeat(40)} 0\tpackages/submodule\n`;
     const requests: Array<{ readonly maxOutputBytes: number }> = [];
-    const result = await listLocalGitlinks({
-      async run(request) {
-        requests.push(request);
-        return {
-          exitCode: 0,
-          stdout: new TextEncoder().encode(regular + gitlink),
-          stderr: new Uint8Array(),
-          outputTruncated: false,
-        };
+    const result = await listLocalGitlinks(
+      {
+        async run(request) {
+          requests.push(request);
+          return {
+            exitCode: 0,
+            stdout: new TextEncoder().encode(regular + gitlink),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+          };
+        },
       },
-    }, "/worktree");
+      "/worktree",
+    );
 
     expect(requests.map(({ maxOutputBytes }) => maxOutputBytes)).toEqual([4 * 1024 * 1024]);
     expect(result).toEqual([{ oid: "b".repeat(40), path: "packages/submodule" }]);
@@ -95,37 +98,46 @@ describe("pilot service boundaries", () => {
   it("discovers tracked and non-ignored untracked fingerprint files while subtracting deletions", async () => {
     const requests: Array<{ readonly args?: readonly string[]; readonly maxOutputBytes: number }> = [];
     const encoder = new TextEncoder();
-    const result = await listLocalFingerprintFiles({
-      async run(request) {
-        requests.push(request);
-        const deleted = request.args?.includes("--deleted") ?? false;
-        return {
-          exitCode: 0,
-          stdout: encoder.encode(deleted
-            ? "packages/removed/package.json\0"
-            : [
-                "packages/new/package.json",
-                "apps/api/package.json",
-                "packages/removed/package.json",
-                "packages/new/package.json",
-                "",
-              ].join("\0")),
-          stderr: new Uint8Array(),
-          outputTruncated: false,
-        };
+    const result = await listLocalFingerprintFiles(
+      {
+        async run(request) {
+          requests.push(request);
+          const deleted = request.args?.includes("--deleted") ?? false;
+          return {
+            exitCode: 0,
+            stdout: encoder.encode(
+              deleted
+                ? "packages/removed/package.json\0"
+                : [
+                    "packages/new/package.json",
+                    "apps/api/package.json",
+                    "packages/removed/package.json",
+                    "packages/new/package.json",
+                    "",
+                  ].join("\0"),
+            ),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+          };
+        },
       },
-    }, "/worktree", ["**/package.json", "**/uv.lock"]);
+      "/worktree",
+      ["**/package.json", "**/uv.lock"],
+    );
 
     expect(requests).toHaveLength(2);
     expect(requests[0]?.args).toEqual([
-      "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
-      ":(glob)**/package.json", ":(glob)**/uv.lock",
+      "ls-files",
+      "-z",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      "--",
+      ":(glob)**/package.json",
+      ":(glob)**/uv.lock",
     ]);
     expect(requests[1]?.args).toContain("--deleted");
-    expect(requests.map(({ maxOutputBytes }) => maxOutputBytes)).toEqual([
-      4 * 1024 * 1024,
-      4 * 1024 * 1024,
-    ]);
+    expect(requests.map(({ maxOutputBytes }) => maxOutputBytes)).toEqual([4 * 1024 * 1024, 4 * 1024 * 1024]);
     expect(result).toEqual(["apps/api/package.json", "packages/new/package.json"]);
   });
 
@@ -136,11 +148,27 @@ describe("pilot service boundaries", () => {
       stderr: new Uint8Array(),
       outputTruncated,
     });
-    await expect(listLocalFingerprintFiles({
-      async run() { return result(new Uint8Array([0xff, 0])); },
-    }, "/worktree", ["**/package.json"])).rejects.toThrow(/UTF-8/u);
-    await expect(listLocalFingerprintFiles({
-      async run() { return result(new Uint8Array(), true); },
-    }, "/worktree", ["**/package.json"])).rejects.toThrow(/Git inspection/u);
+    await expect(
+      listLocalFingerprintFiles(
+        {
+          async run() {
+            return result(new Uint8Array([0xff, 0]));
+          },
+        },
+        "/worktree",
+        ["**/package.json"],
+      ),
+    ).rejects.toThrow(/UTF-8/u);
+    await expect(
+      listLocalFingerprintFiles(
+        {
+          async run() {
+            return result(new Uint8Array(), true);
+          },
+        },
+        "/worktree",
+        ["**/package.json"],
+      ),
+    ).rejects.toThrow(/Git inspection/u);
   });
 });

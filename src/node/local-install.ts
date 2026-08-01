@@ -1,16 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  access,
-  chmod,
-  cp,
-  lstat,
-  mkdir,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { access, chmod, cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, posix, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -75,29 +64,44 @@ export class NodeLocalLaunchRuntime implements LocalLaunchRuntime {
     return { loaded: true, running: /state\s*=\s*running/u.test(new TextDecoder().decode(result.stdout)) };
   }
   async bootout() {
-    const result = await this.processes.run({ command: "launchctl", args: ["bootout", `${this.domain()}/${LABEL}`], maxOutputBytes: 64 * 1024 });
+    const result = await this.processes.run({
+      command: "launchctl",
+      args: ["bootout", `${this.domain()}/${LABEL}`],
+      maxOutputBytes: 64 * 1024,
+    });
     if (result.exitCode !== 0) throw new Error("LaunchAgent bootout failed");
   }
   async bootstrap(plistPath: string) {
-    const result = await this.processes.run({ command: "launchctl", args: ["bootstrap", this.domain(), plistPath], maxOutputBytes: 64 * 1024 });
+    const result = await this.processes.run({
+      command: "launchctl",
+      args: ["bootstrap", this.domain(), plistPath],
+      maxOutputBytes: 64 * 1024,
+    });
     if (result.exitCode !== 0) throw new Error("LaunchAgent bootstrap failed");
   }
   async kickstart() {
-    const result = await this.processes.run({ command: "launchctl", args: ["kickstart", "-k", `${this.domain()}/${LABEL}`], maxOutputBytes: 64 * 1024 });
+    const result = await this.processes.run({
+      command: "launchctl",
+      args: ["kickstart", "-k", `${this.domain()}/${LABEL}`],
+      maxOutputBytes: 64 * 1024,
+    });
     if (result.exitCode !== 0) throw new Error("LaunchAgent kickstart failed");
   }
 }
 
 function assertAbsolute(value: string, label: string): void {
-  if (!posix.isAbsolute(value) || posix.normalize(value) !== value || value === "/" || /[\u0000-\u001f\u007f]/u.test(value)) {
+  if (
+    !posix.isAbsolute(value) ||
+    posix.normalize(value) !== value ||
+    value === "/" ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
     throw new Error(`${label} must be a canonical non-root absolute path`);
   }
 }
 
 function shellArgument(value: string): string {
-  return /^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)
-    ? value
-    : `'${value.replaceAll("'", `'"'"'`)}'`;
+  return /^[A-Za-z0-9_@%+=:,./-]+$/u.test(value) ? value : `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 async function treeDigest(roots: readonly string[]): Promise<string> {
@@ -131,12 +135,19 @@ async function atomicOwnedFile(
 ): Promise<boolean> {
   try {
     const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("refusing to replace a foreign install artifact");
+    if (!metadata.isFile() || metadata.isSymbolicLink())
+      throw new Error("refusing to replace a foreign install artifact");
     const existing = await readFile(path, "utf8");
     if (!owns(existing)) throw new Error("refusing to replace a foreign install artifact");
     if (existing === contents && (metadata.mode & 0o777) === mode) return false;
   } catch (caught) {
-    if (!(typeof caught === "object" && caught !== null && "code" in caught && (caught as { code?: unknown }).code === "ENOENT")) throw caught;
+    if (!(
+      typeof caught === "object" &&
+      caught !== null &&
+      "code" in caught &&
+      (caught as { code?: unknown }).code === "ENOENT"
+    ))
+      throw caught;
   }
   const temporary = `${path}.tmp-${randomUUID()}`;
   try {
@@ -193,7 +204,13 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
     const marker = await readFile(join(appRoot, ".remote-runner-owned"), "utf8");
     if (marker !== `${digest}\n`) throw new Error("refusing to reuse a foreign install application");
   } catch (caught) {
-    if (!(typeof caught === "object" && caught !== null && "code" in caught && (caught as { code?: unknown }).code === "ENOENT")) throw caught;
+    if (!(
+      typeof caught === "object" &&
+      caught !== null &&
+      "code" in caught &&
+      (caught as { code?: unknown }).code === "ENOENT"
+    ))
+      throw caught;
     const staging = join(appParent, `.tmp-${digest}-${randomUUID()}`);
     try {
       await mkdir(staging, { mode: 0o700 });
@@ -222,8 +239,7 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
     atomicOwnedFile(plistPath, launchPlist, 0o600, (value) => value.includes(`<string>${LABEL}</string>`)),
     options.launch.status(),
   ]);
-  const settleLaunchd = options.settleLaunchd ??
-    (() => new Promise<void>((resolve) => setTimeout(resolve, 100)));
+  const settleLaunchd = options.settleLaunchd ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 100)));
   if (launch.loaded && (executableChanged || plistChanged)) {
     await options.launch.bootout();
     await bootstrapLaunchAgent(options.launch, plistPath, settleLaunchd);
@@ -237,15 +253,20 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
 
 export async function resolveInstallSourceRoot(moduleUrl: string): Promise<string> {
   const modulePath = fileURLToPath(moduleUrl);
-  const candidates = [
-    join(dirname(modulePath), "..", "..", ".."),
-    join(dirname(modulePath), "..", ".."),
-  ];
+  const candidates = [join(dirname(modulePath), "..", "..", ".."), join(dirname(modulePath), "..", "..")];
   for (const candidate of candidates) {
-    const hasCompiled = await access(join(candidate, "dist", "src", "main.js")).then(() => true).catch(() => false);
-    const hasInstalled = await access(join(candidate, "src", "main.js")).then(() => true).catch(() => false);
-    const hasAssets = await access(join(candidate, "assets", "remote-launcher.mjs")).then(() => true).catch(() => false);
-    const hasYaml = await access(join(candidate, "node_modules", "yaml")).then(() => true).catch(() => false);
+    const hasCompiled = await access(join(candidate, "dist", "src", "main.js"))
+      .then(() => true)
+      .catch(() => false);
+    const hasInstalled = await access(join(candidate, "src", "main.js"))
+      .then(() => true)
+      .catch(() => false);
+    const hasAssets = await access(join(candidate, "assets", "remote-launcher.mjs"))
+      .then(() => true)
+      .catch(() => false);
+    const hasYaml = await access(join(candidate, "node_modules", "yaml"))
+      .then(() => true)
+      .catch(() => false);
     if ((hasCompiled || hasInstalled) && hasAssets && hasYaml) return candidate;
   }
   throw new Error("unable to locate install application sources");

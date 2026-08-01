@@ -27,11 +27,7 @@ class FakeProcesses implements MutagenProcessRuntime {
 
   constructor(private readonly outcomes: Outcome[]) {}
 
-  async run(request: {
-    readonly command: string;
-    readonly args: readonly string[];
-    readonly maxOutputBytes: number;
-  }) {
+  async run(request: { readonly command: string; readonly args: readonly string[]; readonly maxOutputBytes: number }) {
     this.requests.push(request);
     const outcome = this.outcomes.shift();
     if (!outcome) throw new Error(`unexpected process call: ${request.args.join(" ")}`);
@@ -96,23 +92,25 @@ function session(
 }
 
 function liveV018PausedSession(): string {
-  return JSON.stringify([{
-    identifier: "sync_cGg7xdiUF1jgc0sZmBFTu2ubaPJv9DU5yp7WmUr07Q8",
-    version: 1,
-    alpha: { protocol: "local", path: options.canonicalAlphaRoot, connected: false },
-    beta: {
-      protocol: "ssh",
-      user: "runner",
-      host: "example.test",
-      path: options.betaRoot,
-      connected: false,
+  return JSON.stringify([
+    {
+      identifier: "sync_cGg7xdiUF1jgc0sZmBFTu2ubaPJv9DU5yp7WmUr07Q8",
+      version: 1,
+      alpha: { protocol: "local", path: options.canonicalAlphaRoot, connected: false },
+      beta: {
+        protocol: "ssh",
+        user: "runner",
+        host: "example.test",
+        path: options.betaRoot,
+        connected: false,
+      },
+      mode: "one-way-replica",
+      ignore: { paths: compileIgnores(options.ignores) },
+      name,
+      paused: true,
+      status: "disconnected",
     },
-    mode: "one-way-replica",
-    ignore: { paths: compileIgnores(options.ignores) },
-    name,
-    paused: true,
-    status: "disconnected",
-  }]);
+  ]);
 }
 
 function commandNames(processes: FakeProcesses): string[] {
@@ -136,11 +134,7 @@ describe("Mutagen one-way lifecycle", () => {
   it("deduplicates profile ignores while retaining every mandatory dependency and cache exclusion", () => {
     const compiled = compileIgnores([".cache", "node_modules", ".nx", "build/**", ".cache"]);
 
-    expect(compiled).toEqual([
-      ...MANDATORY_MUTAGEN_IGNORES,
-      ".cache",
-      "build/**",
-    ]);
+    expect(compiled).toEqual([...MANDATORY_MUTAGEN_IGNORES, ".cache", "build/**"]);
     expect(new Set(compiled).size).toBe(compiled.length);
     expect(compiled).toEqual(expect.arrayContaining(["node_modules", ".nx"]));
   });
@@ -163,9 +157,7 @@ describe("Mutagen one-way lifecycle", () => {
   it.each(["!**", "!n*", "!node_modules/**", "!docs/README.md"])(
     "rejects every user negation with a stable error: %s",
     (pattern) => {
-      expect(() => compileIgnores([pattern])).toThrowError(
-        "Mutagen user ignore negation is not allowed",
-      );
+      expect(() => compileIgnores([pattern])).toThrowError("Mutagen user ignore negation is not allowed");
     },
   );
 
@@ -175,11 +167,7 @@ describe("Mutagen one-way lifecycle", () => {
 
     await lifecycle.pauseForGitReconcile(options);
 
-    expect(commandNames(processes)).toEqual([
-      "daemon start",
-      "sync list",
-      "sync create",
-    ]);
+    expect(commandNames(processes)).toEqual(["daemon start", "sync list", "sync create"]);
     const create = processes.requests[2];
     expect(processes.requests[1]?.args).toEqual(["sync", "list", "--template", "{{ json . }}"]);
     expect(create?.command).toBe("mutagen");
@@ -227,23 +215,13 @@ describe("Mutagen one-way lifecycle", () => {
   });
 
   it("starts the daemon idempotently on each independently prepared reconciliation", async () => {
-    const processes = new FakeProcesses([
-      {},
-      { stdout: session("paused") },
-      {},
-      { stdout: session("paused") },
-    ]);
+    const processes = new FakeProcesses([{}, { stdout: session("paused") }, {}, { stdout: session("paused") }]);
     const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
 
     await lifecycle.pauseForGitReconcile(options);
     await lifecycle.pauseForGitReconcile(options);
 
-    expect(commandNames(processes)).toEqual([
-      "daemon start",
-      "sync list",
-      "daemon start",
-      "sync list",
-    ]);
+    expect(commandNames(processes)).toEqual(["daemon start", "sync list", "daemon start", "sync list"]);
   });
 
   it.each([
@@ -262,26 +240,14 @@ describe("Mutagen one-way lifecycle", () => {
   });
 
   it("resumes only on explicit invocation, flushes, inspects, and returns measured transfer data", async () => {
-    const processes = new FakeProcesses([
-      {},
-      { stdout: session("paused") },
-      {},
-      {},
-      { stdout: session("watching") },
-    ]);
+    const processes = new FakeProcesses([{}, { stdout: session("paused") }, {}, {}, { stdout: session("watching") }]);
     const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([100, 127]));
     const paused = await lifecycle.pauseForGitReconcile(options);
 
     expect(commandNames(processes)).toEqual(["daemon start", "sync list"]);
     const result = await lifecycle.resumeAndFlush(paused);
 
-    expect(commandNames(processes)).toEqual([
-      "daemon start",
-      "sync list",
-      "sync resume",
-      "sync flush",
-      "sync list",
-    ]);
+    expect(commandNames(processes)).toEqual(["daemon start", "sync list", "sync resume", "sync flush", "sync list"]);
     expect(result.session).toBe(paused);
     expect(result.flushDurationMs).toBe(27);
     expect(result.transferredBytes).toBeUndefined();
@@ -299,9 +265,7 @@ describe("Mutagen one-way lifecycle", () => {
     "connecting-alpha",
     "connecting-beta",
   ])("accepts upstream active machine status %s after flush", async (status) => {
-    const processes = new FakeProcesses([
-      {}, { stdout: session("paused") }, {}, {}, { stdout: session(status) },
-    ]);
+    const processes = new FakeProcesses([{}, { stdout: session("paused") }, {}, {}, { stdout: session(status) }]);
     const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([1, 2]));
     const paused = await lifecycle.pauseForGitReconcile(options);
     await expect(lifecycle.resumeAndFlush(paused)).resolves.toMatchObject({ flushDurationMs: 1 });
@@ -309,9 +273,9 @@ describe("Mutagen one-way lifecycle", () => {
 
   it("rejects excluded conflicts even when the ordinary conflict list is empty", async () => {
     const processes = new FakeProcesses([{}, { stdout: session("watching", { excludedConflicts: 1 }) }]);
-    await expect(
-      new MutagenSyncLifecycle(processes, new FakeClock([])).pauseForGitReconcile(options),
-    ).rejects.toThrow(/conflict/u);
+    await expect(new MutagenSyncLifecycle(processes, new FakeClock([])).pauseForGitReconcile(options)).rejects.toThrow(
+      /conflict/u,
+    );
   });
 
   it("rejects unknown and structurally malformed upstream session models", async () => {

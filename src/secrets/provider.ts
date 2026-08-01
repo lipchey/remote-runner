@@ -24,28 +24,25 @@ function validateAllowlist(allow: readonly string[]): Set<string> {
 }
 
 function validateCommand(command: readonly string[]): [string, ...string[]] {
-  if (command.length === 0 || typeof command[0] !== "string" || command[0].length === 0 ||
-      command.some((part) => typeof part !== "string" || part.includes("\0"))) {
+  if (
+    command.length === 0 ||
+    typeof command[0] !== "string" ||
+    command[0].length === 0 ||
+    command.some((part) => typeof part !== "string" || part.includes("\0"))
+  ) {
     throw new Error("secret provider command must be a non-empty safe argument array");
   }
   return command as [string, ...string[]];
 }
 
 function validateSecretValue(name: string, value: unknown): string {
-  if (
-    typeof value !== "string" ||
-    value.includes("\0") ||
-    encoder.encode(value).byteLength > MAX_SECRET_BYTES
-  ) {
+  if (typeof value !== "string" || value.includes("\0") || encoder.encode(value).byteLength > MAX_SECRET_BYTES) {
     throw new Error(`secret ${name} has an invalid value`);
   }
   return value;
 }
 
-export function readDotenvSecrets(
-  contents: string,
-  allow: readonly string[],
-): Record<string, string> {
+export function readDotenvSecrets(contents: string, allow: readonly string[]): Record<string, string> {
   const allowed = validateAllowlist(allow);
   let parsed: Record<string, string | undefined>;
   try {
@@ -69,16 +66,28 @@ export async function runSecretProvider(
   const [executable, ...args] = validateCommand(command);
   const allowed = validateAllowlist(allow);
   const result = await runtime.run({ command: executable, args, maxOutputBytes: MAX_PROVIDER_BYTES });
-  if (result.outputTruncated || result.stdout.byteLength > MAX_PROVIDER_BYTES || result.stderr.byteLength > MAX_PROVIDER_BYTES) {
+  if (
+    result.outputTruncated ||
+    result.stdout.byteLength > MAX_PROVIDER_BYTES ||
+    result.stderr.byteLength > MAX_PROVIDER_BYTES
+  ) {
     throw new Error("secret provider exceeded the output limit");
   }
   if (result.exitCode !== 0) throw new Error(`secret provider failed with exit code ${result.exitCode}`);
   let text: string;
-  try { text = decoder.decode(result.stdout); } catch { throw new Error("secret provider returned invalid UTF-8"); }
+  try {
+    text = decoder.decode(result.stdout);
+  } catch {
+    throw new Error("secret provider returned invalid UTF-8");
+  }
   const document = parseDocument(text, { uniqueKeys: true });
   if (document.errors.length > 0) throw new Error("secret provider returned invalid or duplicate JSON keys");
   let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { throw new Error("secret provider returned malformed JSON"); }
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("secret provider returned malformed JSON");
+  }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("secret provider must return one JSON object");
   }

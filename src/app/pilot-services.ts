@@ -3,7 +3,11 @@ import { mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:
 import { dirname, join, posix } from "node:path";
 import process from "node:process";
 
-import { ensureDependencySetup, packageManagerFromPackageJson, type HealthySetupState } from "../bootstrap/dependencies.js";
+import {
+  ensureDependencySetup,
+  packageManagerFromPackageJson,
+  type HealthySetupState,
+} from "../bootstrap/dependencies.js";
 import { dependencyFingerprint, type EnvironmentIdentity, type GitlinkIdentity } from "../bootstrap/fingerprint.js";
 import { installNode, localNodeVersion } from "../bootstrap/node.js";
 import { installUv } from "../bootstrap/uv.js";
@@ -19,12 +23,7 @@ import type { RemoteExecutionResult } from "../run/run-profile.js";
 import { encodeSecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
 import { classifySshFailure } from "../ssh/probe.js";
-import {
-  runSsh,
-  sshArguments,
-  type BoundedProcessRequest,
-  type SshProcessRuntime,
-} from "../ssh/client.js";
+import { runSsh, sshArguments, type BoundedProcessRequest, type SshProcessRuntime } from "../ssh/client.js";
 import { MutagenSyncLifecycle, type PausedMutagenSession } from "../sync/mutagen.js";
 import { reconcileWorkspace } from "../workspace/git-workspace.js";
 import type { ProfileExecutionServices } from "./profile-runtime.js";
@@ -41,9 +40,12 @@ const IDENTITY = /^[0-9a-f]{24}$/u;
 
 function canonicalRemotePath(value: string, label: string): void {
   if (
-    !posix.isAbsolute(value) || posix.normalize(value) !== value || value === "/" ||
+    !posix.isAbsolute(value) ||
+    posix.normalize(value) !== value ||
+    value === "/" ||
     /[\u0000-\u001f\u007f]/u.test(value)
-  ) throw new Error(`${label} must be a canonical non-root absolute path`);
+  )
+    throw new Error(`${label} must be a canonical non-root absolute path`);
 }
 
 export function resolveRemotePaths(
@@ -62,7 +64,17 @@ export function resolveRemotePaths(
     workspace: posix.join(generatedRoot, profile.consumer, profile.id, identity),
     toolchainRoot: posix.join(remoteHome, ".local", "share", "remote-runner", "toolchains"),
     launcher: posix.join(remoteHome, ".local", "share", "remote-runner", "launcher", "remote-launcher.mjs"),
-    setupState: posix.join(remoteHome, ".local", "state", "remote-runner", "profiles", profile.consumer, profile.id, identity, "setup.json"),
+    setupState: posix.join(
+      remoteHome,
+      ".local",
+      "state",
+      "remote-runner",
+      "profiles",
+      profile.consumer,
+      profile.id,
+      identity,
+      "setup.json",
+    ),
   };
 }
 
@@ -93,16 +105,23 @@ export function remoteChildArguments(
   profile: Pick<Profile, "workload" | "secrets">,
   command: readonly string[],
 ): readonly string[] {
-  for (const [label, path] of [["remote node", node], ["remote launcher", launcher], ["remote workspace", workspace]] as const) {
+  for (const [label, path] of [
+    ["remote node", node],
+    ["remote launcher", launcher],
+    ["remote workspace", workspace],
+  ] as const) {
     canonicalRemotePath(path, label);
   }
   for (const path of pathEnvironment.split(":")) canonicalRemotePath(path, "remote PATH entry");
   if (command.length === 0 || command.some((argument) => argument.includes("\0"))) {
     throw new Error("remote child command is invalid");
   }
-  const childEnvironment = Object.entries(profile.workload.childEnvironment).sort(([left], [right]) => left.localeCompare(right));
+  const childEnvironment = Object.entries(profile.workload.childEnvironment).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
   for (const [name, value] of childEnvironment) {
-    if (!/^[A-Z][A-Z0-9_]*$/u.test(name) || value.includes("\0")) throw new Error("remote child environment is invalid");
+    if (!/^[A-Z][A-Z0-9_]*$/u.test(name) || value.includes("\0"))
+      throw new Error("remote child environment is invalid");
   }
   return [
     "sh",
@@ -129,7 +148,9 @@ export function remoteWorkspaceCommandArguments(
   canonicalRemotePath(workspace, "remote workspace");
   for (const path of pathEnvironment.split(":")) canonicalRemotePath(path, "remote PATH entry");
   if (
-    command.length === 0 || command[0] === undefined || command[0].length === 0 ||
+    command.length === 0 ||
+    command[0] === undefined ||
+    command[0].length === 0 ||
     command.some((argument) => argument.includes("\0"))
   ) {
     throw new Error("remote workspace command is invalid");
@@ -156,8 +177,11 @@ const GITLEAKS_VERSION = "8.30.1";
 const CHILD_MARKER = new TextEncoder().encode("RR_CHILD_STARTED\n");
 
 function decode(contents: Uint8Array, label: string): string {
-  try { return new TextDecoder("utf-8", { fatal: true }).decode(contents); }
-  catch { throw new Error(`${label} returned invalid UTF-8`); }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(contents);
+  } catch {
+    throw new Error(`${label} returned invalid UTF-8`);
+  }
 }
 
 function parseGitlinks(output: Uint8Array): GitlinkIdentity[] {
@@ -170,10 +194,7 @@ function parseGitlinks(output: Uint8Array): GitlinkIdentity[] {
   return result;
 }
 
-export async function listLocalGitlinks(
-  processes: SshProcessRuntime,
-  sourceRoot: string,
-): Promise<GitlinkIdentity[]> {
+export async function listLocalGitlinks(processes: SshProcessRuntime, sourceRoot: string): Promise<GitlinkIdentity[]> {
   const result = await processes.run({
     command: "git",
     args: ["ls-files", "--stage"],
@@ -181,7 +202,8 @@ export async function listLocalGitlinks(
     maxOutputBytes: LOCAL_GIT_CAPTURE_BYTES,
   });
   if (
-    result.exitCode !== 0 || result.outputTruncated ||
+    result.exitCode !== 0 ||
+    result.outputTruncated ||
     result.stdout.byteLength > LOCAL_GIT_CAPTURE_BYTES ||
     result.stderr.byteLength > LOCAL_GIT_CAPTURE_BYTES
   ) {
@@ -190,12 +212,10 @@ export async function listLocalGitlinks(
   return parseGitlinks(result.stdout);
 }
 
-function checkedGitOutput(
-  result: Awaited<ReturnType<SshProcessRuntime["run"]>>,
-  label: string,
-): Uint8Array {
+function checkedGitOutput(result: Awaited<ReturnType<SshProcessRuntime["run"]>>, label: string): Uint8Array {
   if (
-    result.exitCode !== 0 || result.outputTruncated ||
+    result.exitCode !== 0 ||
+    result.outputTruncated ||
     result.stdout.byteLength > LOCAL_GIT_CAPTURE_BYTES ||
     result.stderr.byteLength > LOCAL_GIT_CAPTURE_BYTES
   ) {
@@ -208,13 +228,16 @@ function parseNulPaths(output: Uint8Array, label: string): string[] {
   const value = decode(output, label);
   if (value.length === 0) return [];
   if (!value.endsWith("\0")) throw new Error(`${label} returned a malformed path list`);
-  return value.slice(0, -1).split("\0").map((path) => {
-    const normalized = assertSafeRepositoryPath(path);
-    if (normalized !== path || /[\u0000-\u001f\u007f]/u.test(path)) {
-      throw new Error(`${label} returned an unsafe repository path`);
-    }
-    return path;
-  });
+  return value
+    .slice(0, -1)
+    .split("\0")
+    .map((path) => {
+      const normalized = assertSafeRepositoryPath(path);
+      if (normalized !== path || /[\u0000-\u001f\u007f]/u.test(path)) {
+        throw new Error(`${label} returned an unsafe repository path`);
+      }
+      return path;
+    });
 }
 
 export async function listLocalFingerprintFiles(
@@ -242,10 +265,9 @@ export async function listLocalFingerprintFiles(
     checkedGitOutput(availableResult, "fingerprint file listing"),
     "fingerprint file listing",
   );
-  const deleted = new Set(parseNulPaths(
-    checkedGitOutput(deletedResult, "fingerprint deletion listing"),
-    "fingerprint deletion listing",
-  ));
+  const deleted = new Set(
+    parseNulPaths(checkedGitOutput(deletedResult, "fingerprint deletion listing"), "fingerprint deletion listing"),
+  );
   return [...new Set(available.filter((path) => !deleted.has(path)))].sort();
 }
 
@@ -287,27 +309,32 @@ export class NodeProfileServices implements ProfileExecutionServices {
     this.lockRoot = join(this.stateRoot, "locks");
     this.knownHostsPath = options.knownHostsPath ?? join(this.stateRoot, "known_hosts", "managed");
     const mutagenCommand = options.mutagenCommand ?? "mutagen";
-    this.mutagen = new MutagenSyncLifecycle({
-      run: (request) => this.processes.run({
-        ...request,
-        command: request.command === "mutagen" ? mutagenCommand : request.command,
-        ...(options.managedSshPath === undefined
-          ? {}
-          : { environment: mutagenSshEnvironment(options.managedSshPath, request.environment) }),
-      }),
-    }, { now: () => performance.now() });
+    this.mutagen = new MutagenSyncLifecycle(
+      {
+        run: (request) =>
+          this.processes.run({
+            ...request,
+            command: request.command === "mutagen" ? mutagenCommand : request.command,
+            ...(options.managedSshPath === undefined
+              ? {}
+              : { environment: mutagenSshEnvironment(options.managedSshPath, request.environment) }),
+          }),
+      },
+      { now: () => performance.now() },
+    );
   }
 
   private remote(): RemoteCommandPort {
     return {
-      run: (args) => runSsh(
-        this.processes,
-        this.profile.remote.target,
-        args,
-        this.profile.probes.connectTimeoutSeconds,
-        this.knownHostsPath,
-        CAPTURE_BYTES,
-      ),
+      run: (args) =>
+        runSsh(
+          this.processes,
+          this.profile.remote.target,
+          args,
+          this.profile.probes.connectTimeoutSeconds,
+          this.knownHostsPath,
+          CAPTURE_BYTES,
+        ),
     };
   }
 
@@ -324,23 +351,40 @@ export class NodeProfileServices implements ProfileExecutionServices {
 
   async acquireLock(): Promise<() => Promise<void>> {
     const files = {
-      mkdir: async (path: string) => { await mkdir(path, { mode: 0o700 }); },
+      mkdir: async (path: string) => {
+        await mkdir(path, { mode: 0o700 });
+      },
       readFile: async (path: string) => new Uint8Array(await readFile(path)),
-      writeFile: async (path: string, contents: Uint8Array, mode: number) => { await writeFile(path, contents, { flag: "wx", mode }); },
-      symlink: async (target: string, path: string) => { await symlink(target, path); },
-      rename: async (from: string, to: string) => { await rename(from, to); },
-      remove: async (path: string) => { await rm(path, { recursive: true }); },
+      writeFile: async (path: string, contents: Uint8Array, mode: number) => {
+        await writeFile(path, contents, { flag: "wx", mode });
+      },
+      symlink: async (target: string, path: string) => {
+        await symlink(target, path);
+      },
+      rename: async (from: string, to: string) => {
+        await rename(from, to);
+      },
+      remove: async (path: string) => {
+        await rm(path, { recursive: true });
+      },
     };
-    return acquireProfileLock({
-      files,
-      processes: this.processes,
-      clock: { now: () => Date.now(), sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) },
-      lockDirectory: (identity) => join(this.lockRoot, identity),
-      pid: process.pid,
-      leaseDurationMs: 120_000,
-      pollIntervalMs: 100,
-      createToken: randomUUID,
-    }, this.identity, 30_000);
+    return acquireProfileLock(
+      {
+        files,
+        processes: this.processes,
+        clock: {
+          now: () => Date.now(),
+          sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+        },
+        lockDirectory: (identity) => join(this.lockRoot, identity),
+        pid: process.pid,
+        leaseDurationMs: 120_000,
+        pollIntervalMs: 100,
+        createToken: randomUUID,
+      },
+      this.identity,
+      30_000,
+    );
   }
 
   async probe(): Promise<void> {
@@ -348,7 +392,8 @@ export class NodeProfileServices implements ProfileExecutionServices {
       this.processes,
       this.profile.remote.target,
       [
-        "sh", "-ceu",
+        "sh",
+        "-ceu",
         'home=${HOME:?}; blocks=$(df -Pk -- "$home" | awk \'NR==2 {print $4}\'); case "$blocks" in *[!0-9]*|"") exit 74;; esac; printf \'%s\\n%s\\n\' "$home" "$((blocks * 1024))"',
         "remote-runner-probe",
       ],
@@ -361,8 +406,11 @@ export class NodeProfileServices implements ProfileExecutionServices {
       throw new PreparationError(reason, true);
     }
     let parsed: { home: string; availableBytes: number };
-    try { parsed = parseProbeOutput(decode(result.stdout, "SSH probe"), this.profile.probes.minimumFreeBytes); }
-    catch (caught) { throw new PreparationError("capacity", false, { cause: caught }); }
+    try {
+      parsed = parseProbeOutput(decode(result.stdout, "SSH probe"), this.profile.probes.minimumFreeBytes);
+    } catch (caught) {
+      throw new PreparationError("capacity", false, { cause: caught });
+    }
     this.remotePaths = resolveRemotePaths(parsed.home, this.profile, this.identity);
   }
 
@@ -386,16 +434,19 @@ export class NodeProfileServices implements ProfileExecutionServices {
 
   async reconcileWorkspace(): Promise<void> {
     const paths = this.paths();
-    const result = await reconcileWorkspace({
-      consumer: this.profile.consumer,
-      profile: this.profile.id,
-      sourceRoot: this.options.sourceRoot,
-      remoteTarget: this.profile.remote.target,
-      generatedRoot: paths.generatedRoot,
-      ...(this.profile.workspace.baseRef === undefined ? {} : { baseRef: this.profile.workspace.baseRef }),
-      knownHostsPath: this.knownHostsPath,
-      connectTimeoutSeconds: this.profile.probes.connectTimeoutSeconds,
-    }, this.processes);
+    const result = await reconcileWorkspace(
+      {
+        consumer: this.profile.consumer,
+        profile: this.profile.id,
+        sourceRoot: this.options.sourceRoot,
+        remoteTarget: this.profile.remote.target,
+        generatedRoot: paths.generatedRoot,
+        ...(this.profile.workspace.baseRef === undefined ? {} : { baseRef: this.profile.workspace.baseRef }),
+        knownHostsPath: this.knownHostsPath,
+        connectTimeoutSeconds: this.profile.probes.connectTimeoutSeconds,
+      },
+      this.processes,
+    );
     if (result.identity !== this.identity || result.remoteRoot !== paths.workspace) {
       throw new Error("remote workspace identity changed during reconciliation");
     }
@@ -411,9 +462,12 @@ export class NodeProfileServices implements ProfileExecutionServices {
   private async writeRemoteState(path: string, state: HealthySetupState): Promise<void> {
     const encoded = Buffer.from(JSON.stringify(state)).toString("base64");
     const result = await this.remote().run([
-      "sh", "-ceu",
+      "sh",
+      "-ceu",
       'umask 077; path=$1; value=$2; mkdir -p -- "$(dirname -- "$path")"; temporary="$path.tmp.$$"; printf \'%s\' "$value" | base64 -d >"$temporary"; chmod 600 "$temporary"; mv -f -- "$temporary" "$path"',
-      "remote-runner-write-state", path, encoded,
+      "remote-runner-write-state",
+      path,
+      encoded,
     ]);
     if (result.exitCode !== 0) throw new Error("remote setup state write failed");
   }
@@ -423,9 +477,13 @@ export class NodeProfileServices implements ProfileExecutionServices {
     const digest = createHash("sha256").update(source).digest("hex");
     const encoded = Buffer.from(source).toString("base64");
     const result = await this.remote().run([
-      "sh", "-ceu",
+      "sh",
+      "-ceu",
       'umask 077; path=$1; expected=$2; value=$3; mkdir -p -- "$(dirname -- "$path")"; if [ -f "$path" ] && [ "$(sha256sum -- "$path" | awk \'{print $1}\')" = "$expected" ]; then exit 0; fi; temporary="$path.tmp.$$"; printf \'%s\' "$value" | base64 -d >"$temporary"; [ "$(sha256sum -- "$temporary" | awk \'{print $1}\')" = "$expected" ]; chmod 700 "$temporary"; mv -f -- "$temporary" "$path"',
-      "remote-runner-install-launcher", path, digest, encoded,
+      "remote-runner-install-launcher",
+      path,
+      digest,
+      encoded,
     ]);
     if (result.exitCode !== 0) throw new Error("remote launcher installation failed");
   }
@@ -441,11 +499,17 @@ export class NodeProfileServices implements ProfileExecutionServices {
     );
     const toolchains = new RemoteToolchainRuntime(remote, paths.toolchainRoot);
     const node = await installNode(toolchains, {
-      version: localNodeVersion(), machine, packageManager, toolchainRoot: paths.toolchainRoot,
+      version: localNodeVersion(),
+      machine,
+      packageManager,
+      toolchainRoot: paths.toolchainRoot,
     });
     const uvDigest = machine === "x86_64" || machine === "amd64" ? UV_SHA256.x86_64 : UV_SHA256.aarch64;
     const uv = await installUv(toolchains, {
-      version: UV_VERSION, machine, sha256: uvDigest, toolchainRoot: paths.toolchainRoot,
+      version: UV_VERSION,
+      machine,
+      sha256: uvDigest,
+      toolchainRoot: paths.toolchainRoot,
     });
     this.nodeRoot = node.root;
     this.uvRoot = uv.root;
@@ -461,66 +525,73 @@ export class NodeProfileServices implements ProfileExecutionServices {
       this.options.sourceRoot,
       this.profile.bootstrap.fingerprint.patterns,
     );
-    const fingerprintFiles = [...new Set([
-      ...this.profile.bootstrap.fingerprint.files,
-      ...discoveredFingerprintFiles,
-    ])];
-    const fingerprint = await dependencyFingerprint({
-      readFile: async (path) => new Uint8Array(await readFile(join(this.options.sourceRoot, path))),
-      listGitlinks: () => listLocalGitlinks(this.processes, this.options.sourceRoot),
-      sha256: async (contents) => createHash("sha256").update(contents).digest("hex"),
-    }, { environment, files: fingerprintFiles });
-    const pathEnvironment = [posix.join(node.root, "bin"), uv.root, posix.join(paths.workspace, ".tools"), "/usr/local/bin", "/usr/bin", "/bin"].join(":");
-    await ensureDependencySetup({
-      readHealthyState: async () => {
-        const result = await remote.run(["cat", "--", paths.setupState]);
-        if (result.exitCode !== 0) return undefined;
-        try { return JSON.parse(decode(result.stdout, "remote setup state")) as HealthySetupState; }
-        catch { return undefined; }
+    const fingerprintFiles = [...new Set([...this.profile.bootstrap.fingerprint.files, ...discoveredFingerprintFiles])];
+    const fingerprint = await dependencyFingerprint(
+      {
+        readFile: async (path) => new Uint8Array(await readFile(join(this.options.sourceRoot, path))),
+        listGitlinks: () => listLocalGitlinks(this.processes, this.options.sourceRoot),
+        sha256: async (contents) => createHash("sha256").update(contents).digest("hex"),
       },
-      runSetup: async (script, workspaceRoot) => {
-        const result = await remote.run(remoteWorkspaceCommandArguments(
-          workspaceRoot,
-          pathEnvironment,
-          [script],
-        ));
-        return { exitCode: result.exitCode };
+      { environment, files: fingerprintFiles },
+    );
+    const pathEnvironment = [
+      posix.join(node.root, "bin"),
+      uv.root,
+      posix.join(paths.workspace, ".tools"),
+      "/usr/local/bin",
+      "/usr/bin",
+      "/bin",
+    ].join(":");
+    await ensureDependencySetup(
+      {
+        readHealthyState: async () => {
+          const result = await remote.run(["cat", "--", paths.setupState]);
+          if (result.exitCode !== 0) return undefined;
+          try {
+            return JSON.parse(decode(result.stdout, "remote setup state")) as HealthySetupState;
+          } catch {
+            return undefined;
+          }
+        },
+        runSetup: async (script, workspaceRoot) => {
+          const result = await remote.run(remoteWorkspaceCommandArguments(workspaceRoot, pathEnvironment, [script]));
+          return { exitCode: result.exitCode };
+        },
+        runEnsure: async (command, workspaceRoot) => {
+          const result = await remote.run(remoteWorkspaceCommandArguments(workspaceRoot, pathEnvironment, command));
+          return { exitCode: result.exitCode };
+        },
+        writeHealthyState: (state) => this.writeRemoteState(paths.setupState, state),
       },
-      runEnsure: async (command, workspaceRoot) => {
-        const result = await remote.run(remoteWorkspaceCommandArguments(
-          workspaceRoot,
-          pathEnvironment,
-          command,
-        ));
-        return { exitCode: result.exitCode };
+      {
+        fingerprint,
+        environment,
+        workspaceRoot: paths.workspace,
+        setup: this.profile.bootstrap.setup,
+        ensure: this.profile.bootstrap.ensure,
       },
-      writeHealthyState: (state) => this.writeRemoteState(paths.setupState, state),
-    }, {
-      fingerprint,
-      environment,
-      workspaceRoot: paths.workspace,
-      setup: this.profile.bootstrap.setup,
-      ensure: this.profile.bootstrap.ensure,
-    });
+    );
   }
 
   async collectSecrets(): Promise<Readonly<Record<string, string>>> {
     if (this.profile.secrets.dotenv !== undefined) {
-      const contents = await readFile(
-        join(this.options.sourceRoot, this.profile.secrets.dotenv),
-        "utf8",
-      );
+      const contents = await readFile(join(this.options.sourceRoot, this.profile.secrets.dotenv), "utf8");
       return readDotenvSecrets(contents, this.profile.secrets.allow);
     }
     if (this.profile.secrets.provider === undefined) {
       throw new Error("validated profile has no secret source");
     }
-    return runSecretProvider({
-      run: (request: BoundedProcessRequest) => this.processes.run({
-        ...request,
-        cwd: this.options.sourceRoot,
-      }),
-    }, this.profile.secrets.provider, this.profile.secrets.allow);
+    return runSecretProvider(
+      {
+        run: (request: BoundedProcessRequest) =>
+          this.processes.run({
+            ...request,
+            cwd: this.options.sourceRoot,
+          }),
+      },
+      this.profile.secrets.provider,
+      this.profile.secrets.allow,
+    );
   }
 
   async startRemote(
@@ -558,8 +629,16 @@ export class NodeProfileServices implements ProfileExecutionServices {
       stdin: frame.stdin,
       marker: CHILD_MARKER,
       onMarker: onChildStarted,
-      stdout: this.options.stdout ?? ((chunk) => { process.stdout.write(chunk); }),
-      stderr: this.options.stderr ?? ((chunk) => { process.stderr.write(chunk); }),
+      stdout:
+        this.options.stdout ??
+        ((chunk) => {
+          process.stdout.write(chunk);
+        }),
+      stderr:
+        this.options.stderr ??
+        ((chunk) => {
+          process.stderr.write(chunk);
+        }),
     });
     if (!result.spawned || !result.markerSeen) return { kind: "not-started", reason: "child-start" };
     return { kind: "completed", exitCode: result.exitCode };
@@ -567,11 +646,21 @@ export class NodeProfileServices implements ProfileExecutionServices {
 
   async runLocal(command: readonly string[]): Promise<number> {
     const result = await runStreamingProcess({
-      command: command[0]!, args: command.slice(1), cwd: this.options.sourceRoot,
+      command: command[0]!,
+      args: command.slice(1),
+      cwd: this.options.sourceRoot,
       marker: new TextEncoder().encode("\0REMOTE_RUNNER_UNUSED_MARKER\0"),
       onMarker: async () => undefined,
-      stdout: this.options.stdout ?? ((chunk) => { process.stdout.write(chunk); }),
-      stderr: this.options.stderr ?? ((chunk) => { process.stderr.write(chunk); }),
+      stdout:
+        this.options.stdout ??
+        ((chunk) => {
+          process.stdout.write(chunk);
+        }),
+      stderr:
+        this.options.stderr ??
+        ((chunk) => {
+          process.stderr.write(chunk);
+        }),
     });
     return result.exitCode;
   }
@@ -586,6 +675,11 @@ export class NodeProfileServices implements ProfileExecutionServices {
 
   reportUnavailable(reason: string): void {
     const line = new TextEncoder().encode(`remote-runner: remote unavailable reason=${reason}\n`);
-    (this.options.stderr ?? ((chunk) => { process.stderr.write(chunk); }))(line);
+    (
+      this.options.stderr ??
+      ((chunk) => {
+        process.stderr.write(chunk);
+      })
+    )(line);
   }
 }

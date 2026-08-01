@@ -14,11 +14,21 @@ class FakeRuntime implements OutageRuntime {
   readonly writes: OutageState[] = [];
   failures = 0;
   clock = 0;
-  async readState() { return this.state; }
-  async writeState(state: OutageState) { this.state = structuredClone(state); this.writes.push(structuredClone(state)); }
-  now() { return new Date(Date.UTC(2026, 6, 31, 16, 0, this.clock++)).toISOString(); }
+  async readState() {
+    return this.state;
+  }
+  async writeState(state: OutageState) {
+    this.state = structuredClone(state);
+    this.writes.push(structuredClone(state));
+  }
+  now() {
+    return new Date(Date.UTC(2026, 6, 31, 16, 0, this.clock++)).toISOString();
+  }
   async send(event: NotificationEvent) {
-    if (this.failures > 0) { this.failures -= 1; throw new Error("Telegram secret-canary failure"); }
+    if (this.failures > 0) {
+      this.failures -= 1;
+      throw new Error("Telegram secret-canary failure");
+    }
     this.sent.push(event);
   }
 }
@@ -80,7 +90,12 @@ describe("durable outage transitions", () => {
     const runtime = new FakeRuntime();
     await expect(recordFallback(runtime, context, "secret-canary")).rejects.toThrow("invalid");
     expect(runtime.writes).toEqual([]);
-    runtime.state = { schemaVersion: 1, outageActive: false, queue: [], token: "secret-canary" } as unknown as OutageState;
+    runtime.state = {
+      schemaVersion: 1,
+      outageActive: false,
+      queue: [],
+      token: "secret-canary",
+    } as unknown as OutageState;
     await expect(recordRemoteChildStarted(runtime, context)).rejects.toThrow("corrupt");
     expect(runtime.sent).toEqual([]);
   });

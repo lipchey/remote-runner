@@ -18,7 +18,10 @@ class FakeRuntime implements RunProfileRuntime {
     if (!next) throw new Error("unexpected prepare");
     return next;
   }
-  async runLocal(command: readonly string[]) { this.calls.push(`local:${command.join("|")}`); return this.localExit; }
+  async runLocal(command: readonly string[]) {
+    this.calls.push(`local:${command.join("|")}`);
+    return this.localExit;
+  }
   async startRemote(
     command: readonly string[],
     secrets: Readonly<Record<string, string>>,
@@ -78,9 +81,7 @@ describe("run profile selection", () => {
     runtime.preparations = [prepared(runtime)];
     runtime.remoteExit = 23;
     expect(await runProfile(runtime, profile, ["./verify", "--full"])).toBe(23);
-    expect(runtime.calls).toEqual([
-      "prepare", "remote:./verify|--full", "marker", "release", "remote-exit:23",
-    ]);
+    expect(runtime.calls).toEqual(["prepare", "remote:./verify|--full", "marker", "release", "remote-exit:23"]);
     expect(runtime.calls.some((call) => call.startsWith("local:"))).toBe(false);
     expect(runtime.seenSecrets).toEqual({ SECRET: "ephemeral-canary" });
   });

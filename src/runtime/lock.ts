@@ -99,11 +99,7 @@ async function removeIfPresent(files: LockFileSystem, path: string): Promise<voi
   }
 }
 
-async function publishInitializedLock(
-  runtime: LockRuntime,
-  lockPath: string,
-  token: string,
-): Promise<boolean> {
+async function publishInitializedLock(runtime: LockRuntime, lockPath: string, token: string): Promise<boolean> {
   const generationPath = `${lockPath}.generation-${token}`;
   const generationOwnerPath = `${generationPath}/owner.json`;
   await runtime.files.mkdir(generationPath);
@@ -115,11 +111,7 @@ async function publishInitializedLock(
     leaseUntil: acquiredAt + runtime.leaseDurationMs,
   };
   try {
-    await runtime.files.writeFile(
-      generationOwnerPath,
-      encoder.encode(JSON.stringify(owner)),
-      0o600,
-    );
+    await runtime.files.writeFile(generationOwnerPath, encoder.encode(JSON.stringify(owner)), 0o600);
     await runtime.files.symlink(generationPath, lockPath);
     return true;
   } catch (caught) {
@@ -131,10 +123,7 @@ async function publishInitializedLock(
 
 type GuardResult = "acquired" | "busy" | "missing";
 
-async function acquireOperationGuard(
-  runtime: LockRuntime,
-  guardPath: string,
-): Promise<GuardResult> {
+async function acquireOperationGuard(runtime: LockRuntime, guardPath: string): Promise<GuardResult> {
   try {
     await runtime.files.mkdir(guardPath);
     return "acquired";
@@ -273,13 +262,7 @@ export async function acquireProfileLock(
         ownerContents = await runtime.files.readFile(ownerPath);
       } catch (caught) {
         if (errorCode(caught) !== "ENOENT") throw caught;
-        moved = await renameForDiagnosis(
-          runtime,
-          lockPath,
-          "corrupt",
-          token,
-          diagnosticAttempt++,
-        );
+        moved = await renameForDiagnosis(runtime, lockPath, "corrupt", token, diagnosticAttempt++);
         continue;
       }
 
@@ -287,25 +270,13 @@ export async function acquireProfileLock(
       try {
         owner = parseOwner(ownerContents);
       } catch {
-        moved = await renameForDiagnosis(
-          runtime,
-          lockPath,
-          "corrupt",
-          token,
-          diagnosticAttempt++,
-        );
+        moved = await renameForDiagnosis(runtime, lockPath, "corrupt", token, diagnosticAttempt++);
         continue;
       }
 
       const now = runtime.clock.now();
       if (now >= owner.leaseUntil && !(await runtime.processes.isAlive(owner.pid))) {
-        moved = await renameForDiagnosis(
-          runtime,
-          lockPath,
-          "stale",
-          token,
-          diagnosticAttempt++,
-        );
+        moved = await renameForDiagnosis(runtime, lockPath, "stale", token, diagnosticAttempt++);
         continue;
       }
     } finally {

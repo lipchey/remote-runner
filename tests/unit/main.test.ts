@@ -11,15 +11,20 @@ describe("executable entrypoint", () => {
   it("routes install before ordinary profile dependencies and reports the stable executable", async () => {
     const stdout: string[] = [];
     let installed = 0;
-    const code = await runMain(["install"], {
-      stdout: (line) => stdout.push(line),
-      stderr: () => undefined,
-    }, { readFile: async () => "" }, {
-      async installLocal() {
-        installed += 1;
-        return { executablePath: "/Users/admin/.local/bin/remote-runner" };
+    const code = await runMain(
+      ["install"],
+      {
+        stdout: (line) => stdout.push(line),
+        stderr: () => undefined,
       },
-    });
+      { readFile: async () => "" },
+      {
+        async installLocal() {
+          installed += 1;
+          return { executablePath: "/Users/admin/.local/bin/remote-runner" };
+        },
+      },
+    );
 
     expect(code).toBe(0);
     expect(installed).toBe(1);
@@ -28,10 +33,14 @@ describe("executable entrypoint", () => {
 
   it("routes ordinary argv through the injected CLI dependencies", async () => {
     const stdout: string[] = [];
-    const code = await runMain(["validate"], {
-      stdout: (line) => stdout.push(line),
-      stderr: () => undefined,
-    }, { readFile: async () => "schemaVersion: 1\nprofiles: []\n" });
+    const code = await runMain(
+      ["validate"],
+      {
+        stdout: (line) => stdout.push(line),
+        stderr: () => undefined,
+      },
+      { readFile: async () => "schemaVersion: 1\nprofiles: []\n" },
+    );
 
     expect(code).toBe(2);
     expect(stdout).toEqual([]);
@@ -47,31 +56,26 @@ describe("executable entrypoint", () => {
       sourceRoot: "/worktrees/ariadne-feature",
       manifestPath: "/worktrees/ariadne-feature/.remote-runner.yaml",
     };
-    const code = await runMain(
-      ["controller"],
-      { stdout: () => undefined, stderr: () => undefined },
-      undefined,
-      {
-        installLocal: async () => ({ executablePath: "/unused" }),
-        createCliDependencies: async (sourceRoot) => {
-          calls.push(["dependencies", sourceRoot]);
-          return {
-            readFile: async (path) => {
-              calls.push(["read", path]);
-              return validManifest;
-            },
-            ensureController: async () => {
-              calls.push(["controller-health"]);
-            },
-            runProfile: async (profile, command, mode) => {
-              calls.push(["run", profile.id, command, mode]);
-              return 23;
-            },
-          };
-        },
-        runController: async (runPrewarm) => runPrewarm(request),
+    const code = await runMain(["controller"], { stdout: () => undefined, stderr: () => undefined }, undefined, {
+      installLocal: async () => ({ executablePath: "/unused" }),
+      createCliDependencies: async (sourceRoot) => {
+        calls.push(["dependencies", sourceRoot]);
+        return {
+          readFile: async (path) => {
+            calls.push(["read", path]);
+            return validManifest;
+          },
+          ensureController: async () => {
+            calls.push(["controller-health"]);
+          },
+          runProfile: async (profile, command, mode) => {
+            calls.push(["run", profile.id, command, mode]);
+            return 23;
+          },
+        };
       },
-    );
+      runController: async (runPrewarm) => runPrewarm(request),
+    });
 
     expect(code).toBe(23);
     expect(calls).toEqual([

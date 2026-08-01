@@ -1,16 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  readDotenvSecrets,
-  runSecretProvider,
-  type SecretProviderRuntime,
-} from "../../../src/secrets/provider.js";
+import { readDotenvSecrets, runSecretProvider, type SecretProviderRuntime } from "../../../src/secrets/provider.js";
 
 const bytes = (value: string): Uint8Array => new TextEncoder().encode(value);
 
 class FakeRuntime implements SecretProviderRuntime {
   readonly requests: unknown[] = [];
-  constructor(private readonly result: { exitCode?: number; stdout?: string; stderr?: string; outputTruncated?: boolean }) {}
+  constructor(
+    private readonly result: { exitCode?: number; stdout?: string; stderr?: string; outputTruncated?: boolean },
+  ) {}
   async run(request: unknown) {
     this.requests.push(request);
     return {
@@ -43,11 +41,16 @@ describe("secret provider", () => {
 
   it("captures one bounded JSON object and accepts only allowlisted string values", async () => {
     const runtime = new FakeRuntime({ stdout: '{"NEON_DEV_DATABASE_URL":"canary"}' });
-    await expect(runSecretProvider(runtime, ["node", "scripts/env.mjs"], ["NEON_DEV_DATABASE_URL"]))
-      .resolves.toEqual({ NEON_DEV_DATABASE_URL: "canary" });
-    expect(runtime.requests).toEqual([{
-      command: "node", args: ["scripts/env.mjs"], maxOutputBytes: 128 * 1024,
-    }]);
+    await expect(runSecretProvider(runtime, ["node", "scripts/env.mjs"], ["NEON_DEV_DATABASE_URL"])).resolves.toEqual({
+      NEON_DEV_DATABASE_URL: "canary",
+    });
+    expect(runtime.requests).toEqual([
+      {
+        command: "node",
+        args: ["scripts/env.mjs"],
+        maxOutputBytes: 128 * 1024,
+      },
+    ]);
   });
 
   it("preserves an empty non-executable argv element without invoking a shell", async () => {
@@ -68,8 +71,9 @@ describe("secret provider", () => {
   });
 
   it("rejects provider failure and an invalid command before exposing output", async () => {
-    await expect(runSecretProvider(new FakeRuntime({ exitCode: 9, stderr: "secret-canary" }), ["provider"], ["SECRET"]))
-      .rejects.toThrow("exit code 9");
+    await expect(
+      runSecretProvider(new FakeRuntime({ exitCode: 9, stderr: "secret-canary" }), ["provider"], ["SECRET"]),
+    ).rejects.toThrow("exit code 9");
     const runtime = new FakeRuntime({ stdout: "{}" });
     await expect(runSecretProvider(runtime, [], [])).rejects.toThrow("command");
     expect(runtime.requests).toEqual([]);

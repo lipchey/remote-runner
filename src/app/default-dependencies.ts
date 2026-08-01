@@ -13,11 +13,7 @@ import { repair, type RepairAction, type RepairReceipt } from "../diagnostics/re
 import { mutagenDarwinArchitecture } from "../install/mutagen.js";
 import { createNodeNotificationCallbacks } from "../node/notifications.js";
 import { ensureNodeController, NodeControllerRuntime } from "../node/controller.js";
-import {
-  ensureManagedSshTransport,
-  mutagenSshEnvironment,
-  type ManagedSshTransport,
-} from "../node/managed-ssh.js";
+import { ensureManagedSshTransport, mutagenSshEnvironment, type ManagedSshTransport } from "../node/managed-ssh.js";
 import { NodeProcessRuntime } from "../node/process.js";
 import { worktreeIdentity } from "../runtime/identity.js";
 import { createJsonlLogger } from "../runtime/log.js";
@@ -38,11 +34,7 @@ export interface NodeCliDependencyOptions {
   readonly managedSsh?: ManagedSshTransport;
   readonly processes?: NodeProcessRuntime;
   readonly now?: () => string;
-  readonly executeProfile?: (
-    profile: Profile,
-    command: readonly string[],
-    mode: RunMode,
-  ) => Promise<number>;
+  readonly executeProfile?: (profile: Profile, command: readonly string[], mode: RunMode) => Promise<number>;
 }
 
 export interface NodeCliDependencies extends CliDependencies {
@@ -65,9 +57,16 @@ export function launcherAssetCandidates(moduleUrl: string): readonly URL[] {
 
 async function readLauncherSource(): Promise<Uint8Array> {
   for (const candidate of launcherAssetCandidates(import.meta.url)) {
-    try { return new Uint8Array(await readFile(candidate)); }
-    catch (caught) {
-      if (!(typeof caught === "object" && caught !== null && "code" in caught && (caught as { code?: unknown }).code === "ENOENT")) throw caught;
+    try {
+      return new Uint8Array(await readFile(candidate));
+    } catch (caught) {
+      if (!(
+        typeof caught === "object" &&
+        caught !== null &&
+        "code" in caught &&
+        (caught as { code?: unknown }).code === "ENOENT"
+      ))
+        throw caught;
     }
   }
   throw new Error("remote launcher asset is missing");
@@ -108,8 +107,9 @@ function remoteWorkspace(profile: Profile, identity: string): string {
 }
 
 async function readOptionalUtf8(path: string): Promise<string | undefined> {
-  try { return decoder.decode(await readFile(path)); }
-  catch (caught) {
+  try {
+    return decoder.decode(await readFile(path));
+  } catch (caught) {
     if (errorCode(caught) === "ENOENT") return undefined;
     throw caught;
   }
@@ -132,7 +132,9 @@ function sessionStatus(output: Uint8Array, expectedName: string): "watching" | "
         if (session.status === "watching") return "watching";
       }
     }
-  } catch { return "unknown"; }
+  } catch {
+    return "unknown";
+  }
   return sawSession ? "unknown" : "missing";
 }
 
@@ -141,14 +143,18 @@ async function inspectRemoteStatus(
   profile: Profile,
   identity: string,
   knownHostsPath: string,
-): Promise<{ readonly workspace: "ready" | "missing" | "dirty" | "unknown"; readonly fingerprint: "current" | "stale" | "missing" | "unknown" }> {
+): Promise<{
+  readonly workspace: "ready" | "missing" | "dirty" | "unknown";
+  readonly fingerprint: "current" | "stale" | "missing" | "unknown";
+}> {
   const workspace = `.cache/remote-runner/workspaces/${profile.consumer}/${profile.id}/${identity}`;
   const setupState = `.local/state/remote-runner/profiles/${profile.consumer}/${profile.id}/${identity}/setup.json`;
   const script = [
-    "workspace=$HOME/$1", "setup=$HOME/$2",
-    "if [ ! -d \"$workspace\" ]; then workspace_status=missing; elif [ -n \"$(git -C \"$workspace\" status --porcelain 2>/dev/null)\" ]; then workspace_status=dirty; else workspace_status=ready; fi",
-    "if [ -f \"$setup\" ]; then fingerprint_status=current; else fingerprint_status=missing; fi",
-    "printf '{\"workspace\":\"%s\",\"fingerprint\":\"%s\"}\\n' \"$workspace_status\" \"$fingerprint_status\"",
+    "workspace=$HOME/$1",
+    "setup=$HOME/$2",
+    'if [ ! -d "$workspace" ]; then workspace_status=missing; elif [ -n "$(git -C "$workspace" status --porcelain 2>/dev/null)" ]; then workspace_status=dirty; else workspace_status=ready; fi',
+    'if [ -f "$setup" ]; then fingerprint_status=current; else fingerprint_status=missing; fi',
+    'printf \'{"workspace":"%s","fingerprint":"%s"}\\n\' "$workspace_status" "$fingerprint_status"',
   ].join("; ");
   const result = await runSsh(
     processes,
@@ -164,10 +170,18 @@ async function inspectRemoteStatus(
     const workspaceStatus = parsed.workspace;
     const fingerprintStatus = parsed.fingerprint;
     return {
-      workspace: workspaceStatus === "ready" || workspaceStatus === "missing" || workspaceStatus === "dirty" ? workspaceStatus : "unknown",
-      fingerprint: fingerprintStatus === "current" || fingerprintStatus === "stale" || fingerprintStatus === "missing" ? fingerprintStatus : "unknown",
+      workspace:
+        workspaceStatus === "ready" || workspaceStatus === "missing" || workspaceStatus === "dirty"
+          ? workspaceStatus
+          : "unknown",
+      fingerprint:
+        fingerprintStatus === "current" || fingerprintStatus === "stale" || fingerprintStatus === "missing"
+          ? fingerprintStatus
+          : "unknown",
     };
-  } catch { return { workspace: "unknown", fingerprint: "unknown" }; }
+  } catch {
+    return { workspace: "unknown", fingerprint: "unknown" };
+  }
 }
 
 async function inspectOutage(path: string): Promise<"clear" | "active" | "pending" | "unknown"> {
@@ -178,7 +192,9 @@ async function inspectOutage(path: string): Promise<"clear" | "active" | "pendin
     if (typeof parsed.outageActive !== "boolean" || !Array.isArray(parsed.queue)) return "unknown";
     if (parsed.queue.length > 0) return "pending";
     return parsed.outageActive ? "active" : "clear";
-  } catch { return "unknown"; }
+  } catch {
+    return "unknown";
+  }
 }
 
 async function inspectProbe(
@@ -222,35 +238,42 @@ async function inspectProbe(
     command = "tail";
     args = ["-n", "50", join(profileRoot(options.home, profile, identity), "runner.log")];
   } else {
-    const remoteArguments = probe.id === "remote.capacity"
-      ? ["sh", "-ceu", "exec df -Pk \"$HOME/$1\"", "remote-runner-capacity", workspace]
-      : probe.id === "remote.bootstrap"
-        ? [
-            "sh", "-ceu",
-            "set -- \"$HOME\"/.local/share/remote-runner/toolchains/node-v*/bin; [ -x \"$1/node\" ] && [ -x \"$1/pnpm\" ]",
-          ]
-        : probe.id === "remote.workspace"
-          ? ["sh", "-ceu", "exec git -C \"$HOME/$1\" status --short --branch", "remote-runner-workspace", workspace]
-          : probe.id === "secrets.persistence"
-            ? ["sh", "-ceu", "exec find \"$HOME/$1\" -maxdepth 1 -name .env -print", "remote-runner-secrets", workspace]
-            : ["true"];
+    const remoteArguments =
+      probe.id === "remote.capacity"
+        ? ["sh", "-ceu", 'exec df -Pk "$HOME/$1"', "remote-runner-capacity", workspace]
+        : probe.id === "remote.bootstrap"
+          ? [
+              "sh",
+              "-ceu",
+              'set -- "$HOME"/.local/share/remote-runner/toolchains/node-v*/bin; [ -x "$1/node" ] && [ -x "$1/pnpm" ]',
+            ]
+          : probe.id === "remote.workspace"
+            ? ["sh", "-ceu", 'exec git -C "$HOME/$1" status --short --branch', "remote-runner-workspace", workspace]
+            : probe.id === "secrets.persistence"
+              ? ["sh", "-ceu", 'exec find "$HOME/$1" -maxdepth 1 -name .env -print', "remote-runner-secrets", workspace]
+              : ["true"];
     const result = await runSsh(
       options.processes,
       profile.remote.target,
       remoteArguments,
-      probe.id === "network.timeout" ? Math.min(2, profile.probes.connectTimeoutSeconds) : profile.probes.connectTimeoutSeconds,
+      probe.id === "network.timeout"
+        ? Math.min(2, profile.probes.connectTimeoutSeconds)
+        : profile.probes.connectTimeoutSeconds,
       options.knownHostsPath,
       CAPTURE_BYTES,
     );
     return { status: result.exitCode === 0 ? "ok" : "fail" };
   }
-  const result = await options.processes.run({ command, args, ...(environment === undefined ? {} : { environment }), maxOutputBytes: CAPTURE_BYTES });
+  const result = await options.processes.run({
+    command,
+    args,
+    ...(environment === undefined ? {} : { environment }),
+    maxOutputBytes: CAPTURE_BYTES,
+  });
   return { status: result.exitCode === 0 ? "ok" : "fail" };
 }
 
-export async function createNodeCliDependencies(
-  options: NodeCliDependencyOptions = {},
-): Promise<NodeCliDependencies> {
+export async function createNodeCliDependencies(options: NodeCliDependencyOptions = {}): Promise<NodeCliDependencies> {
   const home = options.home ?? homedir();
   const sourceRoot = await realpath(options.sourceRoot ?? process.cwd());
   const identity = worktreeIdentity(sourceRoot);
@@ -262,66 +285,64 @@ export async function createNodeCliDependencies(
     knownHostsPath: join(home, ".local", "state", "remote-runner", "known_hosts", "managed"),
   };
 
-  const loadManifest = async (): Promise<ManifestV1> => loadManifestText(
-    await readFile(join(sourceRoot, ".remote-runner.yaml"), "utf8"),
-  );
+  const loadManifest = async (): Promise<ManifestV1> =>
+    loadManifestText(await readFile(join(sourceRoot, ".remote-runner.yaml"), "utf8"));
 
-  let resourcesPromise: Promise<{ readonly managedSsh: ManagedSshTransport; readonly launcherSource: Uint8Array }> | undefined;
-  const executionResources = () => resourcesPromise ??= (async () => {
-    const managedSsh = options.managedSsh ?? await ensureManagedSshTransport(home);
-    const launcherSource = options.launcherSource ?? await readLauncherSource();
-    if (managedSsh.changed) {
-      const stopped = await processes.run({
-        command: mutagenCommand,
-        args: ["daemon", "stop"],
-        environment: mutagenSshEnvironment(managedSsh.directory),
-        maxOutputBytes: CAPTURE_BYTES,
-      });
-      if (stopped.exitCode !== 0 && stopped.exitCode !== 127) {
-        throw new Error("unable to restart Mutagen after managed SSH transport update");
+  let resourcesPromise:
+    Promise<{ readonly managedSsh: ManagedSshTransport; readonly launcherSource: Uint8Array }> | undefined;
+  const executionResources = () =>
+    (resourcesPromise ??= (async () => {
+      const managedSsh = options.managedSsh ?? (await ensureManagedSshTransport(home));
+      const launcherSource = options.launcherSource ?? (await readLauncherSource());
+      if (managedSsh.changed) {
+        const stopped = await processes.run({
+          command: mutagenCommand,
+          args: ["daemon", "stop"],
+          environment: mutagenSshEnvironment(managedSsh.directory),
+          maxOutputBytes: CAPTURE_BYTES,
+        });
+        if (stopped.exitCode !== 0 && stopped.exitCode !== 127) {
+          throw new Error("unable to restart Mutagen after managed SSH transport update");
+        }
       }
-    }
-    return { managedSsh, launcherSource };
-  })();
+      return { managedSsh, launcherSource };
+    })());
 
-  const executeWorkload = options.executeProfile ?? (async (
-    profile: Profile,
-    command: readonly string[],
-    mode: RunMode,
-  ): Promise<number> => {
-    const resources = await executionResources();
-    const notifications = createNodeNotificationCallbacks({
-      statePath: join(profileRoot(home, profile, identity), "outage.json"),
-      configPath: join(home, ".claude", ".telegram-ask.conf"),
-      context: { consumer: profile.consumer, profile: profile.id, remoteLabel: profile.remote.label },
-      stderr: (line) => process.stderr.write(`${line}\n`),
+  const executeWorkload =
+    options.executeProfile ??
+    (async (profile: Profile, command: readonly string[], mode: RunMode): Promise<number> => {
+      const resources = await executionResources();
+      const notifications = createNodeNotificationCallbacks({
+        statePath: join(profileRoot(home, profile, identity), "outage.json"),
+        configPath: join(home, ".claude", ".telegram-ask.conf"),
+        context: { consumer: profile.consumer, profile: profile.id, remoteLabel: profile.remote.label },
+        stderr: (line) => process.stderr.write(`${line}\n`),
+      });
+      const services = new NodeProfileServices(profile, {
+        home,
+        sourceRoot,
+        launcherSource: resources.launcherSource,
+        mutagenCommand,
+        managedSshPath: resources.managedSsh.directory,
+        knownHostsPath: resources.managedSsh.knownHostsPath,
+        processes,
+        recordFallback: notifications.recordFallback,
+        recordRemoteChildStarted: notifications.recordRemoteChildStarted,
+      });
+      return runProfile(createProfileRuntime(services), profile, command, mode);
     });
-    const services = new NodeProfileServices(profile, {
-      home,
-      sourceRoot,
-      launcherSource: resources.launcherSource,
-      mutagenCommand,
-      managedSshPath: resources.managedSsh.directory,
-      knownHostsPath: resources.managedSsh.knownHostsPath,
-      processes,
-      recordFallback: notifications.recordFallback,
-      recordRemoteChildStarted: notifications.recordRemoteChildStarted,
-    });
-    return runProfile(createProfileRuntime(services), profile, command, mode);
-  });
 
-  const executeProfile = async (
-    profile: Profile,
-    command: readonly string[],
-    mode: RunMode,
-  ): Promise<number> => {
+  const executeProfile = async (profile: Profile, command: readonly string[], mode: RunMode): Promise<number> => {
     const root = profileRoot(home, profile, identity);
-    const logger = createJsonlLogger({
-      appendFile: (path, contents, mode) => appendFile(path, contents, { mode }),
-      stat,
-      rename,
-      remove: (path) => rm(path, { force: true }),
-    }, join(root, "runner.log"));
+    const logger = createJsonlLogger(
+      {
+        appendFile: (path, contents, mode) => appendFile(path, contents, { mode }),
+        stat,
+        rename,
+        remove: (path) => rm(path, { force: true }),
+      },
+      join(root, "runner.log"),
+    );
     const writeLog = async (record: unknown): Promise<void> => {
       try {
         await mkdir(root, { recursive: true, mode: 0o700 });
@@ -330,10 +351,21 @@ export async function createNodeCliDependencies(
         // Diagnostics must never block or alter workload selection.
       }
     };
-    await writeLog({ at: (options.now ?? (() => new Date().toISOString()))(), event: "run-start", profile: profile.id, mode });
+    await writeLog({
+      at: (options.now ?? (() => new Date().toISOString()))(),
+      event: "run-start",
+      profile: profile.id,
+      mode,
+    });
     try {
       const status = await executeWorkload(profile, command, mode);
-      await writeLog({ at: (options.now ?? (() => new Date().toISOString()))(), event: "run-finish", profile: profile.id, mode, status });
+      await writeLog({
+        at: (options.now ?? (() => new Date().toISOString()))(),
+        event: "run-finish",
+        profile: profile.id,
+        mode,
+        status,
+      });
       return status;
     } catch (caught) {
       await writeLog({
@@ -362,12 +394,7 @@ export async function createNodeCliDependencies(
       }
       const absoluteManifest = await realpath(resolve(sourceRoot, manifestPath));
       const fromSource = relative(sourceRoot, absoluteManifest);
-      if (
-        fromSource === "" ||
-        fromSource === ".." ||
-        fromSource.startsWith(`..${sep}`) ||
-        isAbsolute(fromSource)
-      ) {
+      if (fromSource === "" || fromSource === ".." || fromSource.startsWith(`..${sep}`) || isAbsolute(fromSource)) {
         throw new Error("prewarm manifest escapes the source root");
       }
       return publishPrewarmRequest(home, {
@@ -411,14 +438,15 @@ export async function createNodeCliDependencies(
         reports.push({
           profile: profile.id,
           report: await doctor({
-            inspect: (probe) => inspectProbe(probe, profile, identity, {
-              home,
-              sourceRoot,
-              knownHostsPath: diagnosticSsh.knownHostsPath,
-              mutagenCommand,
-              managedSshPath: diagnosticSsh.directory,
-              processes,
-            }),
+            inspect: (probe) =>
+              inspectProbe(probe, profile, identity, {
+                home,
+                sourceRoot,
+                knownHostsPath: diagnosticSsh.knownHostsPath,
+                mutagenCommand,
+                managedSshPath: diagnosticSsh.directory,
+                processes,
+              }),
           }),
         });
       }
@@ -440,102 +468,112 @@ export async function createNodeCliDependencies(
       const profile = selectedProfiles(await loadManifest(), profileId)[0]!;
       const root = profileRoot(home, profile, identity);
       const receiptPath = join(root, "repair-dry-run.json");
-      return repair({
-        identity,
-        identityRoot: root,
-        async inspect() {
-          let entries: string[];
-          try { entries = await readdir(root); }
-          catch (caught) {
-            if (errorCode(caught) === "ENOENT") return [];
-            throw caught;
-          }
-          const actions: RepairAction[] = [];
-          for (const entry of entries.sort()) {
-            if (!entry.includes(".corrupt-")) continue;
-            const target = join(root, entry);
-            const metadata = await lstat(target);
-            if (metadata.isSymbolicLink() || (!metadata.isFile() && !metadata.isDirectory())) continue;
-            actions.push({ id: `remove-corrupt-${actions.length + 1}`, target, destructive: true });
-          }
-          return actions;
-        },
-        async readDryRun() {
-          let metadata;
-          try { metadata = await lstat(receiptPath); }
-          catch (caught) {
-            if (errorCode(caught) === "ENOENT") return undefined;
-            throw caught;
-          }
-          if (metadata.isSymbolicLink()) throw new Error("repair receipt must not be a symlink");
-          if (!metadata.isFile()) throw new Error("repair receipt must be a regular file");
-          const contents = await readOptionalUtf8(receiptPath);
-          if (contents === undefined) return undefined;
-          try { return JSON.parse(contents) as RepairReceipt; }
-          catch { return undefined; }
-        },
-        async writeDryRun(receipt) {
-          await mkdir(root, { recursive: true, mode: 0o700 });
-          try {
-            const metadata = await lstat(receiptPath);
+      return repair(
+        {
+          identity,
+          identityRoot: root,
+          async inspect() {
+            let entries: string[];
+            try {
+              entries = await readdir(root);
+            } catch (caught) {
+              if (errorCode(caught) === "ENOENT") return [];
+              throw caught;
+            }
+            const actions: RepairAction[] = [];
+            for (const entry of entries.sort()) {
+              if (!entry.includes(".corrupt-")) continue;
+              const target = join(root, entry);
+              const metadata = await lstat(target);
+              if (metadata.isSymbolicLink() || (!metadata.isFile() && !metadata.isDirectory())) continue;
+              actions.push({ id: `remove-corrupt-${actions.length + 1}`, target, destructive: true });
+            }
+            return actions;
+          },
+          async readDryRun() {
+            let metadata;
+            try {
+              metadata = await lstat(receiptPath);
+            } catch (caught) {
+              if (errorCode(caught) === "ENOENT") return undefined;
+              throw caught;
+            }
             if (metadata.isSymbolicLink()) throw new Error("repair receipt must not be a symlink");
             if (!metadata.isFile()) throw new Error("repair receipt must be a regular file");
-          } catch (caught) {
-            if (errorCode(caught) !== "ENOENT") throw caught;
-          }
-          const temporary = join(root, `.repair-dry-run.tmp-${randomUUID()}`);
-          try {
-            await writeFile(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-            await rename(temporary, receiptPath);
-          } catch (caught) {
-            await rm(temporary, { force: true }).catch(() => undefined);
-            throw caught;
-          }
+            const contents = await readOptionalUtf8(receiptPath);
+            if (contents === undefined) return undefined;
+            try {
+              return JSON.parse(contents) as RepairReceipt;
+            } catch {
+              return undefined;
+            }
+          },
+          async writeDryRun(receipt) {
+            await mkdir(root, { recursive: true, mode: 0o700 });
+            try {
+              const metadata = await lstat(receiptPath);
+              if (metadata.isSymbolicLink()) throw new Error("repair receipt must not be a symlink");
+              if (!metadata.isFile()) throw new Error("repair receipt must be a regular file");
+            } catch (caught) {
+              if (errorCode(caught) !== "ENOENT") throw caught;
+            }
+            const temporary = join(root, `.repair-dry-run.tmp-${randomUUID()}`);
+            try {
+              await writeFile(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+              await rename(temporary, receiptPath);
+            } catch (caught) {
+              await rm(temporary, { force: true }).catch(() => undefined);
+              throw caught;
+            }
+          },
+          async apply(action) {
+            const metadata = await lstat(action.target);
+            if (metadata.isSymbolicLink()) throw new Error("refusing to repair through a symlink");
+            await rm(action.target, { recursive: metadata.isDirectory(), force: false });
+          },
+          now: options.now ?? (() => new Date().toISOString()),
         },
-        async apply(action) {
-          const metadata = await lstat(action.target);
-          if (metadata.isSymbolicLink()) throw new Error("refusing to repair through a symlink");
-          await rm(action.target, { recursive: metadata.isDirectory(), force: false });
-        },
-        now: options.now ?? (() => new Date().toISOString()),
-      }, profile.id, { apply });
+        profile.id,
+        { apply },
+      );
     },
     async benchmarkProfile(profile) {
       await ensureNodeController(home);
-      return runBenchmark({
-        now: options.now ?? (() => new Date().toISOString()),
-        async runSample(execution: BenchmarkExecution) {
-          const startedAt = performance.now();
-          const status = await executeProfile(profile, execution.command, execution.location);
-          const finishedAt = performance.now();
-          return { syncMs: 0, setupMs: 0, workloadMs: Math.max(0, finishedAt - startedAt), status };
+      return runBenchmark(
+        {
+          now: options.now ?? (() => new Date().toISOString()),
+          async runSample(execution: BenchmarkExecution) {
+            const startedAt = performance.now();
+            const status = await executeProfile(profile, execution.command, execution.location);
+            const finishedAt = performance.now();
+            return { syncMs: 0, setupMs: 0, workloadMs: Math.max(0, finishedAt - startedAt), status };
+          },
+          async writeReceipt(path, contents) {
+            const target = confinedPath(sourceRoot, path);
+            await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+            const canonicalDirectory = await realpath(dirname(target));
+            const directoryFromRoot = relative(sourceRoot, canonicalDirectory);
+            if (directoryFromRoot === ".." || directoryFromRoot.startsWith(`..${sep}`) || isAbsolute(directoryFromRoot))
+              throw new Error("output directory escapes source root");
+            try {
+              const metadata = await lstat(target);
+              if (metadata.isSymbolicLink()) throw new Error("benchmark receipt must not be a symlink");
+              if (!metadata.isFile()) throw new Error("benchmark receipt must be a regular file");
+            } catch (caught) {
+              if (errorCode(caught) !== "ENOENT") throw caught;
+            }
+            const temporary = join(canonicalDirectory, `.benchmark-receipt.tmp-${randomUUID()}`);
+            try {
+              await writeFile(temporary, contents, { flag: "wx", mode: 0o600 });
+              await rename(temporary, target);
+            } catch (caught) {
+              await rm(temporary, { force: true }).catch(() => undefined);
+              throw caught;
+            }
+          },
         },
-        async writeReceipt(path, contents) {
-          const target = confinedPath(sourceRoot, path);
-          await mkdir(dirname(target), { recursive: true, mode: 0o700 });
-          const canonicalDirectory = await realpath(dirname(target));
-          const directoryFromRoot = relative(sourceRoot, canonicalDirectory);
-          if (
-            directoryFromRoot === ".." || directoryFromRoot.startsWith(`..${sep}`) ||
-            isAbsolute(directoryFromRoot)
-          ) throw new Error("output directory escapes source root");
-          try {
-            const metadata = await lstat(target);
-            if (metadata.isSymbolicLink()) throw new Error("benchmark receipt must not be a symlink");
-            if (!metadata.isFile()) throw new Error("benchmark receipt must be a regular file");
-          } catch (caught) {
-            if (errorCode(caught) !== "ENOENT") throw caught;
-          }
-          const temporary = join(canonicalDirectory, `.benchmark-receipt.tmp-${randomUUID()}`);
-          try {
-            await writeFile(temporary, contents, { flag: "wx", mode: 0o600 });
-            await rename(temporary, target);
-          } catch (caught) {
-            await rm(temporary, { force: true }).catch(() => undefined);
-            throw caught;
-          }
-        },
-      }, profile);
+        profile,
+      );
     },
   };
   return dependencies;

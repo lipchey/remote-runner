@@ -9,8 +9,6 @@ describe("assertSafeRepositoryPath", () => {
   );
 
   it("normalizes a confined relative path", () => {
-    expect(assertSafeRepositoryPath("scripts/./nested/../verify.sh")).toBe(
-      "scripts/verify.sh",
-    );
+    expect(assertSafeRepositoryPath("scripts/./nested/../verify.sh")).toBe("scripts/verify.sh");
   });
 });

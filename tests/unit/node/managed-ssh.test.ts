@@ -86,35 +86,41 @@ describe("managed Mutagen SSH transport", () => {
     const fingerprint = `SHA256:${createHash("sha256").update(blob).digest("base64").replace(/=+$/u, "")}`;
     let scans = 0;
 
-    await ensureManagedKnownHost({
-      async run() {
-        scans += 1;
-        return {
-          exitCode: 0,
-          stdout: new TextEncoder().encode(`beta ssh-ed25519 ${encoded}\n`),
-          stderr: new Uint8Array(),
-          outputTruncated: false,
-        };
+    await ensureManagedKnownHost(
+      {
+        async run() {
+          scans += 1;
+          return {
+            exitCode: 0,
+            stdout: new TextEncoder().encode(`beta ssh-ed25519 ${encoded}\n`),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+          };
+        },
       },
-    }, {
-      target: "admin@beta",
-      trustedFingerprint: fingerprint,
-      knownHostsPath,
-      connectTimeoutSeconds: 4,
-    });
-    await ensureManagedKnownHost({
-      async run() { throw new Error("existing host must not be rescanned"); },
-    }, {
-      target: "admin@beta",
-      trustedFingerprint: fingerprint,
-      knownHostsPath,
-      connectTimeoutSeconds: 4,
-    });
+      {
+        target: "admin@beta",
+        trustedFingerprint: fingerprint,
+        knownHostsPath,
+        connectTimeoutSeconds: 4,
+      },
+    );
+    await ensureManagedKnownHost(
+      {
+        async run() {
+          throw new Error("existing host must not be rescanned");
+        },
+      },
+      {
+        target: "admin@beta",
+        trustedFingerprint: fingerprint,
+        knownHostsPath,
+        connectTimeoutSeconds: 4,
+      },
+    );
 
     expect(scans).toBe(1);
-    expect(await readFile(knownHostsPath, "utf8")).toBe(
-      `alpha ssh-ed25519 AAAA\nbeta ssh-ed25519 ${encoded}\n`,
-    );
+    expect(await readFile(knownHostsPath, "utf8")).toBe(`alpha ssh-ed25519 AAAA\nbeta ssh-ed25519 ${encoded}\n`);
     expect((await stat(knownHostsPath)).mode & 0o777).toBe(0o600);
   });
 });
