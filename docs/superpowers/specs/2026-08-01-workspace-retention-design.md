@@ -78,10 +78,12 @@ exclusive `flock` before changing into the workspace and holds the file descript
 launcher and workload exit. A collector may quarantine an identity only after acquiring the same
 lock non-blockingly.
 
-Reconciliation touches a confined `.remote-runner-last-used` marker after the workspace is ready.
-The collector treats the marker mtime as the identity's activity time. A missing legacy marker
-falls back to the identity directory mtime. Identities inside the 60-minute grace window are never
-collected, which protects a concurrently preparing identity before its workload lock exists.
+The runner touches a confined `<profileRoot>/.activity/<identity>` marker when preparation starts
+and again after a remotely started workload finishes. The marker stays outside the Mutagen beta
+root, so one-way synchronization cannot delete it as remote-only workspace content. The collector
+treats its mtime as the identity's activity time. A missing legacy marker falls back to the identity
+directory mtime. Identities inside the 60-minute grace window are never collected, which protects a
+concurrently preparing identity before its workload lock exists.
 
 The collector also excludes the current identity unconditionally. Directory names must match the
 existing 24-character lowercase hexadecimal identity format, and candidates must be real
@@ -100,7 +102,8 @@ non-zero. It does not run when the remote child never started.
    directory to a confined `.gc-<identity>-<nonce>` quarantine name while holding the lock.
 5. Terminate the exact owned Mutagen session
    `remote-runner-<consumer>-<profile>-<identity>`.
-6. Remove the quarantined directory, its lock file, and its remote setup-state directory.
+6. Remove the quarantined directory, its activity marker, its lock file, and its remote setup-state
+   directory.
 
 Quarantine closes the race between the lock check and Mutagen termination. If the process stops
 after quarantine, a later cleanup recognizes the confined `.gc-*` entry and retries the remaining

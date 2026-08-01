@@ -136,7 +136,7 @@ git commit -m "feat: probe configured workspace filesystem"
 
 - [ ] **Step 1: Write failing planner tests**
 
-Define fixtures for the current identity, four stale identities, one 30-minute-old identity, one missing-marker legacy identity, hostile names, and equal timestamps. Assert `keep: 3` retains the current identity plus two newest valid identities, grace protects the recent identity, ties sort by identity, and only exact 24-character lowercase hexadecimal directory names enter the plan.
+Define fixtures for the current identity, four stale identities, one 30-minute-old identity, one missing-marker legacy identity, hostile names, and equal timestamps. Assert `keep: 3` retains the current identity plus two newest valid identities, grace protects the recent identity, ties sort by identity, and only exact 24-character lowercase hexadecimal directory names enter the plan. Activity timestamps come from `<profileRoot>/.activity/<identity>`; only legacy identities without a marker fall back to directory mtime.
 
 - [ ] **Step 2: Run the new test and require red**
 
@@ -199,7 +199,7 @@ git commit -m "feat: plan bounded workspace retention"
 Use fake ports to require this order for an eligible identity:
 
 ```text
-list -> quarantine-under-nonblocking-lock -> terminate-owned-mutagen -> remove-quarantine -> remove-setup-state -> remove-lock
+list -> quarantine-under-nonblocking-lock -> terminate-owned-mutagen -> remove-quarantine -> remove-activity -> remove-setup-state -> remove-lock
 ```
 
 Require locked identities to be counted as skipped, symlink/special entries to be reported and ignored, `.gc-<identity>-<nonce>` remnants to resume cleanup, and one candidate failure not to widen targets or prevent bounded processing of later candidates.
@@ -225,7 +225,7 @@ flock -n 9 || exit 75
 mv -- "$workspace" "$quarantine"
 ```
 
-Use a locally generated nonce that matches a strict safe-label pattern. After quarantine, terminate the exact Mutagen session, remove only the exact quarantined directory, then remove confined setup state and lock files. Return a bounded summary of retained, grace-protected, locked, removed, and failed counts.
+Use a locally generated nonce that matches a strict safe-label pattern. After quarantine, terminate the exact Mutagen session, remove only the exact quarantined directory, then remove confined activity, setup-state, and lock files. Return a bounded summary of retained, grace-protected, locked, removed, and failed counts.
 
 - [ ] **Step 5: Run focused green tests**
 
@@ -251,7 +251,7 @@ git commit -m "feat: prune inactive remote workspaces"
 
 - [ ] **Step 1: Write failing lifecycle tests**
 
-Require `remoteChildArguments` to create the profile lock directory, acquire the current identity's lock with `flock -x`, and hold descriptor 9 through launcher exit. Add profile-service tests proving cleanup runs after a marker-seen exit `0` and exit `23`, does not run when the child marker is absent, and cleanup failure writes one bounded warning while returning the original child exit.
+Require `remoteChildArguments` to create the profile lock directory, acquire the current identity's lock with `flock -x`, and hold descriptor 9 through launcher exit. Require preparation to touch the external activity marker before sync work begins and a marker-seen completion to touch it again. Add profile-service tests proving cleanup runs after a marker-seen exit `0` and exit `23`, does not run when the child marker is absent, and cleanup failure writes one bounded warning while returning the original child exit.
 
 - [ ] **Step 2: Run focused tests and require red**
 
@@ -261,7 +261,7 @@ Expected: FAIL because the workload lock and post-child cleanup are absent.
 
 - [ ] **Step 3: Add workload locking and activity touch**
 
-Derive `<profileRoot>/.locks/<identity>.lock` in `RemotePaths`. Extend fixed child argv with the lock path and use a shell that creates the lock directory, opens descriptor 9, acquires `flock -x 9`, then changes into the workspace and `exec`s the existing env/launcher argv. Touch `.remote-runner-last-used` after successful reconciliation and before sync resume.
+Derive `<profileRoot>/.locks/<identity>.lock` and `<profileRoot>/.activity/<identity>` in `RemotePaths`. Extend fixed child argv with the lock path and use a shell that creates the lock directory, opens descriptor 9, acquires `flock -x 9`, then changes into the workspace and `exec`s the existing env/launcher argv. Touch the external activity marker when preparation starts and after a marker-seen workload completes; never put lifecycle metadata inside the Mutagen beta root.
 
 - [ ] **Step 4: Invoke cleanup without changing child authority**
 
