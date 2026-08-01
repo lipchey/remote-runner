@@ -113,4 +113,31 @@ describe("runStreamingProcess", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("rejects a marker callback failure without emitting an unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const observe = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", observe);
+    try {
+      await expect(
+        runStreamingProcess({
+          command: process.execPath,
+          args: ["-e", "process.stderr.write('RETENTION_LOCKED\\n');process.stdin.resume();"],
+          marker: new TextEncoder().encode("RETENTION_LOCKED\n"),
+          releaseAfterMarker: new TextEncoder().encode("release\n"),
+          onMarker: async () => {
+            throw new Error("retention callback failed");
+          },
+          stdout: () => undefined,
+          stderr: () => undefined,
+        }),
+      ).rejects.toThrow("retention callback failed");
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", observe);
+    }
+  });
 });

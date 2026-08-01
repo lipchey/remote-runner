@@ -173,7 +173,6 @@ export async function runStreamingProcess(request: StreamingProcessRequest): Pro
           })
           .catch((caught) => {
             failStream(caught);
-            throw caught;
           });
         write(request.stderr, contents.subarray(markerIndex + marker.byteLength));
         return;

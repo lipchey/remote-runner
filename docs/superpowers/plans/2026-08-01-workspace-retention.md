@@ -325,19 +325,20 @@ gh pr view --web
 
 Expected: a non-draft PR URL that contains the implementation, tests, design, completed plan, and acceptance evidence.
 
-- [x] **Step 5: Verify CI and install the accepted build**
+- [ ] **Step 5: Verify CI and install the accepted build**
 
 Poll the PR checks with bounded `gh pr checks`/API snapshots. After the required branch state is accepted, run `pnpm build && node dist/src/main.js install` from the verified worktree and verify `remote-runner --help` plus the immutable app target recorded below `~/.local/share/remote-runner/app`.
 
-- [ ] **Step 6: Create the dependent Ariadne migration plan**
+- [x] **Step 6: Create the dependent Ariadne migration plan**
 
 In a dedicated Ariadne worktree, write `docs/superpowers/plans/2026-08-01-dataai-runner-migration.md` using the installed runner commit as a hard dependency. The plan must update `.remote-runner.yaml`, synchronize the prepared DataAI copy, run forced-remote hostname and light verify canaries, run mandatory `./scripts/verify --full`, prove pruning and filesystem placement, remove the old home copy only after acceptance, update every lifecycle-tracking document, commit, push, and open a separate ready-for-review PR.
 
 ## Acceptance evidence
 
 - Focused retention/lifecycle verification passed with exit `0`: 7 test files, 166 tests.
-- Full `pnpm verify` passed with exit `0`: formatting, TypeScript typecheck, 42 test files with 442 tests, and production build.
+- Initial full `pnpm verify` passed with exit `0`: formatting, TypeScript typecheck, 42 test files with 442 tests, and production build.
 - Implementation branch: `codex/workspace-retention`; publication target: this ready-for-review PR.
 - PR #6 is open and ready for review; the repository exposes no CI checks for this branch.
-- Installed executable check passed with exit `0`; immutable app receipt: `4a4cb3387f46ec2ca8031a23` from verified head `40139f4`.
-- Next action: execute the dependent Ariadne DataAI migration in its own worktree and PR.
+- The first DataAI live canary reached `pop-os`, then exposed a Node 26 unhandled-rejection window when retention's marker callback failed. Regression test observed RED, the marker promise was made immediately handled, and full `pnpm verify` passed again with 443/443 tests plus typecheck/build.
+- The dependent Ariadne plan is committed at `1e8543d` on `codex/dataai-runner-migration`.
+- Next action: publish and install the corrected immutable runner build, then continue the dependent DataAI canaries.
