@@ -1,5 +1,10 @@
 export type RunMode = "auto" | "local" | "remote";
 
+export interface WorkspaceRetentionPolicy {
+  keep: number;
+  graceMinutes: number;
+}
+
 export interface Profile {
   id: string;
   consumer: string;
@@ -11,8 +16,9 @@ export interface Profile {
     hostKeySha256: string;
   };
   workspace: {
-    generatedRoot: "~/.cache/remote-runner/workspaces";
+    generatedRoot: string;
     baseRef?: string;
+    retention?: WorkspaceRetentionPolicy;
   };
   probes: {
     attempts: 2;
