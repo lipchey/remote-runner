@@ -8,7 +8,8 @@
 
 **Tech Stack:** TypeScript, Node.js filesystem/process APIs, YAML, Vitest, Bash, pnpm 11, SSH, Mutagen, GitHub CLI.
 
-**Provider status:** Completed on 2026-08-01 by this PR. The final provider gate passed 464/464
+**Provider status:** Completed on 2026-08-01 by
+[remote-runner PR #7](https://github.com/lipchey/remote-runner/pull/7). The final provider gate passed 464/464
 tests across 43 files plus formatting, typecheck, and build. The installed immutable receipt is
 `remote-runner 0.1.0 (app 7a8c454469133bf4e4633bef)`; both the verified build bootstrap and the
 installed CLI's idempotent reinstall returned that identity.
@@ -398,7 +399,7 @@ milestone, record the verified test count and installed app identity, and state 
 publication is this PR. Do not mark the overall plan complete. Run `rtk git diff --check`, commit
 the evidence, and require a clean worktree.
 
-- [ ] **Step 4: Push and open a ready runner PR**
+- [x] **Step 4: Push and open a ready runner PR**
 
 ```bash
 rtk git push -u origin codex/wedged-verify-full
