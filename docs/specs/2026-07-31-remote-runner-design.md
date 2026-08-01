@@ -227,7 +227,7 @@ worktree creation without making worktree creation depend on workstation availab
 
 ## 8. Diagnostic runbook
 
-`docs/RUNBOOK.md` is a required implementation deliverable. It provides symptom-first,
+`docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md` is a required implementation deliverable. It provides symptom-first,
 copy-paste-safe procedures for:
 
 - determining whether a command ran locally or remotely;
