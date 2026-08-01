@@ -16,7 +16,7 @@
     "format:check": "prettier . --check --ignore-unknown",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "verify": "pnpm typecheck && pnpm test && pnpm build"
+    "verify": "pnpm format:check && pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
     "yaml": "2.8.1"

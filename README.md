@@ -17,6 +17,24 @@ The installer publishes the stable `~/.local/bin/remote-runner` command and the 
 That one installation is shared by every consumer project; projects do not copy or link runner
 source files into their repositories.
 
+## Development
+
+```sh
+pnpm format
+pnpm format:check
+pnpm verify
+```
+
+`format` rewrites maintained files to the repository style, while `format:check` is read-only.
+`verify` is the required full local gate and runs formatting, typecheck, unit tests, and build.
+
+The repository-wide formatting baseline is isolated in `.git-blame-ignore-revs`. To omit it from
+local blame output, configure this clone once:
+
+```sh
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
 ## Consumer commands
 
 From a repository containing `.remote-runner.yaml`:
