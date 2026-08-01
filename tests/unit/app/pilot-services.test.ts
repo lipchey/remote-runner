@@ -3,15 +3,24 @@ import { describe, expect, it } from "vitest";
 import {
   listLocalFingerprintFiles,
   listLocalGitlinks,
+  NodeProfileServices,
   parseProbeOutput,
   remoteChildArguments,
   remoteWorkspaceCommandArguments,
   resolveRemotePaths,
 } from "../../../src/app/pilot-services.js";
 import { loadManifestText } from "../../../src/config/load-manifest.js";
+import type { NodeProcessRuntime } from "../../../src/node/process.js";
+import type { BoundedProcessRequest } from "../../../src/ssh/client.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
 const profile = loadManifestText(validManifest).profiles[0]!;
+const dataAiProfile = loadManifestText(
+  validManifest.replace(
+    'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces" }',
+    'workspace: { generatedRoot: "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces" }',
+  ),
+).profiles[0]!;
 
 describe("pilot service boundaries", () => {
   it("resolves every generated target below the canonical remote home", () => {
@@ -25,12 +34,59 @@ describe("pilot service boundaries", () => {
     expect(() => resolveRemotePaths("/", profile, "0123456789abcdef01234567")).toThrow();
   });
 
+  it("preserves a canonical absolute generated root outside the remote home", () => {
+    const paths = resolveRemotePaths("/home/admin", dataAiProfile, "0123456789abcdef01234567");
+
+    expect(paths.generatedRoot).toBe("/mnt/DataAI/home/admin/.cache/remote-runner/workspaces");
+    expect(paths.workspace).toBe(
+      "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+    );
+    expect(paths.toolchainRoot).toBe("/home/admin/.local/share/remote-runner/toolchains");
+  });
+
   it("parses one remote home and byte-capacity record without accepting extra output", () => {
     expect(parseProbeOutput("/home/admin\n12345678901\n", 10_000_000_000)).toEqual({
       home: "/home/admin",
       availableBytes: 12_345_678_901,
     });
     expect(() => parseProbeOutput("/home/admin\n123\nsecret-canary\n", 1)).toThrow();
+  });
+
+  it("probes capacity on the resolved generated-root filesystem", async () => {
+    const requests: BoundedProcessRequest[] = [];
+    const processes = {
+      async run(request: BoundedProcessRequest) {
+        requests.push(request);
+        const encoded = request.args.at(-1) ?? "";
+        const stdout = encoded.includes("remote-runner-home-probe")
+          ? "/home/admin\n"
+          : encoded.includes("remote-runner-capacity-probe")
+            ? "12345678901\n"
+            : "/home/admin\n12345678901\n";
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode(stdout),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+        };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const services = new NodeProfileServices(dataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      knownHostsPath: "/Users/admin/.local/state/remote-runner/known_hosts/managed",
+      launcherSource: new Uint8Array([1]),
+      processes,
+    });
+
+    await services.probe();
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.args.at(-1)).toContain("/mnt/DataAI/home/admin/.cache/remote-runner/workspaces");
+    expect(requests[1]?.args.at(-1)).toContain("df -Pk");
   });
 
   it("builds fixed child argv without putting secret values into it", () => {

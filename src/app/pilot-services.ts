@@ -37,6 +37,7 @@ export interface RemotePaths {
 }
 
 const IDENTITY = /^[0-9a-f]{24}$/u;
+const LEGACY_GENERATED_ROOT = "~/.cache/remote-runner/workspaces";
 
 function canonicalRemotePath(value: string, label: string): void {
   if (
@@ -50,7 +51,7 @@ function canonicalRemotePath(value: string, label: string): void {
 
 export function resolveRemotePaths(
   remoteHome: string,
-  profile: Pick<Profile, "consumer" | "id">,
+  profile: Pick<Profile, "consumer" | "id" | "workspace">,
   identity: string,
 ): RemotePaths {
   canonicalRemotePath(remoteHome, "remote home");
@@ -58,7 +59,11 @@ export function resolveRemotePaths(
     throw new Error("remote profile path component is invalid");
   }
   if (!IDENTITY.test(identity)) throw new Error("remote identity is invalid");
-  const generatedRoot = posix.join(remoteHome, ".cache", "remote-runner", "workspaces");
+  const generatedRoot =
+    profile.workspace.generatedRoot === LEGACY_GENERATED_ROOT
+      ? posix.join(remoteHome, ".cache", "remote-runner", "workspaces")
+      : profile.workspace.generatedRoot;
+  canonicalRemotePath(generatedRoot, "generated root");
   return {
     generatedRoot,
     workspace: posix.join(generatedRoot, profile.consumer, profile.id, identity),
@@ -388,30 +393,51 @@ export class NodeProfileServices implements ProfileExecutionServices {
   }
 
   async probe(): Promise<void> {
-    const result = await runSsh(
+    const homeResult = await runSsh(
+      this.processes,
+      this.profile.remote.target,
+      ["sh", "-ceu", 'home=$(realpath -- "${HOME:?}"); printf \'%s\\n\' "$home"', "remote-runner-home-probe"],
+      this.profile.probes.connectTimeoutSeconds,
+      this.knownHostsPath,
+      CAPTURE_BYTES,
+    );
+    if (homeResult.exitCode !== 0) {
+      const reason = classifySshFailure(decode(homeResult.stderr, "SSH home probe"), homeResult.exitCode);
+      throw new PreparationError(reason, true);
+    }
+    const remoteHome = decode(homeResult.stdout, "SSH home probe").replace(/\r?\n$/u, "");
+    try {
+      canonicalRemotePath(remoteHome, "remote home");
+    } catch (caught) {
+      throw new PreparationError("remote-shell", false, { cause: caught });
+    }
+    const paths = resolveRemotePaths(remoteHome, this.profile, this.identity);
+    const capacityResult = await runSsh(
       this.processes,
       this.profile.remote.target,
       [
         "sh",
         "-ceu",
-        'home=${HOME:?}; blocks=$(df -Pk -- "$home" | awk \'NR==2 {print $4}\'); case "$blocks" in *[!0-9]*|"") exit 74;; esac; printf \'%s\\n%s\\n\' "$home" "$((blocks * 1024))"',
-        "remote-runner-probe",
+        'umask 077; root=$1; mkdir -p -- "$root"; resolved=$(realpath -- "$root"); [ "$resolved" = "$root" ] || exit 73; blocks=$(df -Pk -- "$resolved" | awk \'NR==2 {print $4}\'); case "$blocks" in *[!0-9]*|"") exit 74;; esac; printf \'%s\\n\' "$((blocks * 1024))"',
+        "remote-runner-capacity-probe",
+        paths.generatedRoot,
       ],
       this.profile.probes.connectTimeoutSeconds,
       this.knownHostsPath,
       CAPTURE_BYTES,
     );
-    if (result.exitCode !== 0) {
-      const reason = classifySshFailure(decode(result.stderr, "SSH probe"), result.exitCode);
+    if (capacityResult.exitCode !== 0) {
+      if (capacityResult.exitCode === 73) throw new PreparationError("workspace", false);
+      const reason = classifySshFailure(decode(capacityResult.stderr, "SSH capacity probe"), capacityResult.exitCode);
       throw new PreparationError(reason, true);
     }
-    let parsed: { home: string; availableBytes: number };
-    try {
-      parsed = parseProbeOutput(decode(result.stdout, "SSH probe"), this.profile.probes.minimumFreeBytes);
-    } catch (caught) {
-      throw new PreparationError("capacity", false, { cause: caught });
+    const capacity = decode(capacityResult.stdout, "SSH capacity probe").trim();
+    if (!/^(?:0|[1-9][0-9]*)$/u.test(capacity)) throw new PreparationError("capacity", false);
+    const availableBytes = Number(capacity);
+    if (!Number.isSafeInteger(availableBytes) || availableBytes < this.profile.probes.minimumFreeBytes) {
+      throw new PreparationError("capacity", false);
     }
-    this.remotePaths = resolveRemotePaths(parsed.home, this.profile, this.identity);
+    this.remotePaths = paths;
   }
 
   private paths(): RemotePaths {
