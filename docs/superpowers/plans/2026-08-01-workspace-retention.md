@@ -325,7 +325,7 @@ gh pr view --web
 
 Expected: a non-draft PR URL that contains the implementation, tests, design, completed plan, and acceptance evidence.
 
-- [ ] **Step 5: Verify CI and install the accepted build**
+- [x] **Step 5: Verify CI and install the accepted build**
 
 Poll the PR checks with bounded `gh pr checks`/API snapshots. After the required branch state is accepted, run `pnpm build && node dist/src/main.js install` from the verified worktree and verify `remote-runner --help` plus the immutable app target recorded below `~/.local/share/remote-runner/app`.
 
@@ -338,4 +338,6 @@ In a dedicated Ariadne worktree, write `docs/superpowers/plans/2026-08-01-dataai
 - Focused retention/lifecycle verification passed with exit `0`: 7 test files, 166 tests.
 - Full `pnpm verify` passed with exit `0`: formatting, TypeScript typecheck, 42 test files with 442 tests, and production build.
 - Implementation branch: `codex/workspace-retention`; publication target: this ready-for-review PR.
-- Next action: verify this PR's CI, install the immutable build from commit `1f6cc53` plus documentation commit `75c43f7`, then execute the dependent Ariadne DataAI migration in its own worktree and PR.
+- PR #6 is open and ready for review; the repository exposes no CI checks for this branch.
+- Installed executable check passed with exit `0`; immutable app receipt: `4a4cb3387f46ec2ca8031a23` from verified head `40139f4`.
+- Next action: execute the dependent Ariadne DataAI migration in its own worktree and PR.
