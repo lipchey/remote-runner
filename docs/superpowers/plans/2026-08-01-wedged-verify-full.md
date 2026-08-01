@@ -642,5 +642,5 @@ and any still-active legacy workspace. Do not rewrite the original incident evid
 
 Require both worktrees clean, both PR heads equal local heads, runner and Ariadne CI green, the
 installed receipt equal the runner provider build, Ariadne still `mode: remote` / `fallback: fail`,
-DataAI retention still at three identities, and no new local verify event after the acceptance
-timestamps.
+DataAI retention still configured as `keep: 3` / `graceMinutes: 60` with a live prepare removing
+the oldest eligible identity, and no new local verify event after the acceptance timestamps.
