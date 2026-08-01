@@ -74,9 +74,10 @@ These commands support the runbook and are not part of daily management.
 
 Each consumer commits a closed-schema `.remote-runner.yaml`. A profile declares its ID and schema
 version, mode and fallback policy, remote target, workspace namespace, source root, synchronization
-exclusions, required remote capabilities, bootstrap versions, setup commands, always-run ensure
-commands, exact fingerprint files and discovery patterns, workload arguments, remote-child marker,
-allowed ephemeral environment names, probe timeouts, notification policy, and benchmark matrix.
+exclusions, required remote capabilities, bootstrap versions, setup commands, declared bootstrap
+artifacts, always-run ensure commands, exact fingerprint files and discovery patterns, workload
+arguments, remote-child marker, allowed ephemeral environment names, probe timeouts, notification
+policy, and benchmark matrix.
 
 Unknown fields, unsafe paths, duplicate IDs, interpolated shell fragments, unallowlisted
 environment names, and destructive targets outside generated roots fail validation. The manifest
@@ -153,11 +154,13 @@ patterns, and every submodule gitlink OID. The sorted path/content set makes pac
 removal, or rename invalidate setup without a manual package allowlist. Dependencies and generated
 output stay on their creating machine.
 
-The fingerprint is an optimization rather than a correctness authority. Fixed-argv ensure commands
-run after every synchronized preparation. A matching fingerprint and successful ensure reuse the
-environment; a changed fingerprint or failed ensure runs the full setup once, after which every
-ensure command must pass before the healthy fingerprint is persisted. Persistent ensure failure is
-fail-closed.
+The fingerprint is an optimization rather than a correctness authority. Every synchronized
+preparation checks each declared repository-relative artifact before fixed-argv ensure commands.
+A matching fingerprint, present artifacts, and successful ensure reuse the environment. A changed
+fingerprint, missing artifact, or failed ensure runs the full setup once; after setup every artifact
+must exist before every ensure command is retried and the healthy fingerprint is persisted.
+Artifact inspection errors, persistently missing artifacts, and persistent ensure failures are
+fail-closed. Manifests that omit artifacts retain the empty-list behavior.
 
 ### 6.6 Ephemeral environment
 
@@ -193,9 +196,11 @@ diagnosis before safe reconstruction.
 
 ## 7. Automatic lifecycle
 
-Installation writes a versioned macOS LaunchAgent and stable user-level executable. Login startup
-is idempotent. Upgrade replaces owned files atomically, restarts only the owned controller, and
-preserves compatible state.
+Installation packages the current built checkout into an immutable application, writes a closed
+receipt containing its package version and application identity, and publishes a versioned macOS
+LaunchAgent plus stable user-level executable. `remote-runner --version` reads that immutable
+receipt. Login startup is idempotent. Upgrade replaces owned files atomically, restarts only the
+owned controller, and preserves compatible state.
 
 Every `run`, even with a healthy controller, performs:
 
