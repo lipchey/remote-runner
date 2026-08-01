@@ -4,7 +4,6 @@ import {
   NodeProfileServices,
   listLocalFingerprintFiles,
   listLocalGitlinks,
-  NodeProfileServices,
   parseProbeOutput,
   remoteChildArguments,
   remoteWorkspaceCommandArguments,
