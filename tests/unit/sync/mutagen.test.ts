@@ -214,6 +214,35 @@ describe("Mutagen one-way lifecycle", () => {
     expect(commandNames(processes)).toEqual(["daemon start", "sync list"]);
   });
 
+  it("terminates exactly one owned session and treats absence as success", async () => {
+    const presentProcesses = new FakeProcesses([{ stdout: session("watching") }, {}]);
+    const presentLifecycle = new MutagenSyncLifecycle(presentProcesses, new FakeClock([]));
+
+    await presentLifecycle.terminateOwned(options);
+
+    expect(commandNames(presentProcesses)).toEqual(["sync list", "sync terminate"]);
+    expect(presentProcesses.requests[1]?.args).toEqual(["sync", "terminate", name]);
+
+    const absentProcesses = new FakeProcesses([{ stdout: "" }]);
+    const absentLifecycle = new MutagenSyncLifecycle(absentProcesses, new FakeClock([]));
+
+    await absentLifecycle.terminateOwned(options);
+
+    expect(commandNames(absentProcesses)).toEqual(["sync list"]);
+  });
+
+  it.each([
+    ["duplicate", session("paused").replace(/\]$/u, `,${session("paused").slice(1)}`)],
+    ["unsafe alpha", session("paused", { alpha: "../other" })],
+    ["beta mismatch", session("paused", { beta: "runner@example.test:/other" })],
+  ])("fails closed before retention termination on %s", async (_label, listing) => {
+    const processes = new FakeProcesses([{ stdout: listing }]);
+    const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
+
+    await expect(lifecycle.terminateOwned(options)).rejects.toThrow();
+    expect(commandNames(processes)).toEqual(["sync list"]);
+  });
+
   it("starts the daemon idempotently on each independently prepared reconciliation", async () => {
     const processes = new FakeProcesses([{}, { stdout: session("paused") }, {}, { stdout: session("paused") }]);
     const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));

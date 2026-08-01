@@ -1,4 +1,7 @@
+import { posix } from "node:path";
+
 import type { WorkspaceRetentionPolicy } from "../config/types.js";
+import type { RemoteCommandResult } from "../node/remote-toolchain.js";
 
 const IDENTITY = /^[0-9a-f]{24}$/u;
 const MINUTES_TO_MS = 60_000;
@@ -12,6 +15,46 @@ export interface WorkspaceRetentionPlan {
   readonly retained: readonly string[];
   readonly graceProtected: readonly string[];
   readonly candidates: readonly string[];
+}
+
+export type WorkspaceRetentionEntry =
+  | (WorkspaceActivity & { readonly kind: "directory" })
+  | (WorkspaceActivity & { readonly kind: "quarantine"; readonly quarantineName: string })
+  | (WorkspaceActivity & { readonly kind: "unsafe" });
+
+export type WorkspaceQuarantineResult = "removed" | "locked" | "missing" | "unsafe";
+
+export interface WorkspaceRetentionRuntime {
+  list(): Promise<readonly WorkspaceRetentionEntry[]>;
+  withQuarantine(
+    identity: string,
+    quarantineName: string,
+    existing: boolean,
+    cleanup: () => Promise<void>,
+  ): Promise<WorkspaceQuarantineResult>;
+  terminateOwnedSync(identity: string): Promise<void>;
+  removeQuarantine(quarantineName: string): Promise<void>;
+  removeActivity(identity: string): Promise<void>;
+  removeSetupState(identity: string): Promise<void>;
+}
+
+export interface WorkspaceRetentionSummary {
+  readonly retained: number;
+  readonly graceProtected: number;
+  readonly locked: number;
+  readonly removed: number;
+  readonly failed: number;
+  readonly ignored: number;
+}
+
+export interface WorkspaceRetentionCommandPort {
+  run(args: readonly string[]): Promise<RemoteCommandResult>;
+  withLock(args: readonly string[], cleanup: () => Promise<void>): Promise<WorkspaceQuarantineResult>;
+}
+
+export interface RemoteWorkspaceRetentionPaths {
+  readonly profileRoot: string;
+  readonly setupStateRoot: string;
 }
 
 function requireSafeInteger(value: number, label: string): void {
@@ -61,4 +104,210 @@ export function planWorkspaceRetention(
   }
 
   return { retained, graceProtected, candidates };
+}
+
+const NONCE = /^[0-9a-f]{16}$/u;
+const QUARANTINE = /^\.gc-([0-9a-f]{24})-([0-9a-f]{16})$/u;
+const CAPTURE_BYTES = 64 * 1024;
+
+function canonicalRoot(value: string, label: string): void {
+  if (!posix.isAbsolute(value) || posix.normalize(value) !== value || value === "/") {
+    throw new Error(`${label} must be a canonical non-root absolute path`);
+  }
+}
+
+function checked(result: RemoteCommandResult, label: string): RemoteCommandResult {
+  if (result.stdout.byteLength > CAPTURE_BYTES || result.stderr.byteLength > CAPTURE_BYTES) {
+    throw new Error(`${label} exceeded the output limit`);
+  }
+  if (result.exitCode !== 0) throw new Error(`${label} failed with exit code ${result.exitCode}`);
+  return result;
+}
+
+function decodeRecords(contents: Uint8Array): string[] {
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+  } catch {
+    throw new Error("workspace retention listing returned invalid UTF-8");
+  }
+  if (decoded.length === 0) return [];
+  if (!decoded.endsWith("\0")) throw new Error("workspace retention listing was not NUL terminated");
+  const records = decoded.slice(0, -1).split("\0");
+  if (records.length % 3 !== 0) throw new Error("workspace retention listing returned partial records");
+  return records;
+}
+
+export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntime {
+  private readonly activityRoot: string;
+  private readonly lockRoot: string;
+
+  constructor(
+    private readonly commands: WorkspaceRetentionCommandPort,
+    private readonly paths: RemoteWorkspaceRetentionPaths,
+    private readonly terminateSync: (identity: string) => Promise<void>,
+  ) {
+    canonicalRoot(paths.profileRoot, "workspace profile root");
+    canonicalRoot(paths.setupStateRoot, "setup state root");
+    this.activityRoot = posix.join(paths.profileRoot, ".activity");
+    this.lockRoot = posix.join(paths.profileRoot, ".locks");
+  }
+
+  async list(): Promise<readonly WorkspaceRetentionEntry[]> {
+    const result = checked(
+      await this.commands.run([
+        "sh",
+        "-ceu",
+        'umask 077; root=$1; activity=$2; mkdir -p -- "$root" "$activity" "$root/.locks"; find "$root" -mindepth 1 -maxdepth 1 ! -name .activity ! -name .locks -exec sh -ceu \'activity=$1; shift; for path do name=${path##*/}; kind=u; mtime=0; if [ -d "$path" ] && [ ! -L "$path" ] && printf "%s\\n" "$name" | grep -Eq "^[0-9a-f]{24}$"; then kind=d; marker="$activity/$name"; if [ -f "$marker" ] && [ ! -L "$marker" ]; then mtime=$(stat -c %Y -- "$marker"); else mtime=$(stat -c %Y -- "$path"); fi; elif [ -d "$path" ] && [ ! -L "$path" ] && printf "%s\\n" "$name" | grep -Eq "^\\.gc-[0-9a-f]{24}-[0-9a-f]{16}$"; then kind=q; fi; printf "%s\\0%s\\0%s\\0" "$kind" "$name" "$mtime"; done\' remote-runner-retention-entry "$activity" {} +',
+        "remote-runner-retention-list",
+        this.paths.profileRoot,
+        this.activityRoot,
+      ]),
+      "workspace retention listing",
+    );
+    const records = decodeRecords(result.stdout);
+    const entries: WorkspaceRetentionEntry[] = [];
+    for (let index = 0; index < records.length; index += 3) {
+      const kind = records[index]!;
+      const name = records[index + 1]!;
+      const seconds = records[index + 2]!;
+      if (!/^(?:0|[1-9][0-9]*)$/u.test(seconds)) {
+        throw new Error("workspace retention listing returned an invalid timestamp");
+      }
+      const activityMs = Number(seconds) * 1000;
+      if (!Number.isSafeInteger(activityMs)) throw new Error("workspace retention timestamp is unsafe");
+      if (kind === "d" && IDENTITY.test(name)) {
+        entries.push({ kind: "directory", identity: name, activityMs });
+        continue;
+      }
+      const quarantine = kind === "q" ? QUARANTINE.exec(name) : null;
+      if (quarantine) {
+        entries.push({ kind: "quarantine", identity: quarantine[1]!, quarantineName: name, activityMs });
+        continue;
+      }
+      entries.push({ kind: "unsafe", identity: name, activityMs });
+    }
+    return entries;
+  }
+
+  async withQuarantine(
+    identity: string,
+    quarantineName: string,
+    existing: boolean,
+    cleanup: () => Promise<void>,
+  ): Promise<WorkspaceQuarantineResult> {
+    if (!IDENTITY.test(identity)) throw new Error("workspace retention identity is invalid");
+    const match = QUARANTINE.exec(quarantineName);
+    if (!match || match[1] !== identity) throw new Error("workspace quarantine name is invalid");
+    const lock = posix.join(this.lockRoot, identity);
+    const workspace = posix.join(this.paths.profileRoot, identity);
+    const quarantine = posix.join(this.paths.profileRoot, quarantineName);
+    return this.commands.withLock(
+      [
+        "sh",
+        "-ceu",
+        'umask 077; existing=$1; lock=$2; workspace=$3; quarantine=$4; mkdir -p -- "$(dirname -- "$lock")"; exec 9>"$lock"; flock -n 9 || exit 75; if [ "$existing" = 1 ]; then [ -d "$quarantine" ] || exit 76; [ ! -L "$quarantine" ] || exit 77; else [ -d "$workspace" ] || exit 76; [ ! -L "$workspace" ] || exit 77; [ ! -e "$quarantine" ] || exit 77; mv -- "$workspace" "$quarantine"; fi; printf "\\0REMOTE_RUNNER_RETENTION_LOCKED\\0" >&2; IFS= read -r release; [ "$release" = release ]',
+        "remote-runner-retention-lock",
+        existing ? "1" : "0",
+        lock,
+        workspace,
+        quarantine,
+      ],
+      cleanup,
+    );
+  }
+
+  async terminateOwnedSync(identity: string): Promise<void> {
+    if (!IDENTITY.test(identity)) throw new Error("workspace retention identity is invalid");
+    await this.terminateSync(identity);
+  }
+
+  async removeQuarantine(quarantineName: string): Promise<void> {
+    if (!QUARANTINE.test(quarantineName)) throw new Error("workspace quarantine name is invalid");
+    checked(
+      await this.commands.run(["rm", "-rf", "--", posix.join(this.paths.profileRoot, quarantineName)]),
+      "workspace quarantine removal",
+    );
+  }
+
+  async removeActivity(identity: string): Promise<void> {
+    if (!IDENTITY.test(identity)) throw new Error("workspace retention identity is invalid");
+    checked(
+      await this.commands.run(["rm", "-f", "--", posix.join(this.activityRoot, identity)]),
+      "workspace activity removal",
+    );
+  }
+
+  async removeSetupState(identity: string): Promise<void> {
+    if (!IDENTITY.test(identity)) throw new Error("workspace retention identity is invalid");
+    checked(
+      await this.commands.run(["rm", "-rf", "--", posix.join(this.paths.setupStateRoot, identity)]),
+      "workspace setup state removal",
+    );
+  }
+}
+
+export async function pruneRemoteWorkspaces(
+  runtime: WorkspaceRetentionRuntime,
+  currentIdentity: string,
+  policy: WorkspaceRetentionPolicy,
+  nowMs: number,
+  createNonce: () => string,
+): Promise<WorkspaceRetentionSummary> {
+  const entries = await runtime.list();
+  const directories = entries.filter(
+    (entry): entry is WorkspaceActivity & { readonly kind: "directory" } =>
+      entry.kind === "directory" && IDENTITY.test(entry.identity),
+  );
+  const plan = planWorkspaceRetention(directories, currentIdentity, policy, nowMs);
+  let locked = 0;
+  let removed = 0;
+  let failed = 0;
+  let ignored = entries.filter((entry) => entry.kind === "unsafe" || !IDENTITY.test(entry.identity)).length;
+
+  const cleanup = async (identity: string, quarantineName: string, existing: boolean): Promise<void> => {
+    try {
+      const result = await runtime.withQuarantine(identity, quarantineName, existing, async () => {
+        await runtime.terminateOwnedSync(identity);
+        await runtime.removeQuarantine(quarantineName);
+        await runtime.removeActivity(identity);
+        await runtime.removeSetupState(identity);
+      });
+      if (result === "removed") removed += 1;
+      else if (result === "locked") locked += 1;
+      else if (result === "unsafe") ignored += 1;
+    } catch {
+      failed += 1;
+    }
+  };
+
+  const seenQuarantines = new Set<string>();
+  for (const entry of entries) {
+    if (entry.kind !== "quarantine" || !IDENTITY.test(entry.identity)) continue;
+    const expectedPrefix = `.gc-${entry.identity}-`;
+    const nonce = entry.quarantineName.startsWith(expectedPrefix)
+      ? entry.quarantineName.slice(expectedPrefix.length)
+      : "";
+    if (!NONCE.test(nonce) || seenQuarantines.has(entry.quarantineName) || entry.identity === currentIdentity) {
+      ignored += 1;
+      continue;
+    }
+    seenQuarantines.add(entry.quarantineName);
+    await cleanup(entry.identity, entry.quarantineName, true);
+  }
+
+  for (const identity of plan.candidates) {
+    const nonce = createNonce();
+    if (!NONCE.test(nonce)) throw new Error("workspace retention nonce is invalid");
+    await cleanup(identity, `.gc-${identity}-${nonce}`, false);
+  }
+
+  return {
+    retained: plan.retained.length,
+    graceProtected: plan.graceProtected.length,
+    locked,
+    removed,
+    failed,
+    ignored,
+  };
 }

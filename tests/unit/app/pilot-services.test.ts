@@ -10,7 +10,8 @@ import {
   resolveRemotePaths,
 } from "../../../src/app/pilot-services.js";
 import { loadManifestText } from "../../../src/config/load-manifest.js";
-import type { NodeProcessRuntime } from "../../../src/node/process.js";
+import type { NodeProcessRuntime, StreamingProcessRequest } from "../../../src/node/process.js";
+import { worktreeIdentity } from "../../../src/runtime/identity.js";
 import type { BoundedProcessRequest } from "../../../src/ssh/client.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
@@ -21,6 +22,12 @@ const dataAiProfile = loadManifestText(
     'workspace: { generatedRoot: "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces" }',
   ),
 ).profiles[0]!;
+const retainedDataAiProfile = loadManifestText(
+  validManifest.replace(
+    'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces" }',
+    'workspace: { generatedRoot: "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces", retention: { keep: 1, graceMinutes: 60 } }',
+  ),
+).profiles[0]!;
 
 describe("pilot service boundaries", () => {
   it("resolves every generated target below the canonical remote home", () => {
@@ -29,6 +36,12 @@ describe("pilot service boundaries", () => {
     expect(paths.generatedRoot).toBe("/home/admin/.cache/remote-runner/workspaces");
     expect(paths.workspace).toBe(
       "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+    );
+    expect(paths.workloadLock).toBe(
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/.locks/0123456789abcdef01234567",
+    );
+    expect(paths.activityMarker).toBe(
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/.activity/0123456789abcdef01234567",
     );
     expect(Object.values(paths).every((path) => path.startsWith("/home/admin/"))).toBe(true);
     expect(() => resolveRemotePaths("/", profile, "0123456789abcdef01234567")).toThrow();
@@ -89,11 +102,48 @@ describe("pilot service boundaries", () => {
     expect(requests[1]?.args.at(-1)).toContain("df -Pk");
   });
 
+  it("touches the external activity marker before Mutagen reconciliation begins", async () => {
+    const current = worktreeIdentity(process.cwd());
+    const requests: BoundedProcessRequest[] = [];
+    const processes = {
+      async run(request: BoundedProcessRequest) {
+        requests.push(request);
+        return {
+          exitCode: 0,
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+        };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const services = new NodeProfileServices(retainedDataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array([1]),
+      processes,
+    });
+    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current) });
+
+    await services.pauseSync();
+
+    expect(requests[0]?.command).toBe("ssh");
+    expect(JSON.stringify(requests[0]?.args)).toContain("remote-runner-touch-activity");
+    expect(requests.slice(1).map(({ args }) => args.slice(0, 2).join(" "))).toEqual([
+      "daemon start",
+      "sync list",
+      "sync create",
+    ]);
+  });
+
   it("builds fixed child argv without putting secret values into it", () => {
     const args = remoteChildArguments(
       "/remote/node/bin/node",
       "/remote/launcher.mjs",
       "/remote/workspace",
+      "/remote/profile/.locks/0123456789abcdef01234567",
       "/remote/node/bin:/remote/uv:/usr/bin:/bin",
       profile,
       ["./scripts/verify", "--full"],
@@ -104,6 +154,9 @@ describe("pilot service boundaries", () => {
     expect(serialized).toContain("NEON_DEV_DATABASE_URL");
     expect(serialized).toContain("REMOTE_RUNNER_CHILD");
     expect(args).toContain("PATH=/remote/node/bin:/remote/uv:/usr/bin:/bin");
+    expect(args).toContain("/remote/profile/.locks/0123456789abcdef01234567");
+    expect(args[2]).toContain("flock -x 9");
+    expect(args[2]).toContain("exec 9>");
     expect(serialized).not.toContain("secret-canary");
     expect(serialized).not.toContain("postgres://");
   });
@@ -126,6 +179,139 @@ describe("pilot service boundaries", () => {
       ...command,
     ]);
     expect(args[2]).not.toContain("pnpm-state");
+  });
+
+  it("touches activity and prunes after a marker-seen nonzero workload without changing its exit", async () => {
+    const current = worktreeIdentity(process.cwd());
+    const stale = "ffffffffffffffffffffffff";
+    const requests: BoundedProcessRequest[] = [];
+    const processes = {
+      async run(request: BoundedProcessRequest) {
+        requests.push(request);
+        const serialized = JSON.stringify(request.args);
+        const stdout = serialized.includes("remote-runner-retention-list")
+          ? `d\0${current}\0${2_000_000_000}\0d\0${stale}\0${1}\0`
+          : "";
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode(stdout),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+        };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    let streamCalls = 0;
+    const streamProcess = async (request: StreamingProcessRequest) => {
+      streamCalls += 1;
+      await request.onMarker();
+      return { exitCode: streamCalls === 1 ? 23 : 0, signal: null, markerSeen: true, spawned: true };
+    };
+    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current);
+    const services = new NodeProfileServices(retainedDataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      knownHostsPath: "/Users/admin/.local/state/remote-runner/known_hosts/managed",
+      launcherSource: new Uint8Array([1]),
+      processes,
+      streamProcess,
+    });
+    Object.assign(services, {
+      remotePaths: paths,
+      nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
+      uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
+    });
+
+    const result = await services.startRemote(
+      ["./scripts/verify", "--full"],
+      { NEON_DEV_DATABASE_URL: "secret-canary" },
+      async () => undefined,
+    );
+
+    expect(result).toEqual({ kind: "completed", exitCode: 23 });
+    expect(streamCalls).toBe(2);
+    const serializedRequests = requests.map((request) => JSON.stringify(request.args));
+    expect(serializedRequests.filter((value) => value.includes("activity")).length).toBeGreaterThanOrEqual(1);
+    expect(serializedRequests.some((value) => value.includes("remote-runner-retention-list"))).toBe(true);
+  });
+
+  it("preserves the workload exit and emits one bounded warning when cleanup fails", async () => {
+    const current = worktreeIdentity(process.cwd());
+    const warnings: Uint8Array[] = [];
+    const processes = {
+      async run() {
+        return { exitCode: 1, stdout: new Uint8Array(), stderr: new Uint8Array(), outputTruncated: false };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current);
+    const services = new NodeProfileServices(retainedDataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array([1]),
+      processes,
+      stderr: (chunk) => warnings.push(chunk),
+      streamProcess: async (request) => {
+        await request.onMarker();
+        return { exitCode: 23, signal: null, markerSeen: true, spawned: true };
+      },
+    });
+    Object.assign(services, {
+      remotePaths: paths,
+      nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
+      uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
+    });
+
+    const result = await services.startRemote(
+      ["./scripts/verify", "--full"],
+      { NEON_DEV_DATABASE_URL: "secret-canary" },
+      async () => undefined,
+    );
+
+    expect(result).toEqual({ kind: "completed", exitCode: 23 });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.byteLength).toBeLessThan(256);
+    expect(new TextDecoder().decode(warnings[0])).not.toContain("secret-canary");
+  });
+
+  it("does not touch activity or run retention when the child marker is absent", async () => {
+    const current = worktreeIdentity(process.cwd());
+    let processCalls = 0;
+    const processes = {
+      async run() {
+        processCalls += 1;
+        return { exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array(), outputTruncated: false };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current);
+    const services = new NodeProfileServices(retainedDataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array([1]),
+      processes,
+      streamProcess: async () => ({ exitCode: 255, signal: null, markerSeen: false, spawned: true }),
+    });
+    Object.assign(services, {
+      remotePaths: paths,
+      nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
+      uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
+    });
+
+    expect(
+      await services.startRemote(
+        ["./scripts/verify", "--full"],
+        { NEON_DEV_DATABASE_URL: "secret-canary" },
+        async () => undefined,
+      ),
+    ).toEqual({ kind: "not-started", reason: "child-start" });
+    expect(processCalls).toBe(0);
   });
 
   it("bounds a large local index separately while retaining only gitlinks", async () => {
