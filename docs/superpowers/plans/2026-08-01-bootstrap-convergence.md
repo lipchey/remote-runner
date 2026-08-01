@@ -8,6 +8,10 @@
 
 **Tech Stack:** TypeScript, Node.js process/filesystem APIs, Git pathspecs, YAML, Vitest, pnpm.
 
+**Status:** Completed on 2026-08-01. The implementation is in commit `fd93782`; publication is this PR.
+
+**Acceptance evidence:** `pnpm verify` passed typecheck, 405/405 tests, and build. A live Ariadne Linux canary changed the dependency fingerprint from `sha256:87daf75c6f54a1cc78a8836d7664961b34611aeaa73131509d4749950f1025eb` to `sha256:bb5931ff83972e04636d6637e98cc54df4e0bddbea5da71cbd5b6f52d189d1cb`; removing the canary restored the exact baseline. The installed runner accepted the new manifest, remote `./scripts/verify --full` exited 0, and Ariadne PR #193 is open, ready, and mergeable.
+
 ---
 
 ### Task 1: Extend the validated manifest contract
@@ -18,7 +22,7 @@
 - Modify: `tests/unit/config/manifest-fixture.ts`
 - Test: `tests/unit/config/load-manifest.test.ts`
 
-- [ ] **Step 1: Write failing parser tests**
+- [x] **Step 1: Write failing parser tests**
 
 Add tests proving that this shape is accepted and normalized:
 
@@ -36,13 +40,13 @@ bootstrap:
 
 Also prove that the legacy `fingerprint: [package.json]` form normalizes to `{ files: [...], patterns: [] }`, and reject unsafe patterns, empty ensure commands, NUL arguments, and unknown fingerprint fields.
 
-- [ ] **Step 2: Run the parser tests and observe RED**
+- [x] **Step 2: Run the parser tests and observe RED**
 
 Run: `pnpm vitest run tests/unit/config/load-manifest.test.ts`
 
 Expected: failures because `ensure` and object-form `fingerprint` are not recognized.
 
-- [ ] **Step 3: Implement the normalized types and parser**
+- [x] **Step 3: Implement the normalized types and parser**
 
 Define:
 
@@ -58,7 +62,7 @@ bootstrap: {
 
 Accept the legacy array as `files` with no patterns. Validate patterns as non-empty repository-relative glob strings with no absolute root, backslash, control byte, drive prefix, `:` magic prefix, or `.`/`..` path component. Reuse fixed-argv `commandArray` validation for every ensure command.
 
-- [ ] **Step 4: Run parser tests and observe GREEN**
+- [x] **Step 4: Run parser tests and observe GREEN**
 
 Run: `pnpm vitest run tests/unit/config/load-manifest.test.ts`
 
@@ -70,7 +74,7 @@ Expected: all parser tests pass.
 - Modify: `src/app/pilot-services.ts`
 - Test: `tests/unit/app/pilot-services.test.ts`
 
-- [ ] **Step 1: Write failing discovery tests**
+- [x] **Step 1: Write failing discovery tests**
 
 Add tests for `listLocalFingerprintFiles` using a fake process runtime. Assert that it:
 
@@ -81,13 +85,13 @@ expect(result).toEqual(["apps/api/package.json", "packages/new/package.json"]);
 
 Cover tracked files, non-ignored untracked files, duplicate output, a tracked deletion returned by the deleted-file query, malformed/non-UTF-8 output, and bounded Git capture.
 
-- [ ] **Step 2: Run the pilot-service tests and observe RED**
+- [x] **Step 2: Run the pilot-service tests and observe RED**
 
 Run: `pnpm vitest run tests/unit/app/pilot-services.test.ts`
 
 Expected: failure because pattern discovery does not exist.
 
-- [ ] **Step 3: Implement bounded Git discovery**
+- [x] **Step 3: Implement bounded Git discovery**
 
 Run fixed-argv Git commands equivalent to:
 
@@ -98,7 +102,7 @@ git -C <source> ls-files -z --deleted -- <glob-pathspecs>
 
 Decode UTF-8 strictly, subtract deleted paths, validate every returned path as a safe repository path, deduplicate, and sort. Merge the discovered set with exact files before calling `dependencyFingerprint`; path identity and contents remain part of the digest, and gitlink OIDs remain automatic.
 
-- [ ] **Step 4: Run pilot-service tests and observe GREEN**
+- [x] **Step 4: Run pilot-service tests and observe GREEN**
 
 Run: `pnpm vitest run tests/unit/app/pilot-services.test.ts`
 
@@ -110,7 +114,7 @@ Expected: all pilot-service tests pass.
 - Modify: `src/bootstrap/dependencies.ts`
 - Test: `tests/unit/bootstrap/dependencies.test.ts`
 
-- [ ] **Step 1: Write failing convergence tests**
+- [x] **Step 1: Write failing convergence tests**
 
 Add four behavioral tests:
 
@@ -123,13 +127,13 @@ Add four behavioral tests:
 
 Use fixed command arrays such as `["node", "scripts/pnpm-state.mjs"]` and assert the exact call order.
 
-- [ ] **Step 2: Run dependency setup tests and observe RED**
+- [x] **Step 2: Run dependency setup tests and observe RED**
 
 Run: `pnpm vitest run tests/unit/bootstrap/dependencies.test.ts`
 
 Expected: failures because matching fingerprints currently skip all validation.
 
-- [ ] **Step 3: Implement convergence semantics**
+- [x] **Step 3: Implement convergence semantics**
 
 Extend `DependencySetupRuntime` with:
 
@@ -139,7 +143,7 @@ runEnsure(command: readonly string[], workspaceRoot: string, environment: Enviro
 
 When previous state matches, run all ensure commands. If any fails, run setup once, rerun all ensures from the beginning, and write healthy state only after success. When the fingerprint changes, run setup first and then all ensures. Preserve legacy behavior when `ensure` is empty.
 
-- [ ] **Step 4: Run dependency setup tests and observe GREEN**
+- [x] **Step 4: Run dependency setup tests and observe GREEN**
 
 Run: `pnpm vitest run tests/unit/bootstrap/dependencies.test.ts`
 
@@ -151,17 +155,17 @@ Expected: all dependency convergence tests pass.
 - Modify: `src/app/pilot-services.ts`
 - Test: `tests/unit/app/pilot-services.test.ts`
 
-- [ ] **Step 1: Write a failing fixed-argv integration test**
+- [x] **Step 1: Write a failing fixed-argv integration test**
 
 Assert that preparation passes each ensure command to the remote runtime as separate argv values, changes into the generated workspace, uses the managed toolchain `PATH`, exports `REMOTE_RUNNER_CHILD=1`, and never invokes a shell-interpolated command string.
 
-- [ ] **Step 2: Run the test and observe RED**
+- [x] **Step 2: Run the test and observe RED**
 
 Run: `pnpm vitest run tests/unit/app/pilot-services.test.ts`
 
 Expected: failure because `runEnsure` is not wired.
 
-- [ ] **Step 3: Wire remote ensure execution**
+- [x] **Step 3: Wire remote ensure execution**
 
 Use a fixed shell wrapper only for `cd` and environment setup:
 
@@ -171,7 +175,7 @@ cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; shift 2; exec "$@"
 
 Pass the validated ensure command after the positional workspace and PATH arguments. Do not stream successful ensure output or expose secrets.
 
-- [ ] **Step 4: Run pilot-service and profile-runtime tests**
+- [x] **Step 4: Run pilot-service and profile-runtime tests**
 
 Run: `pnpm vitest run tests/unit/app/pilot-services.test.ts tests/unit/app/profile-runtime.test.ts`
 
@@ -187,7 +191,7 @@ Expected: all tests pass.
 - Modify: `/Users/admin/Projects/worktrees/ariadne-remote-verify-plan/docs/specs/2026-07-31-remote-runner-ariadne-adapter-design.md`
 - Modify: `/Users/admin/Projects/worktrees/ariadne-remote-verify-plan/docs/acceptance/2026-07-31-remote-runner-pilot.md`
 
-- [ ] **Step 1: Replace Ariadne's package allowlist**
+- [x] **Step 1: Replace Ariadne's package allowlist**
 
 Use exact setup inputs plus automatic manifest discovery:
 
@@ -211,11 +215,11 @@ fingerprint:
 
 Do not list `vendor/dev-standards`: all gitlinks are already fingerprinted automatically.
 
-- [ ] **Step 2: Document behavior and failure semantics**
+- [x] **Step 2: Document behavior and failure semantics**
 
 State that patterns include tracked and non-ignored untracked files; ensure runs on every remote preparation; a failed ensure triggers one full setup and a mandatory retry; persistent failure is fail-closed. Add runbook diagnosis for `bootstrap ensure failed` without suggesting manual package-list maintenance.
 
-- [ ] **Step 3: Update acceptance evidence**
+- [x] **Step 3: Update acceptance evidence**
 
 Record deterministic tests and the live Linux canary: add a temporary zero-dependency package manifest under an existing workspace glob, confirm the remote fingerprint changes and setup executes, then remove it and confirm convergence leaves no dirty files.
 
@@ -224,24 +228,24 @@ Record deterministic tests and the live Linux canary: add a temporary zero-depen
 **Files:**
 - Verify all changed files in both worktrees.
 
-- [ ] **Step 1: Run remote-runner verification**
+- [x] **Step 1: Run remote-runner verification**
 
 Run: `pnpm verify`
 
 Expected: typecheck, all Vitest tests, and build pass.
 
-- [ ] **Step 2: Commit and publish remote-runner**
+- [x] **Step 2: Commit and publish remote-runner**
 
 Commit the plan, implementation, tests, and docs on `codex/fingerprint-convergence`; push it and open a ready-for-review PR. Verify the returned URL.
 
-- [ ] **Step 3: Install the verified branch build user-locally**
+- [x] **Step 3: Install the verified branch build user-locally**
 
 Run the built `remote-runner install` from the feature worktree, then confirm `remote-runner validate verify-full` accepts Ariadne's new manifest.
 
-- [ ] **Step 4: Run Ariadne acceptance on Linux**
+- [x] **Step 4: Run Ariadne acceptance on Linux**
 
 Run targeted manifest validation, `remote-runner prewarm verify-full` with a temporary new package manifest, and `./scripts/verify --full` from the Ariadne feature worktree. Confirm remote status reports `workspace=ready fingerprint=current` and no local fallback notification was produced.
 
-- [ ] **Step 5: Commit and republish Ariadne PR #193**
+- [x] **Step 5: Commit and republish Ariadne PR #193**
 
 Commit the manifest and documentation updates on `codex/remote-verify-plan`, push the branch, verify PR #193 remains open and ready, and confirm both worktrees are clean.
