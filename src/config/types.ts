@@ -34,6 +34,7 @@ export interface Profile {
     node: "local-exact";
     packageManager: string;
     setup: string[];
+    artifacts: string[];
     ensure: string[][];
     fingerprint: {
       files: string[];

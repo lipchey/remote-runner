@@ -105,6 +105,16 @@ function safePaths(value: unknown, label: string): string[] {
   return stringArray(value, label).map(assertSafeRepositoryPath);
 }
 
+function artifactPaths(value: unknown): string[] {
+  return stringArray(value, "bootstrap artifacts").map((path) => {
+    const normalized = assertSafeRepositoryPath(path);
+    if (normalized !== path || path.startsWith("./")) {
+      throw new Error("bootstrap artifact must be a canonical safe repository path");
+    }
+    return normalized;
+  });
+}
+
 function fingerprintPatterns(value: unknown): string[] {
   return stringArray(value, "bootstrap fingerprint patterns").map((pattern) => {
     if (
@@ -218,7 +228,11 @@ function parseProfile(value: unknown): Profile {
   }
 
   const sync = closed(source.sync, ["provider", "mode", "ignores"], "sync");
-  const bootstrap = closed(source.bootstrap, ["node", "packageManager", "setup", "ensure", "fingerprint"], "bootstrap");
+  const bootstrap = closed(
+    source.bootstrap,
+    ["node", "packageManager", "setup", "artifacts", "ensure", "fingerprint"],
+    "bootstrap",
+  );
   const workload = closed(source.workload, ["command", "childEnvironment"], "workload");
   const secrets = closed(source.secrets, ["allow", "provider", "dotenv"], "secrets");
   const hasProvider = secrets.provider !== undefined;
@@ -277,6 +291,7 @@ function parseProfile(value: unknown): Profile {
       node: literal(bootstrap.node, "local-exact", "bootstrap node"),
       packageManager: assertSafeRepositoryPath(nonEmptyString(bootstrap.packageManager, "bootstrap packageManager")),
       setup: safePaths(bootstrap.setup, "bootstrap setup"),
+      artifacts: bootstrap.artifacts === undefined ? [] : artifactPaths(bootstrap.artifacts),
       ensure: bootstrap.ensure === undefined ? [] : commandArrays(bootstrap.ensure, "bootstrap ensure command"),
       fingerprint: bootstrapFingerprint(bootstrap.fingerprint),
     },
