@@ -39,8 +39,14 @@ describe("RemoteToolchainRuntime", () => {
     await runtime.cleanup(temporary);
 
     expect(remote.calls).toContainEqual([
-      "curl", "--fail", "--location", "--silent", "--show-error", "--output",
-      `${temporary}/archive.tar.xz`, "https://example.test/archive.tar.xz",
+      "curl",
+      "--fail",
+      "--location",
+      "--silent",
+      "--show-error",
+      "--output",
+      `${temporary}/archive.tar.xz`,
+      "https://example.test/archive.tar.xz",
     ]);
     expect(remote.calls).toContainEqual(["sha256sum", "--", `${temporary}/archive.tar.xz`]);
     expect(remote.calls).toContainEqual(["tar", "-xf", `${temporary}/archive.tar.xz`, "-C", `${temporary}/extract`]);

@@ -2,12 +2,7 @@ const LABEL = "com.lipchey.remote-runner";
 const EXECUTABLE = "~/.local/bin/remote-runner";
 const PLIST = "~/Library/LaunchAgents/com.lipchey.remote-runner.plist";
 
-export const OWNED_MAC_PATHS = [
-  EXECUTABLE,
-  PLIST,
-  "~/.local/state/remote-runner",
-  "~/.cache/remote-runner",
-] as const;
+export const OWNED_MAC_PATHS = [EXECUTABLE, PLIST, "~/.local/state/remote-runner", "~/.cache/remote-runner"] as const;
 
 export type ArtifactStatus = "missing" | "compatible" | "owned-stale" | "foreign";
 

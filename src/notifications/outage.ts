@@ -36,9 +36,22 @@ const DEFAULT_STATE: OutageState = { schemaVersion: 1, outageActive: false, queu
 const MAX_QUEUE = 64;
 const FIELD = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const REASONS = new Set([
-  "dns", "host-key", "authentication", "transport", "remote-shell", "capacity",
-  "bootstrap", "validation", "lock", "sync", "workspace", "secrets", "controller",
-  "child-start", "timeout", "unknown",
+  "dns",
+  "host-key",
+  "authentication",
+  "transport",
+  "remote-shell",
+  "capacity",
+  "bootstrap",
+  "validation",
+  "lock",
+  "sync",
+  "workspace",
+  "secrets",
+  "controller",
+  "child-start",
+  "timeout",
+  "unknown",
 ]);
 
 export function isNotificationReason(value: string): boolean {
@@ -51,11 +64,14 @@ function closed(value: object, expected: readonly string[]): boolean {
 }
 
 function validateEvent(event: NotificationEvent): boolean {
-  return closed(event, ["consumer", "kind", "profile", "reason", "remoteLabel", "timestamp"]) &&
+  return (
+    closed(event, ["consumer", "kind", "profile", "reason", "remoteLabel", "timestamp"]) &&
     (event.kind === "outage" || event.kind === "recovery") &&
     [event.consumer, event.profile, event.remoteLabel].every((value) => FIELD.test(value)) &&
     isNotificationReason(event.reason) &&
-    Number.isFinite(new Date(event.timestamp).valueOf()) && new Date(event.timestamp).toISOString() === event.timestamp;
+    Number.isFinite(new Date(event.timestamp).valueOf()) &&
+    new Date(event.timestamp).toISOString() === event.timestamp
+  );
 }
 
 function validateState(value: OutageState | undefined): OutageState {
@@ -63,9 +79,17 @@ function validateState(value: OutageState | undefined): OutageState {
   const expectedKeys = value.outageActive
     ? ["activeReason", "outageActive", "queue", "schemaVersion"]
     : ["outageActive", "queue", "schemaVersion"];
-  if (!closed(value, expectedKeys) || value.schemaVersion !== 1 || typeof value.outageActive !== "boolean" || !Array.isArray(value.queue) ||
-      value.queue.length > MAX_QUEUE || value.queue.some((event) => !validateEvent(event)) ||
-      (value.outageActive ? typeof value.activeReason !== "string" || !isNotificationReason(value.activeReason) : value.activeReason !== undefined)) {
+  if (
+    !closed(value, expectedKeys) ||
+    value.schemaVersion !== 1 ||
+    typeof value.outageActive !== "boolean" ||
+    !Array.isArray(value.queue) ||
+    value.queue.length > MAX_QUEUE ||
+    value.queue.some((event) => !validateEvent(event)) ||
+    (value.outageActive
+      ? typeof value.activeReason !== "string" || !isNotificationReason(value.activeReason)
+      : value.activeReason !== undefined)
+  ) {
     throw new Error("outage state is corrupt");
   }
   return { ...value, queue: [...value.queue] };
@@ -86,7 +110,12 @@ async function deliver(runtime: OutageRuntime, state: OutageState): Promise<Deli
   let current = state;
   let delivered = true;
   while (current.queue.length > 0) {
-    try { await runtime.send(current.queue[0]!); } catch { delivered = false; break; }
+    try {
+      await runtime.send(current.queue[0]!);
+    } catch {
+      delivered = false;
+      break;
+    }
     current = { ...current, queue: current.queue.slice(1) };
     await runtime.writeState(current);
   }

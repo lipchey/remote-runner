@@ -17,6 +17,7 @@
 ### Task 1: Extend the validated manifest contract
 
 **Files:**
+
 - Modify: `src/config/types.ts`
 - Modify: `src/config/load-manifest.ts`
 - Modify: `tests/unit/config/manifest-fixture.ts`
@@ -71,6 +72,7 @@ Expected: all parser tests pass.
 ### Task 2: Discover fingerprint files without manual package enumeration
 
 **Files:**
+
 - Modify: `src/app/pilot-services.ts`
 - Test: `tests/unit/app/pilot-services.test.ts`
 
@@ -111,6 +113,7 @@ Expected: all pilot-service tests pass.
 ### Task 3: Make ensure the correctness gate and fingerprint an optimization
 
 **Files:**
+
 - Modify: `src/bootstrap/dependencies.ts`
 - Test: `tests/unit/bootstrap/dependencies.test.ts`
 
@@ -152,6 +155,7 @@ Expected: all dependency convergence tests pass.
 ### Task 4: Execute ensure commands safely on Linux
 
 **Files:**
+
 - Modify: `src/app/pilot-services.ts`
 - Test: `tests/unit/app/pilot-services.test.ts`
 
@@ -184,6 +188,7 @@ Expected: all tests pass.
 ### Task 5: Document the reusable contract and update Ariadne
 
 **Files:**
+
 - Modify: `README.md`
 - Modify: `docs/RUNBOOK.md`
 - Modify: `docs/specs/2026-07-31-remote-runner-design.md`
@@ -226,6 +231,7 @@ Record deterministic tests and the live Linux canary: add a temporary zero-depen
 ### Task 6: Verify, publish, install, and run live acceptance
 
 **Files:**
+
 - Verify all changed files in both worktrees.
 
 - [x] **Step 1: Run remote-runner verification**

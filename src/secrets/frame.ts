@@ -23,12 +23,9 @@ function validateAllowlist(allow: readonly string[]): Set<string> {
   return result;
 }
 
-export function encodeSecretFrame(
-  values: Readonly<Record<string, string>>,
-  allow: readonly string[],
-): SecretFrame {
+export function encodeSecretFrame(values: Readonly<Record<string, string>>, allow: readonly string[]): SecretFrame {
   const allowed = validateAllowlist(allow);
-  const entries = Object.entries(values).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  const entries = Object.entries(values).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
   for (const [name, value] of entries) {
     if (!SECRET_NAME.test(name)) throw new Error("secret frame contains an invalid name");
     if (!allowed.has(name)) throw new Error(`unallowlisted secret: ${name}`);

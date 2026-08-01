@@ -38,11 +38,7 @@ class FakeProcesses implements SshProcessRuntime {
     },
   ) {}
 
-  async run(request: {
-    readonly command: string;
-    readonly args: readonly string[];
-    readonly maxOutputBytes: number;
-  }) {
+  async run(request: { readonly command: string; readonly args: readonly string[]; readonly maxOutputBytes: number }) {
     this.requests.push(request);
     return this.result;
   }
@@ -84,12 +80,14 @@ describe("strict SSH client", () => {
   });
 
   it("encodes quotes and shell metacharacters into one documented POSIX command", () => {
-    expect(sshArguments(
-      "-oProxyCommand=touch /tmp/pwned",
-      ["printf", "%s\\n", "it's; $(touch /tmp/pwned)"],
-      1,
-      "/runner/known hosts",
-    )).toEqual([
+    expect(
+      sshArguments(
+        "-oProxyCommand=touch /tmp/pwned",
+        ["printf", "%s\\n", "it's; $(touch /tmp/pwned)"],
+        1,
+        "/runner/known hosts",
+      ),
+    ).toEqual([
       "-o",
       "BatchMode=yes",
       "-o",
@@ -128,11 +126,13 @@ describe("strict SSH client", () => {
 
     expect(new TextDecoder().decode(result.stdout)).toBe("1234");
     expect(new TextDecoder().decode(result.stderr)).toBe("abcd");
-    expect(processes.requests).toEqual([{
-      command: "ssh",
-      args: sshArguments("host", ["true"], 4, "/runner/known_hosts"),
-      maxOutputBytes: 4,
-    }]);
+    expect(processes.requests).toEqual([
+      {
+        command: "ssh",
+        args: sshArguments("host", ["true"], 4, "/runner/known_hosts"),
+        maxOutputBytes: 4,
+      },
+    ]);
   });
 
   it("fails closed when the process runtime reports truncated output", async () => {
@@ -143,9 +143,7 @@ describe("strict SSH client", () => {
       outputTruncated: true,
     });
 
-    await expect(runSsh(processes, "host", ["true"], 4, "/runner/known_hosts", 4)).rejects.toThrow(
-      "output limit",
-    );
+    await expect(runSsh(processes, "host", ["true"], 4, "/runner/known_hosts", 4)).rejects.toThrow("output limit");
   });
 });
 
@@ -168,11 +166,13 @@ describe("known_hosts enrollment", () => {
       connectTimeoutSeconds: 4,
     });
 
-    expect(processes.requests).toEqual([{
-      command: "ssh-keyscan",
-      args: ["-T", "4", "--", "pop-os"],
-      maxOutputBytes: 65_536,
-    }]);
+    expect(processes.requests).toEqual([
+      {
+        command: "ssh-keyscan",
+        args: ["-T", "4", "--", "pop-os"],
+        maxOutputBytes: 65_536,
+      },
+    ]);
     expect(store.writes).toHaveLength(1);
     expect(store.writes[0]?.path).toBe("/runner/known_hosts");
     expect(store.writes[0]?.mode).toBe(0o600);
@@ -180,21 +180,27 @@ describe("known_hosts enrollment", () => {
   });
 
   it.each([
-    ["mismatch", () => {
-      const blob = bytes("actual");
-      return {
-        output: `host ssh-ed25519 ${Buffer.from(blob).toString("base64")}\n`,
-        trusted: fingerprint(bytes("different")),
-      };
-    }],
-    ["ambiguity", () => {
-      const blob = bytes("same-fingerprint");
-      const encoded = Buffer.from(blob).toString("base64");
-      return {
-        output: `host ssh-ed25519 ${encoded}\nhost-alias ssh-ed25519 ${encoded}\n`,
-        trusted: fingerprint(blob),
-      };
-    }],
+    [
+      "mismatch",
+      () => {
+        const blob = bytes("actual");
+        return {
+          output: `host ssh-ed25519 ${Buffer.from(blob).toString("base64")}\n`,
+          trusted: fingerprint(bytes("different")),
+        };
+      },
+    ],
+    [
+      "ambiguity",
+      () => {
+        const blob = bytes("same-fingerprint");
+        const encoded = Buffer.from(blob).toString("base64");
+        return {
+          output: `host ssh-ed25519 ${encoded}\nhost-alias ssh-ed25519 ${encoded}\n`,
+          trusted: fingerprint(blob),
+        };
+      },
+    ],
     ["no valid key", () => ({ output: "# only a comment\nmalformed\n", trusted: fingerprint(bytes("x")) })],
   ] as const)("fails closed on %s without a trust write", async (_label, fixture) => {
     const { output, trusted } = fixture();
@@ -206,12 +212,14 @@ describe("known_hosts enrollment", () => {
     });
     const store = new FakeStore();
 
-    await expect(enrollKnownHost(processes, store, {
-      target: "host",
-      trustedFingerprint: trusted,
-      knownHostsPath: "/runner/known_hosts",
-      connectTimeoutSeconds: 4,
-    })).rejects.toThrow();
+    await expect(
+      enrollKnownHost(processes, store, {
+        target: "host",
+        trustedFingerprint: trusted,
+        knownHostsPath: "/runner/known_hosts",
+        connectTimeoutSeconds: 4,
+      }),
+    ).rejects.toThrow();
 
     expect(store.writes).toEqual([]);
   });
@@ -226,12 +234,14 @@ describe("known_hosts enrollment", () => {
     });
     const store = new FakeStore();
 
-    await expect(enrollKnownHost(processes, store, {
-      target: "host",
-      trustedFingerprint: fingerprint(blob),
-      knownHostsPath: "/runner/known_hosts",
-      connectTimeoutSeconds: 4,
-    })).rejects.toThrow("output limit");
+    await expect(
+      enrollKnownHost(processes, store, {
+        target: "host",
+        trustedFingerprint: fingerprint(blob),
+        knownHostsPath: "/runner/known_hosts",
+        connectTimeoutSeconds: 4,
+      }),
+    ).rejects.toThrow("output limit");
     expect(store.writes).toEqual([]);
   });
 });
@@ -250,7 +260,11 @@ class RecordingNodeFiles implements KnownHostsFileSystem {
     this.events.push(`sync-file:${path}`);
     if (this.failAt === "sync-file") throw new Error("injected sync failure");
     const handle = await open(path, "r");
-    try { await handle.sync(); } finally { await handle.close(); }
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
   }
 
   async rename(from: string, to: string): Promise<void> {
@@ -263,7 +277,11 @@ class RecordingNodeFiles implements KnownHostsFileSystem {
     this.events.push(`sync-directory:${path}`);
     if (this.failAt === "sync-directory") throw new Error("injected directory sync failure");
     const handle = await open(path, "r");
-    try { await handle.sync(); } finally { await handle.close(); }
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
   }
 
   async remove(path: string): Promise<void> {
@@ -304,11 +322,9 @@ describe("NodeKnownHostsStore", () => {
     const files = new RecordingNodeFiles();
     files.failAt = "sync-file";
 
-    await expect(new NodeKnownHostsStore(files, () => "failed-token").persistAtomically(
-      path,
-      bytes("material"),
-      0o600,
-    )).rejects.toThrow("injected sync failure");
+    await expect(
+      new NodeKnownHostsStore(files, () => "failed-token").persistAtomically(path, bytes("material"), 0o600),
+    ).rejects.toThrow("injected sync failure");
 
     expect(await readdir(root)).toEqual([]);
     expect(files.events.at(-1)).toBe(`remove:${path}.tmp-failed-token`);
@@ -322,11 +338,9 @@ describe("NodeKnownHostsStore", () => {
     await writeFile(temporaryPath, "foreign", { mode: 0o600 });
     const files = new RecordingNodeFiles();
 
-    await expect(new NodeKnownHostsStore(files, () => "collision-token").persistAtomically(
-      path,
-      bytes("ours"),
-      0o600,
-    )).rejects.toMatchObject({ code: "EEXIST" });
+    await expect(
+      new NodeKnownHostsStore(files, () => "collision-token").persistAtomically(path, bytes("ours"), 0o600),
+    ).rejects.toMatchObject({ code: "EEXIST" });
 
     expect(await readFile(temporaryPath, "utf8")).toBe("foreign");
     expect(files.events.some((event) => event.startsWith("remove:"))).toBe(false);
@@ -343,11 +357,9 @@ describe("NodeKnownHostsStore", () => {
     const files = new RecordingNodeFiles();
     files.failAt = failure;
 
-    await expect(new NodeKnownHostsStore(files, () => `${failure}-token`).persistAtomically(
-      path,
-      bytes("material"),
-      0o600,
-    )).rejects.toThrow(message);
+    await expect(
+      new NodeKnownHostsStore(files, () => `${failure}-token`).persistAtomically(path, bytes("material"), 0o600),
+    ).rejects.toThrow(message);
 
     expect(await readdir(root)).toEqual([]);
     expect(files.events.at(-1)).toBe(`remove:${temporaryPath}`);
@@ -360,11 +372,9 @@ describe("NodeKnownHostsStore", () => {
     const files = new RecordingNodeFiles();
     files.failAt = "sync-directory";
 
-    await expect(new NodeKnownHostsStore(files, () => "directory-token").persistAtomically(
-      path,
-      bytes("material"),
-      0o600,
-    )).rejects.toThrow("injected directory sync failure");
+    await expect(
+      new NodeKnownHostsStore(files, () => "directory-token").persistAtomically(path, bytes("material"), 0o600),
+    ).rejects.toThrow("injected directory sync failure");
 
     expect(await readFile(path, "utf8")).toBe("material");
     expect(files.events.some((event) => event.startsWith("remove:"))).toBe(false);
@@ -381,11 +391,9 @@ describe("NodeKnownHostsStore", () => {
       throw new Error("injected cleanup failure");
     };
 
-    const failure = await new NodeKnownHostsStore(files, () => "cleanup-token").persistAtomically(
-      path,
-      bytes("material"),
-      0o600,
-    ).catch((error: unknown) => error);
+    const failure = await new NodeKnownHostsStore(files, () => "cleanup-token")
+      .persistAtomically(path, bytes("material"), 0o600)
+      .catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(AggregateError);
     expect((failure as AggregateError).errors).toEqual([

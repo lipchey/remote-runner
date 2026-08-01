@@ -77,7 +77,7 @@ function reasonFor(step: (typeof PREPARATION_STEPS)[number]): PreparationReason 
 
 function idempotentRelease(release: () => Promise<void>): () => Promise<void> {
   let pending: Promise<void> | undefined;
-  return () => pending ??= release();
+  return () => (pending ??= release());
 }
 
 export async function prepareRemote(runtime: PreparationRuntime): Promise<PrepareResult> {
@@ -102,14 +102,16 @@ export async function prepareRemote(runtime: PreparationRuntime): Promise<Prepar
     return { ok: true, secrets, release };
   } catch (caught) {
     if (release !== undefined) {
-      try { await release(); } catch { return { ok: false, reason: "lock", retryable: false }; }
+      try {
+        await release();
+      } catch {
+        return { ok: false, reason: "lock", retryable: false };
+      }
     }
     return {
       ok: false,
       reason: caught instanceof PreparationError ? caught.reason : reasonFor(step),
-      retryable: caught instanceof PreparationError
-        ? caught.retryable
-        : caught instanceof RetryablePreparationError,
+      retryable: caught instanceof PreparationError ? caught.retryable : caught instanceof RetryablePreparationError,
     };
   }
 }

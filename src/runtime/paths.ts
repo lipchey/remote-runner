@@ -9,7 +9,8 @@ export function assertSafeRepositoryPath(value: string): string {
     /^[A-Za-z]:/.test(value) ||
     posix.isAbsolute(portable) ||
     win32.isAbsolute(value) ||
-    (normalized === "." || normalized === "./") ||
+    normalized === "." ||
+    normalized === "./" ||
     normalized === ".." ||
     normalized.startsWith("../")
   ) {

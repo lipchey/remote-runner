@@ -35,7 +35,11 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
       const result = await services.startRemote(command, secrets, async () => {
         await onChildStarted();
         pendingFallbackReason = undefined;
-        try { await services.recordRemoteChildStarted(); } catch { /* notification never blocks workload */ }
+        try {
+          await services.recordRemoteChildStarted();
+        } catch {
+          /* notification never blocks workload */
+        }
       });
       if (result.kind === "not-started") pendingFallbackReason = "child-start";
       return result;
@@ -44,7 +48,11 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
       const reason = pendingFallbackReason;
       pendingFallbackReason = undefined;
       if (reason !== undefined) {
-        try { await services.recordFallback(reason); } catch { /* notification never blocks fallback */ }
+        try {
+          await services.recordFallback(reason);
+        } catch {
+          /* notification never blocks fallback */
+        }
       }
       return services.runLocal(command);
     },

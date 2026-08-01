@@ -4,10 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-  installLocalApplication,
-  type LocalLaunchRuntime,
-} from "../../../src/node/local-install.js";
+import { installLocalApplication, type LocalLaunchRuntime } from "../../../src/node/local-install.js";
 
 const roots: string[] = [];
 
@@ -20,8 +17,14 @@ class FakeLaunch implements LocalLaunchRuntime {
   loaded = false;
   running = false;
   bootstrapFailures = 0;
-  async status() { return { loaded: this.loaded, running: this.running }; }
-  async bootout() { this.actions.push("bootout"); this.loaded = false; this.running = false; }
+  async status() {
+    return { loaded: this.loaded, running: this.running };
+  }
+  async bootout() {
+    this.actions.push("bootout");
+    this.loaded = false;
+    this.running = false;
+  }
   async bootstrap(_plist: string) {
     this.actions.push("bootstrap");
     if (this.bootstrapFailures > 0) {
@@ -31,7 +34,10 @@ class FakeLaunch implements LocalLaunchRuntime {
     this.loaded = true;
     this.running = true;
   }
-  async kickstart() { this.actions.push("kickstart"); this.running = true; }
+  async kickstart() {
+    this.actions.push("kickstart");
+    this.running = true;
+  }
 }
 
 async function sourceFixture(): Promise<string> {
@@ -79,12 +85,14 @@ describe("self-contained local macOS install", () => {
     await mkdir(join(home, ".local/bin"), { recursive: true });
     await writeFile(join(home, ".local/bin/remote-runner"), "foreign\n");
 
-    await expect(installLocalApplication({
-      home,
-      sourceRoot,
-      nodePath: "/usr/bin/node",
-      launch: new FakeLaunch(),
-    })).rejects.toThrow(/foreign/u);
+    await expect(
+      installLocalApplication({
+        home,
+        sourceRoot,
+        nodePath: "/usr/bin/node",
+        launch: new FakeLaunch(),
+      }),
+    ).rejects.toThrow(/foreign/u);
   });
 
   it("retries bootstrap after an upgrade bootout while launchd settles", async () => {
@@ -96,13 +104,15 @@ describe("self-contained local macOS install", () => {
     launch.running = true;
     launch.bootstrapFailures = 1;
 
-    await expect(installLocalApplication({
-      home,
-      sourceRoot,
-      nodePath: "/usr/bin/node",
-      launch,
-      settleLaunchd: async () => undefined,
-    })).resolves.toBeDefined();
+    await expect(
+      installLocalApplication({
+        home,
+        sourceRoot,
+        nodePath: "/usr/bin/node",
+        launch,
+        settleLaunchd: async () => undefined,
+      }),
+    ).resolves.toBeDefined();
     expect(launch.actions).toEqual(["bootout", "bootstrap", "bootstrap"]);
   });
 });

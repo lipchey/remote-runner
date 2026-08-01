@@ -51,7 +51,9 @@ class FakeProcesses {
     return result();
   }
 
-  async isAlive() { return false; }
+  async isAlive() {
+    return false;
+  }
 }
 
 describe("concrete Node CLI dependencies", () => {
@@ -70,9 +72,7 @@ describe("concrete Node CLI dependencies", () => {
     });
     const profile = (await dependencies.loadManifest()).profiles[0]!;
 
-    await expect(dependencies.enqueuePrewarm?.(profile, ".remote-runner.yaml")).resolves.toBe(
-      "published",
-    );
+    await expect(dependencies.enqueuePrewarm?.(profile, ".remote-runner.yaml")).resolves.toBe("published");
     await expect(
       inspectPrewarmRequest(paths.home, {
         consumer: profile.consumer,
@@ -93,7 +93,16 @@ describe("concrete Node CLI dependencies", () => {
       processes,
     });
     const identity = dependencies.identity;
-    const profileRoot = join(paths.home, ".local", "state", "remote-runner", "profiles", "ariadne", "verify-full", identity);
+    const profileRoot = join(
+      paths.home,
+      ".local",
+      "state",
+      "remote-runner",
+      "profiles",
+      "ariadne",
+      "verify-full",
+      identity,
+    );
     await mkdir(profileRoot, { recursive: true });
     await writeFile(join(profileRoot, "runner.log.1"), "older\n");
     await writeFile(join(profileRoot, "runner.log"), "current\n");
@@ -103,7 +112,7 @@ describe("concrete Node CLI dependencies", () => {
     await expect(dependencies.statusProfile?.("verify-full")).resolves.toMatch(
       /^verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear$/u,
     );
-    const report = await dependencies.doctorProfile?.("verify-full") as { checks: readonly unknown[] };
+    const report = (await dependencies.doctorProfile?.("verify-full")) as { checks: readonly unknown[] };
     expect(report.checks).toHaveLength(16);
     expect(await dependencies.logsProfile?.("verify-full")).toEqual(["older", "current"]);
     expect(processes.requests.every((request) => request.command !== "sh" && request.command !== "bash")).toBe(true);
@@ -118,12 +127,23 @@ describe("concrete Node CLI dependencies", () => {
       processes: new FakeProcesses(),
       now: () => "2026-07-31T12:34:56.000Z",
     });
-    const profileRoot = join(paths.home, ".local", "state", "remote-runner", "profiles", "ariadne", "verify-full", dependencies.identity);
+    const profileRoot = join(
+      paths.home,
+      ".local",
+      "state",
+      "remote-runner",
+      "profiles",
+      "ariadne",
+      "verify-full",
+      dependencies.identity,
+    );
     const corruptPath = join(profileRoot, "outage.json.corrupt-evidence");
     await mkdir(profileRoot, { recursive: true });
     await writeFile(corruptPath, "retained evidence");
 
-    const preview = await dependencies.repairProfile?.("verify-full", false) as { actions: Array<{ target: string }> };
+    const preview = (await dependencies.repairProfile?.("verify-full", false)) as {
+      actions: Array<{ target: string }>;
+    };
     expect(preview.actions).toEqual([expect.objectContaining({ target: corruptPath })]);
     expect(await readFile(corruptPath, "utf8")).toBe("retained evidence");
 
@@ -147,7 +167,7 @@ describe("concrete Node CLI dependencies", () => {
     });
     const profile = (await dependencies.loadManifest()).profiles[0]!;
 
-    const report = await dependencies.benchmarkProfile?.(profile) as { receiptPaths: readonly string[] };
+    const report = (await dependencies.benchmarkProfile?.(profile)) as { receiptPaths: readonly string[] };
 
     expect(executions).toHaveLength(14);
     expect(new Set(executions.map(({ mode }) => mode))).toEqual(new Set(["local", "remote"]));
@@ -156,8 +176,12 @@ describe("concrete Node CLI dependencies", () => {
       "benchmark/20260731T123456Z-verify-full.json",
       "benchmark/20260731T123456Z-verify-full.md",
     ]);
-    await expect(readFile(join(paths.sourceRoot, report.receiptPaths[0]!), "utf8")).resolves.toContain('"profile": "verify-full"');
-    await expect(readFile(join(paths.sourceRoot, report.receiptPaths[1]!), "utf8")).resolves.toContain("| remote | full | warm |");
+    await expect(readFile(join(paths.sourceRoot, report.receiptPaths[0]!), "utf8")).resolves.toContain(
+      '"profile": "verify-full"',
+    );
+    await expect(readFile(join(paths.sourceRoot, report.receiptPaths[1]!), "utf8")).resolves.toContain(
+      "| remote | full | warm |",
+    );
   });
 
   it("writes bounded diagnostic lifecycle records for real profile dispatch", async () => {
@@ -193,7 +217,16 @@ describe("concrete Node CLI dependencies", () => {
       now: () => "2026-07-31T12:34:56.000Z",
       executeProfile: async () => 0,
     });
-    const profileRoot = join(paths.home, ".local", "state", "remote-runner", "profiles", "ariadne", "verify-full", dependencies.identity);
+    const profileRoot = join(
+      paths.home,
+      ".local",
+      "state",
+      "remote-runner",
+      "profiles",
+      "ariadne",
+      "verify-full",
+      dependencies.identity,
+    );
     await mkdir(profileRoot, { recursive: true });
     const outsideReceipt = join(outside, "repair.json");
     await writeFile(outsideReceipt, "sentinel");
@@ -205,6 +238,8 @@ describe("concrete Node CLI dependencies", () => {
     await symlink(outside, join(paths.sourceRoot, "benchmark"));
     const profile = (await dependencies.loadManifest()).profiles[0]!;
     await expect(dependencies.benchmarkProfile?.(profile)).rejects.toThrow(/escapes source root/u);
-    await expect(readFile(join(outside, "20260731T123456Z-verify-full.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(join(outside, "20260731T123456Z-verify-full.json"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 });

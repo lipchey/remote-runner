@@ -199,16 +199,8 @@ export function assertConfinedWorkspace(generatedRoot: string, candidate: string
   return candidate;
 }
 
-function assertBoundedSuccess(
-  result: BoundedProcessResult,
-  label: string,
-  maximumBytes = CAPTURE_BYTES,
-): void {
-  if (
-    result.outputTruncated ||
-    result.stdout.byteLength > maximumBytes ||
-    result.stderr.byteLength > maximumBytes
-  ) {
+function assertBoundedSuccess(result: BoundedProcessResult, label: string, maximumBytes = CAPTURE_BYTES): void {
+  if (result.outputTruncated || result.stdout.byteLength > maximumBytes || result.stderr.byteLength > maximumBytes) {
     throw new Error(`${label} exceeded the process output limit`);
   }
   if (result.exitCode !== 0) throw new Error(`${label} failed with exit code ${result.exitCode}`);
@@ -294,11 +286,7 @@ export async function reconcileWorkspace(
   const privateRef = `refs/remote-runner/${options.consumer}/${options.profile}/${identity}` as PrivateRef;
   const candidateInput = posix.join(options.generatedRoot, options.consumer, options.profile, identity);
   const mirrorInput = posix.join(options.generatedRoot, options.consumer, ".mirror.git");
-  const lockInput = posix.join(
-    options.generatedRoot,
-    ".locks",
-    `${options.consumer}.lock`,
-  );
+  const lockInput = posix.join(options.generatedRoot, ".locks", `${options.consumer}.lock`);
 
   const formatResult = await processes.run({
     command: "git",
@@ -340,22 +328,24 @@ export async function reconcileWorkspace(
     }
   }
 
-  const prepared = canonicalRecords(await remote(
-    processes,
-    options,
-    [
-      "sh",
-      "-ceu",
-      PREPARE_TRANSACTION,
-      "remote-runner-git-prepare",
-      options.generatedRoot,
-      candidateInput,
-      mirrorInput,
-      lockInput,
-      objectFormat,
-    ],
-    "prepare workspace",
-  ));
+  const prepared = canonicalRecords(
+    await remote(
+      processes,
+      options,
+      [
+        "sh",
+        "-ceu",
+        PREPARE_TRANSACTION,
+        "remote-runner-git-prepare",
+        options.generatedRoot,
+        candidateInput,
+        mirrorInput,
+        lockInput,
+        objectFormat,
+      ],
+      "prepare workspace",
+    ),
+  );
   assertConfinedWorkspace(prepared.root, prepared.candidate);
   assertConfinedWorkspace(prepared.root, prepared.mirror);
   if (prepared.candidate !== posix.join(prepared.root, options.consumer, options.profile, identity)) {

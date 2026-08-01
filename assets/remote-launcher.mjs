@@ -21,7 +21,11 @@ function controlArguments() {
   const separator = args.indexOf("--");
   if (separator !== 1 || args.length <= 2) throw new Error("invalid control arguments");
   let allow;
-  try { allow = JSON.parse(args[0]); } catch { throw new Error("invalid control arguments"); }
+  try {
+    allow = JSON.parse(args[0]);
+  } catch {
+    throw new Error("invalid control arguments");
+  }
   if (!Array.isArray(allow)) throw new Error("invalid control arguments");
   const allowed = new Set();
   for (const name of allow) {
@@ -69,8 +73,15 @@ function decodeFrame(frame, allowed) {
     for (const entry of entries) {
       if (!Array.isArray(entry) || entry.length !== 2) throw new Error("invalid secret frame");
       const [name, value] = entry;
-      if (typeof name !== "string" || typeof value !== "string" || !SECRET_NAME.test(name) ||
-          !allowed.has(name) || names.has(name) || value.includes("\0") || Buffer.byteLength(value, "utf8") > MAX_SECRET_BYTES) {
+      if (
+        typeof name !== "string" ||
+        typeof value !== "string" ||
+        !SECRET_NAME.test(name) ||
+        !allowed.has(name) ||
+        names.has(name) ||
+        value.includes("\0") ||
+        Buffer.byteLength(value, "utf8") > MAX_SECRET_BYTES
+      ) {
         throw new Error("invalid secret frame");
       }
       names.add(name);

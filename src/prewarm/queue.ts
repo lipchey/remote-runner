@@ -1,15 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-  link,
-  lstat,
-  mkdir,
-  readFile,
-  readdir,
-  realpath,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { link, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const COMPONENT = /^[a-z][a-z0-9-]{0,62}$/u;
@@ -59,9 +49,7 @@ async function verifiedQueueRoot(home: string, create: boolean): Promise<string>
   return root;
 }
 
-function requestBasename(
-  request: Pick<PrewarmRequest, "consumer" | "profile" | "identity">,
-): string {
+function requestBasename(request: Pick<PrewarmRequest, "consumer" | "profile" | "identity">): string {
   if (!COMPONENT.test(request.consumer)) throw new Error("prewarm consumer is invalid");
   if (!COMPONENT.test(request.profile)) throw new Error("prewarm profile is invalid");
   if (!IDENTITY.test(request.identity)) throw new Error("prewarm identity is invalid");
@@ -88,22 +76,17 @@ async function validateRequest(value: unknown): Promise<PrewarmRequest> {
   if (!isAbsolute(request.sourceRoot) || resolve(request.sourceRoot) !== request.sourceRoot) {
     throw new Error("prewarm source root must be canonical and absolute");
   }
-  if (await realpath(request.sourceRoot) !== request.sourceRoot) {
+  if ((await realpath(request.sourceRoot)) !== request.sourceRoot) {
     throw new Error("prewarm source root must resolve to itself");
   }
   if (!isAbsolute(request.manifestPath) || resolve(request.manifestPath) !== request.manifestPath) {
     throw new Error("prewarm manifest path must be canonical and absolute");
   }
-  if (await realpath(request.manifestPath) !== request.manifestPath) {
+  if ((await realpath(request.manifestPath)) !== request.manifestPath) {
     throw new Error("prewarm manifest path must resolve to itself");
   }
   const fromRoot = relative(request.sourceRoot, request.manifestPath);
-  if (
-    fromRoot === "" ||
-    fromRoot === ".." ||
-    fromRoot.startsWith(`..${sep}`) ||
-    isAbsolute(fromRoot)
-  ) {
+  if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
     throw new Error("prewarm manifest path escapes the source root");
   }
   return request;
@@ -133,10 +116,7 @@ export async function inspectPrewarmRequest(
   return pending === "unknown" ? "unknown" : "idle";
 }
 
-export async function publishPrewarmRequest(
-  home: string,
-  value: PrewarmRequest,
-): Promise<"published" | "coalesced"> {
+export async function publishPrewarmRequest(home: string, value: PrewarmRequest): Promise<"published" | "coalesced"> {
   const request = await validateRequest(value);
   const root = await verifiedQueueRoot(home, true);
   const basename = requestBasename(request);
@@ -158,7 +138,7 @@ export async function publishPrewarmRequest(
   } finally {
     await rm(generationPath, { force: true });
   }
-  if (await entryKind(runningPath) === "file") {
+  if ((await entryKind(runningPath)) === "file") {
     await rm(pendingPath, { force: true });
     return "coalesced";
   }
@@ -213,9 +193,7 @@ export async function consumeNextPrewarmRequest(
         return "discarded";
       }
       const contents = await readFile(runningPath);
-      request = await validateRequest(
-        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(contents)),
-      );
+      request = await validateRequest(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(contents)));
       if (requestBasename(request) !== claimedBasename) {
         throw new Error("prewarm request does not match its queue filename");
       }

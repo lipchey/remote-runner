@@ -62,13 +62,17 @@ export class RemoteToolchainRuntime {
 
   async createTemporaryDirectory(label: string): Promise<string> {
     if (!SAFE_LABEL.test(label)) throw new Error("temporary directory label is invalid");
-    const result = await this.run([
-      "sh", "-ceu",
-      'umask 077; mkdir -p -- "$1"; chmod 700 -- "$1"; mktemp -d "$1/$2.XXXXXX"',
-      "remote-runner-toolchain-temp",
-      this.temporaryRoot,
-      label,
-    ], "create remote toolchain temporary directory");
+    const result = await this.run(
+      [
+        "sh",
+        "-ceu",
+        'umask 077; mkdir -p -- "$1"; chmod 700 -- "$1"; mktemp -d "$1/$2.XXXXXX"',
+        "remote-runner-toolchain-temp",
+        this.temporaryRoot,
+        label,
+      ],
+      "create remote toolchain temporary directory",
+    );
     const path = singleLine(result.stdout, "remote mktemp");
     this.assertTemporary(path);
     return path;
@@ -76,15 +80,20 @@ export class RemoteToolchainRuntime {
 
   async readText(url: string): Promise<string> {
     this.assertDownloadUrl(url);
-    const result = await this.run([
-      "curl", "--fail", "--location", "--silent", "--show-error", url,
-    ], "read remote release manifest");
+    const result = await this.run(
+      ["curl", "--fail", "--location", "--silent", "--show-error", url],
+      "read remote release manifest",
+    );
     return decoder.decode(result.stdout);
   }
 
   private assertDownloadUrl(value: string): void {
     let url: URL;
-    try { url = new URL(value); } catch { throw new Error("download URL is invalid"); }
+    try {
+      url = new URL(value);
+    } catch {
+      throw new Error("download URL is invalid");
+    }
     if (url.protocol !== "https:" || url.username.length > 0 || url.password.length > 0) {
       throw new Error("download URL must be credential-free HTTPS");
     }
@@ -93,9 +102,10 @@ export class RemoteToolchainRuntime {
   async download(url: string, destination: string): Promise<void> {
     this.assertDownloadUrl(url);
     this.assertTemporary(destination);
-    await this.run([
-      "curl", "--fail", "--location", "--silent", "--show-error", "--output", destination, url,
-    ], "download remote toolchain archive");
+    await this.run(
+      ["curl", "--fail", "--location", "--silent", "--show-error", "--output", destination, url],
+      "download remote toolchain archive",
+    );
   }
 
   async sha256(path: string): Promise<string> {
@@ -119,11 +129,19 @@ export class RemoteToolchainRuntime {
     if (!/^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(spec)) {
       throw new Error("package manager specifier is invalid");
     }
-    await this.run([
-      posix.join(nodeRoot, "bin", "node"),
-      posix.join(nodeRoot, "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-      "install", "--global", "--prefix", nodeRoot, "--", spec,
-    ], "install remote package manager");
+    await this.run(
+      [
+        posix.join(nodeRoot, "bin", "node"),
+        posix.join(nodeRoot, "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+        "install",
+        "--global",
+        "--prefix",
+        nodeRoot,
+        "--",
+        spec,
+      ],
+      "install remote package manager",
+    );
   }
 
   async promote(from: string, to: string): Promise<void> {
@@ -132,14 +150,18 @@ export class RemoteToolchainRuntime {
     if (to.startsWith(`${this.temporaryRoot}/`) || to === this.temporaryRoot) {
       throw new Error("promotion target must be outside the temporary root");
     }
-    await this.run([
-      "sh", "-ceu",
-      'umask 077; root=$1; source=$2; target=$3; mkdir -p -- "$root/.locks" "$(dirname -- "$target")"; exec 9>"$root/.locks/promote.lock"; flock -x 9; if [ ! -e "$target" ]; then mv -- "$source" "$target"; fi',
-      "remote-runner-toolchain-promote",
-      this.toolchainRoot,
-      from,
-      to,
-    ], "promote remote toolchain");
+    await this.run(
+      [
+        "sh",
+        "-ceu",
+        'umask 077; root=$1; source=$2; target=$3; mkdir -p -- "$root/.locks" "$(dirname -- "$target")"; exec 9>"$root/.locks/promote.lock"; flock -x 9; if [ ! -e "$target" ]; then mv -- "$source" "$target"; fi',
+        "remote-runner-toolchain-promote",
+        this.toolchainRoot,
+        from,
+        to,
+      ],
+      "promote remote toolchain",
+    );
   }
 
   async cleanup(path: string): Promise<void> {

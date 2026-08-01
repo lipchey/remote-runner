@@ -42,6 +42,7 @@
 ### Task 1: Bootstrap the typed CLI and injected runtime
 
 **Files:**
+
 - Create: `package.json`
 - Create: `pnpm-lock.yaml`
 - Create: `tsconfig.json`
@@ -141,6 +142,7 @@ rtk git commit -m "feat: bootstrap remote-runner CLI"
 ### Task 2: Parse a closed-schema profile and confine paths
 
 **Files:**
+
 - Create: `src/config/types.ts`
 - Create: `src/config/load-manifest.ts`
 - Create: `src/runtime/paths.ts`
@@ -174,11 +176,17 @@ profiles:
 describe("loadManifestText", () => {
   it("accepts v1", () => expect(loadManifestText(valid).profiles[0]?.id).toBe("verify-full"));
   it("rejects unknown keys", () =>
-    expect(() => loadManifestText(valid.replace("mode: auto", "mode: auto\n    typo: true"))).toThrow("unknown profile field: typo"));
+    expect(() => loadManifestText(valid.replace("mode: auto", "mode: auto\n    typo: true"))).toThrow(
+      "unknown profile field: typo",
+    ));
   it("rejects shell strings", () =>
-    expect(() => loadManifestText(valid.replace('["./scripts/verify", "--full"]', '"./scripts/verify --full"'))).toThrow("argument array"));
+    expect(() =>
+      loadManifestText(valid.replace('["./scripts/verify", "--full"]', '"./scripts/verify --full"')),
+    ).toThrow("argument array"));
   it("rejects destructive roots", () =>
-    expect(() => loadManifestText(valid.replace("~/.cache/remote-runner/workspaces", "/tmp"))).toThrow("generated root"));
+    expect(() => loadManifestText(valid.replace("~/.cache/remote-runner/workspaces", "/tmp"))).toThrow(
+      "generated root",
+    ));
 });
 ```
 
@@ -206,7 +214,10 @@ export interface Profile {
   notifications: { policy: "outage-recovery" };
   benchmark: { samples: number; workloads: Array<{ id: string; command: string[] }> };
 }
-export interface ManifestV1 { schemaVersion: 1; profiles: Profile[] }
+export interface ManifestV1 {
+  schemaVersion: 1;
+  profiles: Profile[];
+}
 ```
 
 ```ts
@@ -237,6 +248,7 @@ rtk git commit -m "feat: validate remote-runner profiles"
 ### Task 3: Add opaque identity, locks, state, and redacted logs
 
 **Files:**
+
 - Create: `src/runtime/identity.ts`
 - Create: `src/runtime/lock.ts`
 - Create: `src/runtime/state.ts`
@@ -300,6 +312,7 @@ rtk git commit -m "feat: persist confined runner state"
 ### Task 4: Implement strict SSH transport and stable availability reasons
 
 **Files:**
+
 - Create: `src/ssh/client.ts`
 - Create: `src/ssh/probe.ts`
 - Test: `tests/unit/ssh/client.test.ts`
@@ -310,10 +323,15 @@ rtk git commit -m "feat: persist confined runner state"
 ```ts
 it("forces batch mode, strict host keys, and a bounded timeout", () => {
   expect(sshArguments("admin@pop-os", ["true"], 4)).toEqual([
-    "-o", "BatchMode=yes",
-    "-o", "StrictHostKeyChecking=yes",
-    "-o", "ConnectTimeout=4",
-    "--", "admin@pop-os", "true",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=yes",
+    "-o",
+    "ConnectTimeout=4",
+    "--",
+    "admin@pop-os",
+    "true",
   ]);
 });
 
@@ -333,13 +351,7 @@ Expected: FAIL because the SSH modules do not exist.
 
 ```ts
 export type UnavailableReason =
-  | "dns"
-  | "host-key"
-  | "authentication"
-  | "transport"
-  | "remote-shell"
-  | "capacity"
-  | "bootstrap";
+  "dns" | "host-key" | "authentication" | "transport" | "remote-shell" | "capacity" | "bootstrap";
 export type ProbeResult = { ok: true } | { ok: false; reason: UnavailableReason };
 ```
 
@@ -360,6 +372,7 @@ rtk git commit -m "feat: probe trusted remote hosts"
 ### Task 5: Reconcile confined Git workspaces
 
 **Files:**
+
 - Create: `src/workspace/git-workspace.ts`
 - Test: `tests/unit/workspace/git-workspace.test.ts`
 
@@ -411,6 +424,7 @@ rtk git commit -m "feat: reconcile remote git workspaces"
 ### Task 6: Reconcile and flush one-way Mutagen sessions
 
 **Files:**
+
 - Create: `src/sync/mutagen.ts`
 - Test: `tests/unit/sync/mutagen.test.ts`
 
@@ -422,15 +436,29 @@ it("pauses before Git reset, resumes after reset, and flushes before setup", asy
   const session = await pauseForGitReconcile(profile, workspace, process);
   await resumeAndFlush(session, process);
   expect(process.labels()).toEqual([
-    "daemon-start", "session-list", "session-pause", "session-resume", "session-flush",
+    "daemon-start",
+    "session-list",
+    "session-pause",
+    "session-resume",
+    "session-flush",
   ]);
 });
 
 it("always ignores generated and secret material", () => {
-  expect(compileIgnores(profile.sync.ignores)).toEqual(expect.arrayContaining([
-    ".git", "node_modules", ".pnpm-store", ".nx", "dist", "coverage",
-    ".artifacts", ".env", ".age-key.age", ".tools/gitleaks",
-  ]));
+  expect(compileIgnores(profile.sync.ignores)).toEqual(
+    expect.arrayContaining([
+      ".git",
+      "node_modules",
+      ".pnpm-store",
+      ".nx",
+      "dist",
+      "coverage",
+      ".artifacts",
+      ".env",
+      ".age-key.age",
+      ".tools/gitleaks",
+    ]),
+  );
 });
 ```
 
@@ -447,8 +475,7 @@ export interface SyncResult {
   flushDurationMs: number;
   transferredBytes?: number;
 }
-export const sessionName = (consumer: string, identity: string): string =>
-  `remote-runner-${consumer}-${identity}`;
+export const sessionName = (consumer: string, identity: string): string => `remote-runner-${consumer}-${identity}`;
 ```
 
 `pauseForGitReconcile` starts the daemon idempotently, creates a missing session with alpha as the laptop and beta as the generated SSH worktree in `one-way-replica`, and pauses it before Git reset. `resumeAndFlush` resumes only after Git/submodule reconciliation, rejects conflict/disconnected states after one repair attempt, and requires a successful explicit flush before returning.
@@ -468,6 +495,7 @@ rtk git commit -m "feat: synchronize remote workspaces"
 ### Task 7: Install exact remote Node/pnpm, uv, and gitleaks, then fingerprint setup
 
 **Files:**
+
 - Create: `src/bootstrap/fingerprint.ts`
 - Create: `src/bootstrap/node.ts`
 - Create: `src/bootstrap/uv.ts`
@@ -483,10 +511,12 @@ rtk git commit -m "feat: synchronize remote workspaces"
 
 ```ts
 it("binds environment identity and declared files in sorted order", async () => {
-  expect(await dependencyFingerprint(runtime, profile, {
-    node: "26.5.0-linux-x64",
-    packageManager: "pnpm@11.9.0",
-  })).toBe("sha256:fixture-environment-and-inputs");
+  expect(
+    await dependencyFingerprint(runtime, profile, {
+      node: "26.5.0-linux-x64",
+      packageManager: "pnpm@11.9.0",
+    }),
+  ).toBe("sha256:fixture-environment-and-inputs");
 });
 
 it("never promotes an archive whose published checksum mismatches", async () => {
@@ -533,6 +563,7 @@ rtk git commit -m "feat: bootstrap native remote dependencies"
 ### Task 8: Frame ephemeral secrets and launch the remote child
 
 **Files:**
+
 - Create: `src/secrets/provider.ts`
 - Create: `src/secrets/frame.ts`
 - Create: `assets/remote-launcher.mjs`
@@ -544,10 +575,7 @@ rtk git commit -m "feat: bootstrap native remote dependencies"
 
 ```ts
 it("frames only allowlisted names and never exposes values in metadata", () => {
-  const result = encodeSecretFrame(
-    { NEON_DEV_DATABASE_URL: "postgres://secret-canary" },
-    ["NEON_DEV_DATABASE_URL"],
-  );
+  const result = encodeSecretFrame({ NEON_DEV_DATABASE_URL: "postgres://secret-canary" }, ["NEON_DEV_DATABASE_URL"]);
   expect(result.metadata).toEqual({ names: ["NEON_DEV_DATABASE_URL"], bytes: result.stdin.length });
   expect(JSON.stringify(result.metadata)).not.toContain("secret-canary");
 });
@@ -561,8 +589,9 @@ it.each(["duplicate", "oversized", "unknown", "malformed"])("rejects %s input be
 it("captures provider JSON and rejects every non-allowlisted key", async () => {
   const values = await runSecretProvider(fakeProvider('{"NEON_DEV_DATABASE_URL":"canary"}'), ["NEON_DEV_DATABASE_URL"]);
   expect(values).toEqual({ NEON_DEV_DATABASE_URL: "canary" });
-  await expect(runSecretProvider(fakeProvider('{"NEON_DATABASE_URL":"production"}'), ["NEON_DEV_DATABASE_URL"]))
-    .rejects.toThrow("unallowlisted");
+  await expect(
+    runSecretProvider(fakeProvider('{"NEON_DATABASE_URL":"production"}'), ["NEON_DEV_DATABASE_URL"]),
+  ).rejects.toThrow("unallowlisted");
 });
 ```
 
@@ -580,7 +609,8 @@ export function encodeSecretFrame(values: Record<string, string>, allow: readonl
   if (entries.length !== new Set(entries.map(([name]) => name)).size) throw new Error("duplicate secret");
   for (const [name, value] of entries) {
     if (!allow.includes(name)) throw new Error(`unallowlisted secret: ${name}`);
-    if (!/^[A-Z][A-Z0-9_]*$/.test(name) || Buffer.byteLength(value) > 64 * 1024) throw new Error("invalid secret frame");
+    if (!/^[A-Z][A-Z0-9_]*$/.test(name) || Buffer.byteLength(value) > 64 * 1024)
+      throw new Error("invalid secret frame");
   }
   const stdin = Buffer.concat([MAGIC, Buffer.from(JSON.stringify(entries), "utf8")]);
   return { stdin, metadata: { names: entries.map(([name]) => name), bytes: stdin.length } };
@@ -604,6 +634,7 @@ rtk git commit -m "feat: stream ephemeral remote secrets"
 ### Task 9: Orchestrate preparation, fallback, and authoritative child results
 
 **Files:**
+
 - Create: `src/run/prepare.ts`
 - Create: `src/run/run-profile.ts`
 - Modify: `src/cli.ts`
@@ -614,7 +645,11 @@ rtk git commit -m "feat: stream ephemeral remote secrets"
 
 ```ts
 it("falls back locally only when auto preparation fails before child start", async () => {
-  const runtime = fakeRunRuntime({ prepare: { ok: false, reason: "transport" }, remoteChildStarted: false, localExit: 17 });
+  const runtime = fakeRunRuntime({
+    prepare: { ok: false, reason: "transport" },
+    remoteChildStarted: false,
+    localExit: 17,
+  });
   expect(await runProfile(runtime, profile, ["./verify", "--full"], "auto")).toBe(17);
   expect(runtime.localRuns).toBe(1);
 });
@@ -635,12 +670,17 @@ Expected: FAIL because the run state machine is missing.
 
 ```ts
 export const PREPARATION_STEPS = [
-  "validate", "lock", "probe", "sync-pause", "git-workspace",
-  "sync-resume-flush", "bootstrap", "secrets", "child-start",
+  "validate",
+  "lock",
+  "probe",
+  "sync-pause",
+  "git-workspace",
+  "sync-resume-flush",
+  "bootstrap",
+  "secrets",
+  "child-start",
 ] as const;
-export type RunSelection =
-  | { kind: "local"; reason: string }
-  | { kind: "remote"; childStarted: boolean };
+export type RunSelection = { kind: "local"; reason: string } | { kind: "remote"; childStarted: boolean };
 ```
 
 `local` bypasses remote state. `remote` fails closed on any preparation error. `auto` retries only bounded idempotent preparation and selects local before the child marker when fallback is `local`. Release the preparation lock immediately after the marker. Attach remote or local stdout/stderr to the terminal and return the selected child’s exit code or signal mapping unchanged.
@@ -660,6 +700,7 @@ rtk git commit -m "feat: select remote or local execution"
 ### Task 10: Send deduplicated Telegram outage and recovery notifications
 
 **Files:**
+
 - Create: `src/notifications/telegram.ts`
 - Create: `src/notifications/outage.ts`
 - Test: `tests/unit/notifications/telegram.test.ts`
@@ -716,6 +757,7 @@ rtk git commit -m "feat: notify remote outages and recovery"
 ### Task 11: Install and self-heal the macOS controller
 
 **Files:**
+
 - Create: `src/controller/controller.ts`
 - Create: `src/install/macos.ts`
 - Create: `src/install/mutagen.ts`
@@ -786,6 +828,7 @@ rtk git commit -m "feat: self-heal remote-runner at login"
 ### Task 12: Add status, doctor, logs, confined repair, and the runbook
 
 **Files:**
+
 - Create: `src/diagnostics/doctor.ts`
 - Create: `src/diagnostics/repair.ts`
 - Modify: `src/cli.ts`
@@ -798,7 +841,9 @@ rtk git commit -m "feat: self-heal remote-runner at login"
 ```ts
 it("reports stable reason codes without raw SSH output", async () => {
   const report = await doctor(fakeDoctorRuntime({ sshStderr: "postgres://secret-canary", reason: "transport" }));
-  expect(report.checks).toContainEqual(expect.objectContaining({ id: "ssh.transport", status: "fail", reason: "transport" }));
+  expect(report.checks).toContainEqual(
+    expect.objectContaining({ id: "ssh.transport", status: "fail", reason: "transport" }),
+  );
   expect(JSON.stringify(report)).not.toContain("secret-canary");
 });
 
@@ -848,6 +893,7 @@ rtk git commit -m "feat: diagnose and repair remote-runner"
 ### Task 13: Benchmark laptop and workstation workloads
 
 **Files:**
+
 - Create: `src/benchmark/run-benchmark.ts`
 - Modify: `src/cli.ts`
 - Test: `tests/unit/benchmark/run-benchmark.test.ts`
@@ -901,6 +947,7 @@ rtk git commit -m "feat: compare local and remote workloads"
 ### Task 14: Prove live acceptance, lifecycle recovery, and publish readiness
 
 **Files:**
+
 - Create: `tests/live/acceptance.test.ts`
 - Create: `tests/live/secret-canary.test.ts`
 - Create: `tests/live/runbook.test.ts`
@@ -912,11 +959,22 @@ rtk git commit -m "feat: compare local and remote workloads"
 
 ```ts
 const REQUIRED_SCENARIOS = [
-  "clean-install", "login-start", "empty-workstation-bootstrap", "dirty-source",
-  "untracked-source", "generated-isolation", "fingerprint-idempotency",
-  "remote-exit", "no-post-child-fallback", "outage-alert", "outage-dedup",
-  "recovery-alert", "controller-self-heal", "workstation-reboot",
-  "secret-canary", "runbook-repairs",
+  "clean-install",
+  "login-start",
+  "empty-workstation-bootstrap",
+  "dirty-source",
+  "untracked-source",
+  "generated-isolation",
+  "fingerprint-idempotency",
+  "remote-exit",
+  "no-post-child-fallback",
+  "outage-alert",
+  "outage-dedup",
+  "recovery-alert",
+  "controller-self-heal",
+  "workstation-reboot",
+  "secret-canary",
+  "runbook-repairs",
 ] as const;
 
 it("records a passing receipt for every required live scenario", async () => {

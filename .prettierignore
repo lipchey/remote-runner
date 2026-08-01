@@ -1,0 +1,8 @@
+.artifacts/
+.codegraph/
+.remote-execute-state/
+.remote-runner-state/
+coverage/
+dist/
+node_modules/
+pnpm-lock.yaml

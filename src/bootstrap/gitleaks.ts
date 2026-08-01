@@ -28,7 +28,11 @@ export function gitleaksLinuxArchitecture(machine: string): "x64" | "arm64" {
 export async function installGitleaks(runtime: GitleaksInstallRuntime, options: GitleaksInstallOptions) {
   if (!VERSION.test(options.version)) throw new Error("gitleaks version must be exact semver");
   if (!SHA256.test(options.sha256)) throw new Error("gitleaks checksum must be pinned SHA-256");
-  if (!posix.isAbsolute(options.toolchainRoot) || posix.normalize(options.toolchainRoot) !== options.toolchainRoot || options.toolchainRoot === "/") {
+  if (
+    !posix.isAbsolute(options.toolchainRoot) ||
+    posix.normalize(options.toolchainRoot) !== options.toolchainRoot ||
+    options.toolchainRoot === "/"
+  ) {
     throw new Error("toolchain root must be a canonical absolute path");
   }
   const arch = gitleaksLinuxArchitecture(options.machine);
@@ -42,7 +46,10 @@ export async function installGitleaks(runtime: GitleaksInstallRuntime, options: 
   const stagedRoot = posix.join(temporary, "extract");
   const finalRoot = posix.join(options.toolchainRoot, `gitleaks-${options.version}-linux-${arch}`);
   try {
-    await runtime.download(`https://github.com/gitleaks/gitleaks/releases/download/v${options.version}/${archive}`, archivePath);
+    await runtime.download(
+      `https://github.com/gitleaks/gitleaks/releases/download/v${options.version}/${archive}`,
+      archivePath,
+    );
     if ((await runtime.sha256(archivePath)) !== options.sha256) throw new Error("gitleaks archive checksum mismatch");
     await runtime.extract(archivePath, stagedRoot);
     await runtime.promote(stagedRoot, finalRoot);

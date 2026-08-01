@@ -1,13 +1,4 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rename,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,9 +14,7 @@ import {
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(
-    temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })),
-  );
+  await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
 async function fixture(): Promise<{
@@ -140,7 +129,9 @@ describe("durable prewarm queue", () => {
     await symlink(outside, queueRoot);
 
     await expect(publishPrewarmRequest(home, request)).rejects.toThrow(/queue root/u);
-    await expect(readFile(join(outside, `${request.consumer}-${request.profile}-${request.identity}.json`))).rejects.toMatchObject({
+    await expect(
+      readFile(join(outside, `${request.consumer}-${request.profile}-${request.identity}.json`)),
+    ).rejects.toMatchObject({
       code: "ENOENT",
     });
   });

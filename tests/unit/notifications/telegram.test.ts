@@ -16,12 +16,17 @@ class FakeRuntime implements TelegramRuntime {
   kind: "file" | "other" = "file";
   contents = 'BOT_TOKEN="123456:abcdefghijklmnopqrstuvwxyz_ABCD"\nCHAT_ID=-100123456\n';
   response = { status: 200, body: bytes('{"ok":true}') };
-  async currentUid() { return this.uid; }
+  async currentUid() {
+    return this.uid;
+  }
   async readConfigFile() {
     const contents = bytes(this.contents);
     return { contents, uid: this.owner, mode: this.mode, kind: this.kind, size: contents.byteLength };
   }
-  async request(request: unknown) { this.requests.push(request); return this.response; }
+  async request(request: unknown) {
+    this.requests.push(request);
+    return this.response;
+  }
 }
 
 describe("Telegram transport", () => {
@@ -84,10 +89,16 @@ describe("Telegram transport", () => {
     let message = "";
     try {
       await sendTelegramNotification(runtime, config, {
-        kind: "recovery", consumer: "ariadne", profile: "verify-full", remoteLabel: "pop-os",
-        reason: "transport", timestamp: "2026-07-31T16:00:00.000Z",
+        kind: "recovery",
+        consumer: "ariadne",
+        profile: "verify-full",
+        remoteLabel: "pop-os",
+        reason: "transport",
+        timestamp: "2026-07-31T16:00:00.000Z",
       });
-    } catch (error) { message = error instanceof Error ? error.message : String(error); }
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
     expect(message).toBe("Telegram notification failed");
     expect(message).not.toContain("secret-canary");
     expect(message).not.toContain(config.botToken);

@@ -45,9 +45,15 @@ export class NodeProcessRuntime implements SshProcessRuntime {
         target.push(chunk);
         return current + chunk.byteLength;
       };
-      child.stdout.on("data", (chunk: Buffer) => { stdoutBytes = capture(stdout, chunk, stdoutBytes); });
-      child.stderr.on("data", (chunk: Buffer) => { stderrBytes = capture(stderr, chunk, stderrBytes); });
-      child.on("error", () => { spawned = false; });
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdoutBytes = capture(stdout, chunk, stdoutBytes);
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderrBytes = capture(stderr, chunk, stderrBytes);
+      });
+      child.on("error", () => {
+        spawned = false;
+      });
       child.on("close", (code, signal) => {
         if (settled) return;
         settled = true;
@@ -75,8 +81,12 @@ export class NodeProcessRuntime implements SshProcessRuntime {
       process.kill(pid, 0);
       return true;
     } catch (caught) {
-      return typeof caught === "object" && caught !== null && "code" in caught &&
-        (caught as { readonly code?: unknown }).code === "EPERM";
+      return (
+        typeof caught === "object" &&
+        caught !== null &&
+        "code" in caught &&
+        (caught as { readonly code?: unknown }).code === "EPERM"
+      );
     }
   }
 }
@@ -108,9 +118,7 @@ function retainedPrefixLength(contents: Buffer, marker: Buffer): number {
   return 0;
 }
 
-export async function runStreamingProcess(
-  request: StreamingProcessRequest,
-): Promise<StreamingProcessResult> {
+export async function runStreamingProcess(request: StreamingProcessRequest): Promise<StreamingProcessResult> {
   if (request.marker.byteLength === 0) throw new Error("stream marker must not be empty");
   const marker = Buffer.from(request.marker);
   return new Promise((resolve, reject) => {
@@ -133,7 +141,11 @@ export async function runStreamingProcess(
     };
     const write = (writer: (chunk: Uint8Array) => void, chunk: Buffer): void => {
       if (chunk.byteLength === 0) return;
-      try { writer(chunk); } catch (caught) { failStream(caught); }
+      try {
+        writer(chunk);
+      } catch (caught) {
+        failStream(caught);
+      }
     };
     child.stdout.on("data", (chunk: Buffer) => write(request.stdout, chunk));
     child.stderr.on("data", (chunk: Buffer) => {
@@ -147,10 +159,12 @@ export async function runStreamingProcess(
         write(request.stderr, contents.subarray(0, markerIndex));
         pending = Buffer.alloc(0);
         markerSeen = true;
-        markerPromise = Promise.resolve().then(request.onMarker).catch((caught) => {
-          failStream(caught);
-          throw caught;
-        });
+        markerPromise = Promise.resolve()
+          .then(request.onMarker)
+          .catch((caught) => {
+            failStream(caught);
+            throw caught;
+          });
         write(request.stderr, contents.subarray(markerIndex + marker.byteLength));
         return;
       }
@@ -162,16 +176,19 @@ export async function runStreamingProcess(
       if (!markerSeen) write(request.stderr, pending);
       pending = Buffer.alloc(0);
     });
-    child.on("error", () => { spawned = false; });
+    child.on("error", () => {
+      spawned = false;
+    });
     child.on("close", (code, signal) => {
       void markerPromise.then(() => {
         if (streamFailure !== undefined) reject(streamFailure);
-        else resolve({
-          exitCode: spawned ? (code ?? signalExitCode(signal)) : 127,
-          signal,
-          markerSeen,
-          spawned,
-        });
+        else
+          resolve({
+            exitCode: spawned ? (code ?? signalExitCode(signal)) : 127,
+            signal,
+            markerSeen,
+            spawned,
+          });
       }, reject);
     });
     child.stdin.on("error", () => undefined);

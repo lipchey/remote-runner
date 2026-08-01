@@ -7,23 +7,57 @@ class FakeServices implements ProfileExecutionServices {
   readonly calls: string[] = [];
   failProbe = false;
   remoteExit = 0;
-  async validate() { this.calls.push("validate"); }
-  async acquireLock() { this.calls.push("lock"); return async () => { this.calls.push("release"); }; }
-  async probe() { this.calls.push("probe"); if (this.failProbe) throw new Error("offline"); }
-  async pauseSync() { this.calls.push("pause"); }
-  async reconcileWorkspace() { this.calls.push("workspace"); }
-  async resumeAndFlush() { this.calls.push("flush"); }
-  async bootstrap() { this.calls.push("bootstrap"); }
-  async collectSecrets() { this.calls.push("secrets"); return { SECRET: "secret-canary" }; }
-  async startRemote(_command: readonly string[], _secrets: Readonly<Record<string, string>>, marker: () => Promise<void>) {
+  async validate() {
+    this.calls.push("validate");
+  }
+  async acquireLock() {
+    this.calls.push("lock");
+    return async () => {
+      this.calls.push("release");
+    };
+  }
+  async probe() {
+    this.calls.push("probe");
+    if (this.failProbe) throw new Error("offline");
+  }
+  async pauseSync() {
+    this.calls.push("pause");
+  }
+  async reconcileWorkspace() {
+    this.calls.push("workspace");
+  }
+  async resumeAndFlush() {
+    this.calls.push("flush");
+  }
+  async bootstrap() {
+    this.calls.push("bootstrap");
+  }
+  async collectSecrets() {
+    this.calls.push("secrets");
+    return { SECRET: "secret-canary" };
+  }
+  async startRemote(
+    _command: readonly string[],
+    _secrets: Readonly<Record<string, string>>,
+    marker: () => Promise<void>,
+  ) {
     this.calls.push("remote");
     await marker();
     return { kind: "completed" as const, exitCode: this.remoteExit };
   }
-  async runLocal() { this.calls.push("local"); return 17; }
-  async recordFallback(reason: string) { this.calls.push(`outage:${reason}`); }
-  async recordRemoteChildStarted() { this.calls.push("recovery"); }
-  reportUnavailable(reason: string) { this.calls.push(`unavailable:${reason}`); }
+  async runLocal() {
+    this.calls.push("local");
+    return 17;
+  }
+  async recordFallback(reason: string) {
+    this.calls.push(`outage:${reason}`);
+  }
+  async recordRemoteChildStarted() {
+    this.calls.push("recovery");
+  }
+  reportUnavailable(reason: string) {
+    this.calls.push(`unavailable:${reason}`);
+  }
 }
 
 const profile = { mode: "auto" as const, fallback: "local" as const };
@@ -37,8 +71,13 @@ describe("profile runtime composition", () => {
 
     expect(code).toBe(17);
     expect(services.calls).toEqual([
-      "validate", "lock", "probe", "release", "unavailable:transport",
-      "outage:transport", "local",
+      "validate",
+      "lock",
+      "probe",
+      "release",
+      "unavailable:transport",
+      "outage:transport",
+      "local",
     ]);
   });
 
@@ -50,8 +89,17 @@ describe("profile runtime composition", () => {
 
     expect(code).toBe(23);
     expect(services.calls).toEqual([
-      "validate", "lock", "probe", "pause", "workspace", "flush", "bootstrap", "secrets",
-      "remote", "release", "recovery",
+      "validate",
+      "lock",
+      "probe",
+      "pause",
+      "workspace",
+      "flush",
+      "bootstrap",
+      "secrets",
+      "remote",
+      "release",
+      "recovery",
     ]);
     expect(services.calls).not.toContain("local");
   });

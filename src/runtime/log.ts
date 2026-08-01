@@ -89,11 +89,7 @@ function sanitize(value: unknown, secrets: ReadonlySet<string>, seen: Set<object
   }
 }
 
-export function createJsonlLogger(
-  files: LogFileSystem,
-  path: string,
-  options: JsonlLoggerOptions = {},
-): JsonlLogger {
+export function createJsonlLogger(files: LogFileSystem, path: string, options: JsonlLoggerOptions = {}): JsonlLogger {
   const maxBytes = options.maxBytes ?? DEFAULT_LOG_MAX_BYTES;
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
     throw new Error("log maxBytes must be a positive safe integer");

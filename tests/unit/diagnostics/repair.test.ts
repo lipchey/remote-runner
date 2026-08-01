@@ -12,11 +12,21 @@ class FakeRepairRuntime implements RepairRuntime {
     { id: "workspace-reconcile", target: `${this.identityRoot}/workspace`, destructive: false },
   ];
 
-  async inspect() { return this.actions; }
-  async readDryRun() { return this.receipt; }
-  async writeDryRun(receipt: RepairReceipt) { this.receipt = receipt; }
-  async apply(action: RepairAction) { this.mutations.push(action); }
-  now() { return "2026-07-31T12:00:00.000Z"; }
+  async inspect() {
+    return this.actions;
+  }
+  async readDryRun() {
+    return this.receipt;
+  }
+  async writeDryRun(receipt: RepairReceipt) {
+    this.receipt = receipt;
+  }
+  async apply(action: RepairAction) {
+    this.mutations.push(action);
+  }
+  now() {
+    return "2026-07-31T12:00:00.000Z";
+  }
 }
 
 describe("repair", () => {
@@ -33,16 +43,12 @@ describe("repair", () => {
   it("refuses apply until the exact current plan has a prior dry-run receipt", async () => {
     const runtime = new FakeRepairRuntime();
 
-    await expect(repair(runtime, "verify-full", { apply: true })).rejects.toThrow(
-      "run repair --dry-run first",
-    );
+    await expect(repair(runtime, "verify-full", { apply: true })).rejects.toThrow("run repair --dry-run first");
     expect(runtime.mutations).toHaveLength(0);
 
     await repair(runtime, "verify-full", { apply: false });
     runtime.actions = [{ id: "workspace-reconcile", target: `${runtime.identityRoot}/changed`, destructive: false }];
-    await expect(repair(runtime, "verify-full", { apply: true })).rejects.toThrow(
-      "repair plan changed",
-    );
+    await expect(repair(runtime, "verify-full", { apply: true })).rejects.toThrow("repair plan changed");
     expect(runtime.mutations).toHaveLength(0);
   });
 

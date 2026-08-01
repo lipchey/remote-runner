@@ -17,11 +17,7 @@ function record(value: unknown, label: string): UnknownRecord {
   return value as UnknownRecord;
 }
 
-function closed(
-  value: unknown,
-  fields: readonly string[],
-  label: string,
-): UnknownRecord {
+function closed(value: unknown, fields: readonly string[], label: string): UnknownRecord {
   const result = record(value, label);
   const allowed = new Set(fields);
   for (const field of Object.keys(result)) {
@@ -39,52 +35,29 @@ function nonEmptyString(value: unknown, label: string): string {
   return value;
 }
 
-function literal<T extends string>(
-  value: unknown,
-  expected: T,
-  label: string,
-): T {
+function literal<T extends string>(value: unknown, expected: T, label: string): T {
   if (value !== expected) {
     throw new Error(`${label} must be ${expected}`);
   }
   return expected;
 }
 
-function oneOf<T extends string>(
-  value: unknown,
-  allowed: readonly T[],
-  label: string,
-): T {
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
   if (typeof value !== "string" || !allowed.includes(value as T)) {
     throw new Error(`${label} must be one of ${allowed.join(", ")}`);
   }
   return value as T;
 }
 
-function boundedInteger(
-  value: unknown,
-  maximum: number,
-  label: string,
-): number {
-  if (
-    typeof value !== "number" ||
-    !Number.isSafeInteger(value) ||
-    value <= 0 ||
-    value > maximum
-  ) {
+function boundedInteger(value: unknown, maximum: number, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > maximum) {
     throw new Error(`${label} must be a positive integer no greater than ${maximum}`);
   }
   return value;
 }
 
-function stringArray(
-  value: unknown,
-  label: string,
-): string[] {
-  if (
-    !Array.isArray(value) ||
-    value.some((entry) => typeof entry !== "string" || entry.trim().length === 0)
-  ) {
+function stringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry.trim().length === 0)) {
     throw new Error(`${label} must be an array of non-empty strings`);
   }
   return [...value] as string[];
@@ -200,70 +173,37 @@ function parseProfile(value: unknown): Profile {
     throw new Error(`invalid profile id: ${id}`);
   }
 
-  const remote = closed(
-    source.remote,
-    ["label", "target", "hostKeySha256"],
-    "remote",
-  );
-  const hostKeySha256 = nonEmptyString(
-    remote.hostKeySha256,
-    "remote hostKeySha256",
-  );
+  const remote = closed(source.remote, ["label", "target", "hostKeySha256"], "remote");
+  const hostKeySha256 = nonEmptyString(remote.hostKeySha256, "remote hostKeySha256");
   if (!/^SHA256:\S+$/.test(hostKeySha256)) {
     throw new Error("remote hostKeySha256 must be a trusted SHA256: fingerprint");
   }
 
-  const workspace = closed(
-    source.workspace,
-    ["generatedRoot", "baseRef"],
-    "workspace",
-  );
+  const workspace = closed(source.workspace, ["generatedRoot", "baseRef"], "workspace");
   if (workspace.generatedRoot !== GENERATED_ROOT) {
     throw new Error(`generated root must be ${GENERATED_ROOT}`);
   }
-  const baseRef = workspace.baseRef === undefined
-    ? undefined
-    : nonEmptyString(workspace.baseRef, "workspace base ref");
+  const baseRef = workspace.baseRef === undefined ? undefined : nonEmptyString(workspace.baseRef, "workspace base ref");
   if (baseRef !== undefined && !BASE_REF.test(baseRef)) {
     throw new Error("workspace base ref must be a safe remote-tracking name");
   }
 
-  const probes = closed(
-    source.probes,
-    ["attempts", "connectTimeoutSeconds", "minimumFreeBytes"],
-    "probes",
-  );
+  const probes = closed(source.probes, ["attempts", "connectTimeoutSeconds", "minimumFreeBytes"], "probes");
   if (probes.attempts !== 2) {
     throw new Error("probe attempts must be exactly 2");
   }
 
   const sync = closed(source.sync, ["provider", "mode", "ignores"], "sync");
-  const bootstrap = closed(
-    source.bootstrap,
-    ["node", "packageManager", "setup", "ensure", "fingerprint"],
-    "bootstrap",
-  );
-  const workload = closed(
-    source.workload,
-    ["command", "childEnvironment"],
-    "workload",
-  );
+  const bootstrap = closed(source.bootstrap, ["node", "packageManager", "setup", "ensure", "fingerprint"], "bootstrap");
+  const workload = closed(source.workload, ["command", "childEnvironment"], "workload");
   const secrets = closed(source.secrets, ["allow", "provider", "dotenv"], "secrets");
   const hasProvider = secrets.provider !== undefined;
   const hasDotenv = secrets.dotenv !== undefined;
   if (hasProvider === hasDotenv) {
     throw new Error("secrets must declare exactly one of provider or dotenv");
   }
-  const notifications = closed(
-    source.notifications,
-    ["policy"],
-    "notifications",
-  );
-  const benchmark = closed(
-    source.benchmark,
-    ["samples", "workloads"],
-    "benchmark",
-  );
+  const notifications = closed(source.notifications, ["policy"], "notifications");
+  const benchmark = closed(source.benchmark, ["samples", "workloads"], "benchmark");
   if (!Array.isArray(benchmark.workloads) || benchmark.workloads.length === 0) {
     throw new Error("benchmark workloads must be a non-empty array");
   }
@@ -300,16 +240,8 @@ function parseProfile(value: unknown): Profile {
     },
     probes: {
       attempts: 2,
-      connectTimeoutSeconds: boundedInteger(
-        probes.connectTimeoutSeconds,
-        300,
-        "probe connectTimeoutSeconds",
-      ),
-      minimumFreeBytes: boundedInteger(
-        probes.minimumFreeBytes,
-        Number.MAX_SAFE_INTEGER,
-        "probe minimumFreeBytes",
-      ),
+      connectTimeoutSeconds: boundedInteger(probes.connectTimeoutSeconds, 300, "probe connectTimeoutSeconds"),
+      minimumFreeBytes: boundedInteger(probes.minimumFreeBytes, Number.MAX_SAFE_INTEGER, "probe minimumFreeBytes"),
     },
     sync: {
       provider: literal(sync.provider, "mutagen", "sync provider"),
@@ -318,13 +250,9 @@ function parseProfile(value: unknown): Profile {
     },
     bootstrap: {
       node: literal(bootstrap.node, "local-exact", "bootstrap node"),
-      packageManager: assertSafeRepositoryPath(
-        nonEmptyString(bootstrap.packageManager, "bootstrap packageManager"),
-      ),
+      packageManager: assertSafeRepositoryPath(nonEmptyString(bootstrap.packageManager, "bootstrap packageManager")),
       setup: safePaths(bootstrap.setup, "bootstrap setup"),
-      ensure: bootstrap.ensure === undefined
-        ? []
-        : commandArrays(bootstrap.ensure, "bootstrap ensure command"),
+      ensure: bootstrap.ensure === undefined ? [] : commandArrays(bootstrap.ensure, "bootstrap ensure command"),
       fingerprint: bootstrapFingerprint(bootstrap.fingerprint),
     },
     workload: {
@@ -336,17 +264,11 @@ function parseProfile(value: unknown): Profile {
       ...(hasProvider
         ? { provider: commandArray(secrets.provider, "secrets provider") }
         : {
-            dotenv: assertSafeRepositoryPath(
-              nonEmptyString(secrets.dotenv, "secrets dotenv"),
-            ),
+            dotenv: assertSafeRepositoryPath(nonEmptyString(secrets.dotenv, "secrets dotenv")),
           }),
     },
     notifications: {
-      policy: literal(
-        notifications.policy,
-        "outage-recovery",
-        "notification policy",
-      ),
+      policy: literal(notifications.policy, "outage-recovery", "notification policy"),
     },
     benchmark: {
       samples: boundedInteger(benchmark.samples, 1000, "benchmark samples"),

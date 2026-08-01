@@ -4,11 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-  createJsonlLogger,
-  DEFAULT_LOG_MAX_BYTES,
-  type LogFileSystem,
-} from "../../../src/runtime/log.js";
+import { createJsonlLogger, DEFAULT_LOG_MAX_BYTES, type LogFileSystem } from "../../../src/runtime/log.js";
 
 const temporaryRoots: string[] = [];
 

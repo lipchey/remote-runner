@@ -77,9 +77,7 @@ describe("runCli", () => {
 
     expect(code).toBe(0);
     expect(calls).toEqual(["read:fixtures/profile.yaml"]);
-    expect(stdout).toEqual([
-      "valid profile: verify-full (fixtures/profile.yaml)",
-    ]);
+    expect(stdout).toEqual(["valid profile: verify-full (fixtures/profile.yaml)"]);
   });
 
   it("reports invalid manifests, missing profiles, and invalid validate arguments stably", async () => {
@@ -110,8 +108,13 @@ describe("runCli", () => {
       ["run", "verify-full", "--mode", "local", "--manifest", "profile.yaml", "--", "./scripts/verify", "--full"],
       { stdout: () => undefined, stderr: () => undefined },
       {
-        readFile: async (path) => { calls.push(["read", path]); return validManifest; },
-        ensureController: async () => { calls.push(["controller"]); },
+        readFile: async (path) => {
+          calls.push(["read", path]);
+          return validManifest;
+        },
+        ensureController: async () => {
+          calls.push(["controller"]);
+        },
         runProfile: async (profile, command, mode) => {
           calls.push(["run", profile.id, command, mode]);
           return 29;
@@ -191,9 +194,7 @@ describe("runCli", () => {
     );
 
     expect(code).toBe(0);
-    expect(errors).toEqual([
-      "remote-runner prewarm failed; worktree preserved and the first manual verify will retry",
-    ]);
+    expect(errors).toEqual(["remote-runner prewarm failed; worktree preserved and the first manual verify will retry"]);
   });
 
   it("continues through the automatic fallback policy when controller repair fails", async () => {
@@ -203,8 +204,14 @@ describe("runCli", () => {
       { stdout: () => undefined, stderr: (line) => calls.push(`error:${line}`) },
       {
         readFile: async () => validManifest,
-        ensureController: async () => { calls.push("controller"); throw new Error("stopped"); },
-        runProfile: async (_profile, _command, mode) => { calls.push(`run:${mode}`); return 0; },
+        ensureController: async () => {
+          calls.push("controller");
+          throw new Error("stopped");
+        },
+        runProfile: async (_profile, _command, mode) => {
+          calls.push(`run:${mode}`);
+          return 0;
+        },
       },
     );
     expect(code).toBe(0);
@@ -220,7 +227,10 @@ describe("runCli", () => {
     const io = { stdout: () => undefined, stderr: (line: string) => calls.push(`error:${line}`) };
     const dependencies = {
       readFile: async () => validManifest,
-      ensureController: async () => { calls.push("controller"); throw new Error("stopped"); },
+      ensureController: async () => {
+        calls.push("controller");
+        throw new Error("stopped");
+      },
       runProfile: async (_profile: unknown, _command: readonly string[], mode?: string) => {
         calls.push(`run:${mode}`);
         return 0;
@@ -229,18 +239,26 @@ describe("runCli", () => {
 
     expect(await runCli(["run", "verify-full", "--mode", "local"], io, dependencies)).toBe(0);
     expect(await runCli(["run", "verify-full", "--mode", "remote"], io, dependencies)).toBe(70);
-    expect(calls).toEqual([
-      "run:local",
-      "controller",
-      "error:remote-runner controller repair failed",
-    ]);
+    expect(calls).toEqual(["run:local", "controller", "error:remote-runner controller repair failed"]);
   });
 
   it("rejects malformed run syntax before reading the manifest", async () => {
     const errors: string[] = [];
-    const dependencies = { readFile: async () => { throw new Error("must not read"); } };
-    expect(await runCli(["run"], { stdout: () => undefined, stderr: (line) => errors.push(line) }, dependencies)).toBe(2);
-    expect(await runCli(["run", "verify-full", "--mode", "invalid", "--", "x"], { stdout: () => undefined, stderr: (line) => errors.push(line) }, dependencies)).toBe(2);
+    const dependencies = {
+      readFile: async () => {
+        throw new Error("must not read");
+      },
+    };
+    expect(await runCli(["run"], { stdout: () => undefined, stderr: (line) => errors.push(line) }, dependencies)).toBe(
+      2,
+    );
+    expect(
+      await runCli(
+        ["run", "verify-full", "--mode", "invalid", "--", "x"],
+        { stdout: () => undefined, stderr: (line) => errors.push(line) },
+        dependencies,
+      ),
+    ).toBe(2);
     expect(errors).toHaveLength(2);
   });
 
@@ -314,7 +332,10 @@ describe("runCli", () => {
       ["benchmark", "verify-full", "--manifest", "profile.yaml"],
       { stdout: (line) => stdout.push(line), stderr: () => undefined },
       {
-        readFile: async (path) => { calls.push(["read", path]); return validManifest; },
+        readFile: async (path) => {
+          calls.push(["read", path]);
+          return validManifest;
+        },
         benchmarkProfile: async (profile) => {
           calls.push(["benchmark", profile.id, profile.benchmark.samples]);
           return { profile: profile.id, rows: [], receiptPaths: ["one.json", "one.md"] };
@@ -323,9 +344,10 @@ describe("runCli", () => {
     );
 
     expect(code).toBe(0);
-    expect(calls).toEqual([["read", "profile.yaml"], ["benchmark", "verify-full", 3]]);
-    expect(stdout).toEqual([
-      '{"profile":"verify-full","rows":[],"receiptPaths":["one.json","one.md"]}',
+    expect(calls).toEqual([
+      ["read", "profile.yaml"],
+      ["benchmark", "verify-full", 3],
     ]);
+    expect(stdout).toEqual(['{"profile":"verify-full","rows":[],"receiptPaths":["one.json","one.md"]}']);
   });
 });

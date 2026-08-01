@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { ensureDependencySetup, packageManagerFromPackageJson, type DependencySetupRuntime, type HealthySetupState } from "../../../src/bootstrap/dependencies.js";
+import {
+  ensureDependencySetup,
+  packageManagerFromPackageJson,
+  type DependencySetupRuntime,
+  type HealthySetupState,
+} from "../../../src/bootstrap/dependencies.js";
 
 class FakeRuntime implements DependencySetupRuntime {
   readonly calls: string[] = [];
@@ -10,7 +15,10 @@ class FakeRuntime implements DependencySetupRuntime {
     private readonly failureAt?: string,
     private readonly ensureExitCodes: number[] = [],
   ) {}
-  async readHealthyState() { this.calls.push("read"); return this.state; }
+  async readHealthyState() {
+    this.calls.push("read");
+    return this.state;
+  }
   async runSetup(script: string, workspaceRoot: string, environment: HealthySetupState["environment"]) {
     this.calls.push(`run:${script}:${workspaceRoot}:${environment.node}`);
     return { exitCode: script === this.failureAt ? 9 : 0 };
@@ -19,7 +27,11 @@ class FakeRuntime implements DependencySetupRuntime {
     this.calls.push(`ensure:${JSON.stringify(command)}:${workspaceRoot}:${environment.node}`);
     return { exitCode: this.ensureExitCodes.shift() ?? 0 };
   }
-  async writeHealthyState(state: HealthySetupState) { this.calls.push("write"); this.writes.push(state); this.state = state; }
+  async writeHealthyState(state: HealthySetupState) {
+    this.calls.push("write");
+    this.writes.push(state);
+    this.state = state;
+  }
 }
 
 const environment = { node: "26.5.0-linux-x64", packageManager: "pnpm@11.9.0", uv: "0.11.32", gitleaks: "8.30.1" };
@@ -28,19 +40,34 @@ const input = {
   environment,
   workspaceRoot: "/workspaces/ariadne",
   setup: ["./scripts/ds-bootstrap.sh", "./scripts/prepare.sh"],
-  ensure: [["node", "scripts/pnpm-state.mjs"], ["uv", "sync", "--locked", "--offline"]],
+  ensure: [
+    ["node", "scripts/pnpm-state.mjs"],
+    ["uv", "sync", "--locked", "--offline"],
+  ],
 };
 
 describe("dependency setup", () => {
   it("reads an exact package manager from the declared package.json", () => {
-    expect(packageManagerFromPackageJson(new TextEncoder().encode('{"packageManager":"pnpm@11.9.0"}'))).toBe("pnpm@11.9.0");
-    expect(() => packageManagerFromPackageJson(new TextEncoder().encode('{"packageManager":"pnpm@latest"}'))).toThrow("exact");
-    expect(() => packageManagerFromPackageJson(new TextEncoder().encode('{"packageManager":"pnpm@11.9.0","packageManager":"pnpm@10.0.0"}'))).toThrow();
+    expect(packageManagerFromPackageJson(new TextEncoder().encode('{"packageManager":"pnpm@11.9.0"}'))).toBe(
+      "pnpm@11.9.0",
+    );
+    expect(() => packageManagerFromPackageJson(new TextEncoder().encode('{"packageManager":"pnpm@latest"}'))).toThrow(
+      "exact",
+    );
+    expect(() =>
+      packageManagerFromPackageJson(
+        new TextEncoder().encode('{"packageManager":"pnpm@11.9.0","packageManager":"pnpm@10.0.0"}'),
+      ),
+    ).toThrow();
   });
 
   it("skips setup only when state matches and every ensure command succeeds", async () => {
     const runtime = new FakeRuntime({ fingerprint: input.fingerprint, environment });
-    await expect(ensureDependencySetup(runtime, input)).resolves.toEqual({ fingerprint: input.fingerprint, environment, setupRan: false });
+    await expect(ensureDependencySetup(runtime, input)).resolves.toEqual({
+      fingerprint: input.fingerprint,
+      environment,
+      setupRan: false,
+    });
     expect(runtime.calls).toEqual([
       "read",
       'ensure:["node","scripts/pnpm-state.mjs"]:/workspaces/ariadne:26.5.0-linux-x64',
@@ -49,11 +76,7 @@ describe("dependency setup", () => {
   });
 
   it("runs setup and retries every ensure command when a matching state fails convergence", async () => {
-    const runtime = new FakeRuntime(
-      { fingerprint: input.fingerprint, environment },
-      undefined,
-      [9, 0, 0],
-    );
+    const runtime = new FakeRuntime({ fingerprint: input.fingerprint, environment }, undefined, [9, 0, 0]);
 
     await expect(ensureDependencySetup(runtime, input)).resolves.toMatchObject({ setupRan: true });
     expect(runtime.calls).toEqual([
@@ -120,7 +143,9 @@ describe("dependency setup", () => {
 
   it("rejects a non-canonical workspace root before side effects", async () => {
     const runtime = new FakeRuntime();
-    await expect(ensureDependencySetup(runtime, { ...input, workspaceRoot: "/workspaces/../etc" })).rejects.toThrow("canonical");
+    await expect(ensureDependencySetup(runtime, { ...input, workspaceRoot: "/workspaces/../etc" })).rejects.toThrow(
+      "canonical",
+    );
     expect(runtime.calls).toEqual([]);
   });
 });

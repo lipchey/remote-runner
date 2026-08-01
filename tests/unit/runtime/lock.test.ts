@@ -1,14 +1,4 @@
-import {
-  lstat,
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -112,9 +102,7 @@ class MemoryLockFiles implements LockFileSystem {
       return;
     }
     if (!this.directories.has(from)) throw fileError("ENOENT");
-    const movedDirectories = [...this.directories].filter(
-      (path) => path === from || path.startsWith(`${from}/`),
-    );
+    const movedDirectories = [...this.directories].filter((path) => path === from || path.startsWith(`${from}/`));
     for (const path of movedDirectories) {
       this.directories.delete(path);
       this.directories.add(`${to}${path.slice(from.length)}`);
@@ -226,9 +214,7 @@ describe("acquireProfileLock", () => {
     files.seed(lockPath, { token: "theirs", pid: 7, acquiredAt: 0, leaseUntil: 10 });
     const adapter = runtime(files, { alive: [7], now: 20 });
 
-    await expect(acquireProfileLock(adapter, "ariadne/identity", 250)).rejects.toBeInstanceOf(
-      LockTimeoutError,
-    );
+    await expect(acquireProfileLock(adapter, "ariadne/identity", 250)).rejects.toBeInstanceOf(LockTimeoutError);
 
     expect(adapter.sleeps).toEqual([100, 100, 50]);
     expect(files.diagnostics).toEqual([]);
@@ -244,14 +230,12 @@ describe("acquireProfileLock", () => {
 
     expect(files.diagnostics).toHaveLength(1);
     expect(files.diagnostics[0]).toContain(".stale-");
-    expect(JSON.parse(new TextDecoder().decode(await files.readFile(`${lockPath}/owner.json`)))).toEqual(
-      {
-        token: "ours-unique-token",
-        pid: 42,
-        acquiredAt: 20,
-        leaseUntil: 1_020,
-      },
-    );
+    expect(JSON.parse(new TextDecoder().decode(await files.readFile(`${lockPath}/owner.json`)))).toEqual({
+      token: "ours-unique-token",
+      pid: 42,
+      acquiredAt: 20,
+      leaseUntil: 1_020,
+    });
     await release();
     expect(files.exists(lockPath)).toBe(false);
   });
@@ -288,11 +272,7 @@ describe("acquireProfileLock", () => {
     await mkdir(path);
     const files = new NodeLockFiles();
 
-    const release = await acquireProfileLock(
-      runtime(files, { path, token: "posix-owner" }),
-      "ariadne/identity",
-      50,
-    );
+    const release = await acquireProfileLock(runtime(files, { path, token: "posix-owner" }), "ariadne/identity", 50);
 
     const entries = await readdir(root);
     const diagnosticEntries = entries.filter((entry) => entry.startsWith("profile.lock.corrupt-"));
@@ -507,9 +487,7 @@ describe("acquireProfileLock", () => {
     const successorRelease = await successorAcquisition;
 
     expect(
-      files.renames
-        .filter(({ to }) => to.includes(".release-owner-token"))
-        .map(({ ownerToken }) => ownerToken),
+      files.renames.filter(({ to }) => to.includes(".release-owner-token")).map(({ ownerToken }) => ownerToken),
     ).toEqual(["owner-token"]);
     expect(files.ownerToken(lockPath)).toBe("successor-token");
     await successorRelease();

@@ -36,24 +36,24 @@ policy.
 
 ## Stable reason-code index
 
-| Reason | Read-only diagnosis |
-| --- | --- |
-| `dns` | `dscacheutil -q host -a name <remote>` |
-| `host-key` | `ssh-keygen -F <remote>` |
-| `authentication` | `ssh -o BatchMode=yes <remote> true` |
-| `transport` | `ssh -o ConnectTimeout=5 <remote> true` |
-| `remote-shell` | `ssh <remote> printf remote-shell-ok` |
-| `capacity` | `ssh <remote> df -Pk <workspace>` |
-| `bootstrap` | `ssh <remote> test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm` |
-| `validation` | `remote-runner validate <profile>` |
-| `lock` | `ls -ld <lock-root>` |
-| `sync` | `mutagen sync list <session>` |
-| `workspace` | `ssh <remote> git -C <workspace> status --short --branch` |
-| `secrets` | `ssh <remote> find <workspace> -maxdepth 1 -name .env -print` |
-| `controller` | `launchctl print gui/<uid>/com.lipchey.remote-runner` |
-| `child-start` | `tail -n 50 <runner-log>` |
-| `timeout` | `ssh -o ConnectTimeout=2 <remote> true` |
-| `unknown` | `remote-runner status <profile>` |
+| Reason           | Read-only diagnosis                                                         |
+| ---------------- | --------------------------------------------------------------------------- |
+| `dns`            | `dscacheutil -q host -a name <remote>`                                      |
+| `host-key`       | `ssh-keygen -F <remote>`                                                    |
+| `authentication` | `ssh -o BatchMode=yes <remote> true`                                        |
+| `transport`      | `ssh -o ConnectTimeout=5 <remote> true`                                     |
+| `remote-shell`   | `ssh <remote> printf remote-shell-ok`                                       |
+| `capacity`       | `ssh <remote> df -Pk <workspace>`                                           |
+| `bootstrap`      | `ssh <remote> test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm` |
+| `validation`     | `remote-runner validate <profile>`                                          |
+| `lock`           | `ls -ld <lock-root>`                                                        |
+| `sync`           | `mutagen sync list <session>`                                               |
+| `workspace`      | `ssh <remote> git -C <workspace> status --short --branch`                   |
+| `secrets`        | `ssh <remote> find <workspace> -maxdepth 1 -name .env -print`               |
+| `controller`     | `launchctl print gui/<uid>/com.lipchey.remote-runner`                       |
+| `child-start`    | `tail -n 50 <runner-log>`                                                   |
+| `timeout`        | `ssh -o ConnectTimeout=2 <remote> true`                                     |
+| `unknown`        | `remote-runner status <profile>`                                            |
 
 ## SSH and Tailscale
 

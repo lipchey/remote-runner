@@ -35,7 +35,10 @@ export interface TelegramRuntime {
 }
 
 function unquote(value: string): string {
-  if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+  if (
+    value.length >= 2 &&
+    ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
+  ) {
     return value.slice(1, -1);
   }
   if (value.includes('"') || value.includes("'")) throw new Error("Telegram config has malformed quoting");
@@ -45,7 +48,11 @@ function unquote(value: string): string {
 function parseConfig(contents: Uint8Array): TelegramConfig {
   if (contents.byteLength > MAX_CONFIG_BYTES) throw new Error("Telegram config exceeds the size limit");
   let text: string;
-  try { text = decoder.decode(contents); } catch { throw new Error("Telegram config is not valid UTF-8"); }
+  try {
+    text = decoder.decode(contents);
+  } catch {
+    throw new Error("Telegram config is not valid UTF-8");
+  }
   const fields = new Map<string, string>();
   for (const rawLine of text.split(/\r?\n/u)) {
     const line = rawLine.trim();
@@ -118,7 +125,12 @@ export async function sendTelegramNotification(
   }
   try {
     const parsed: unknown = JSON.parse(decoder.decode(response.body));
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || (parsed as { ok?: unknown }).ok !== true) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      (parsed as { ok?: unknown }).ok !== true
+    ) {
       throw new Error("not ok");
     }
   } catch {

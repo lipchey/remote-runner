@@ -39,14 +39,23 @@ export interface SetupResult extends HealthySetupState {
 
 function safeRelative(value: string): boolean {
   const candidate = value.startsWith("./") ? value.slice(2) : value;
-  return candidate.length > 0 && !candidate.startsWith("/") && !candidate.includes("\\") &&
-    !/[\u0000-\u001f\u007f]/u.test(candidate) && !/^[A-Za-z]:/u.test(candidate) &&
-    candidate.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+  return (
+    candidate.length > 0 &&
+    !candidate.startsWith("/") &&
+    !candidate.includes("\\") &&
+    !/[\u0000-\u001f\u007f]/u.test(candidate) &&
+    !/^[A-Za-z]:/u.test(candidate) &&
+    candidate.split("/").every((part) => part !== "" && part !== "." && part !== "..")
+  );
 }
 
 function sameEnvironment(left: EnvironmentIdentity, right: EnvironmentIdentity): boolean {
-  return left.node === right.node && left.packageManager === right.packageManager &&
-    left.uv === right.uv && left.gitleaks === right.gitleaks;
+  return (
+    left.node === right.node &&
+    left.packageManager === right.packageManager &&
+    left.uv === right.uv &&
+    left.gitleaks === right.gitleaks
+  );
 }
 
 export function packageManagerFromPackageJson(contents: Uint8Array): string {
@@ -72,14 +81,21 @@ export function packageManagerFromPackageJson(contents: Uint8Array): string {
 
 function validate(input: DependencySetupInput): void {
   if (!/^sha256:[^\u0000\s]+$/u.test(input.fingerprint)) throw new Error("dependency fingerprint is invalid");
-  if (!posix.isAbsolute(input.workspaceRoot) || input.workspaceRoot === "/" ||
-      posix.normalize(input.workspaceRoot) !== input.workspaceRoot || /[\u0000-\u001f\u007f]/u.test(input.workspaceRoot)) {
+  if (
+    !posix.isAbsolute(input.workspaceRoot) ||
+    input.workspaceRoot === "/" ||
+    posix.normalize(input.workspaceRoot) !== input.workspaceRoot ||
+    /[\u0000-\u001f\u007f]/u.test(input.workspaceRoot)
+  ) {
     throw new Error("workspace root must be a safe canonical absolute path");
   }
-  for (const script of input.setup) if (!safeRelative(script)) throw new Error("setup script must be a safe relative path");
+  for (const script of input.setup)
+    if (!safeRelative(script)) throw new Error("setup script must be a safe relative path");
   for (const command of input.ensure) {
     if (
-      command.length === 0 || command[0] === undefined || command[0].length === 0 ||
+      command.length === 0 ||
+      command[0] === undefined ||
+      command[0].length === 0 ||
       command.some((argument) => typeof argument !== "string" || argument.includes("\0"))
     ) {
       throw new Error("ensure command must be a non-empty safe argument array");

@@ -23,7 +23,9 @@ export class NodeControllerRuntime implements ControllerRuntime {
 
   async inspect(): Promise<ControllerStatus> {
     const result = await this.processes.run({
-      command: "launchctl", args: ["print", `${this.domain()}/${LABEL}`], maxOutputBytes: 64 * 1024,
+      command: "launchctl",
+      args: ["print", `${this.domain()}/${LABEL}`],
+      maxOutputBytes: 64 * 1024,
     });
     if (result.exitCode !== 0) return { loaded: false, running: false, compatible: true };
     const output = new TextDecoder().decode(result.stdout);
@@ -38,26 +40,44 @@ export class NodeControllerRuntime implements ControllerRuntime {
     if (result.exitCode !== 0) throw new Error("controller bootstrap failed");
   }
   async bootout() {
-    const result = await this.processes.run({ command: "launchctl", args: ["bootout", `${this.domain()}/${LABEL}`], maxOutputBytes: 64 * 1024 });
+    const result = await this.processes.run({
+      command: "launchctl",
+      args: ["bootout", `${this.domain()}/${LABEL}`],
+      maxOutputBytes: 64 * 1024,
+    });
     if (result.exitCode !== 0) throw new Error("controller bootout failed");
   }
   async kickstart() {
-    const result = await this.processes.run({ command: "launchctl", args: ["kickstart", "-k", `${this.domain()}/${LABEL}`], maxOutputBytes: 64 * 1024 });
+    const result = await this.processes.run({
+      command: "launchctl",
+      args: ["kickstart", "-k", `${this.domain()}/${LABEL}`],
+      maxOutputBytes: 64 * 1024,
+    });
     if (result.exitCode !== 0) throw new Error("controller kickstart failed");
   }
   async registeredProfiles() {
     try {
-      const parsed: unknown = JSON.parse(await readFile(join(this.home, ".local", "state", "remote-runner", "registrations.json"), "utf8"));
+      const parsed: unknown = JSON.parse(
+        await readFile(join(this.home, ".local", "state", "remote-runner", "registrations.json"), "utf8"),
+      );
       return Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string") ? parsed : [];
-    } catch { return []; }
+    } catch {
+      return [];
+    }
   }
-  async reconcile() { return { healthy: true }; }
+  async reconcile() {
+    return { healthy: true };
+  }
   async recordHealth() {}
 }
 
 export async function ensureNodeController(home: string): Promise<void> {
   const plist = join(home, "Library", "LaunchAgents", `${LABEL}.plist`);
-  try { await access(plist); } catch { return; }
+  try {
+    await access(plist);
+  } catch {
+    return;
+  }
   await ensureController(new NodeControllerRuntime(home));
 }
 
