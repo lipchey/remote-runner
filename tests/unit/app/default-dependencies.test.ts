@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createNodeCliDependencies } from "../../../src/app/default-dependencies.js";
+import { inspectPrewarmRequest } from "../../../src/prewarm/queue.js";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../../src/ssh/client.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
@@ -54,6 +55,34 @@ class FakeProcesses {
 }
 
 describe("concrete Node CLI dependencies", () => {
+  it("publishes a canonical prewarm request only after confirming controller health", async () => {
+    const paths = await fixture();
+    const processes = new FakeProcesses();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: {
+        changed: false,
+        directory: paths.managedSshPath,
+        knownHostsPath: paths.knownHostsPath,
+      },
+      processes,
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.enqueuePrewarm?.(profile, ".remote-runner.yaml")).resolves.toBe(
+      "published",
+    );
+    await expect(
+      inspectPrewarmRequest(paths.home, {
+        consumer: profile.consumer,
+        profile: profile.id,
+        identity: dependencies.identity,
+      }),
+    ).resolves.toBe("queued");
+    expect(processes.requests.some(({ command }) => command === "launchctl")).toBe(true);
+  });
+
   it("loads cwd manifest profiles for status, doctor, and bounded owned logs", async () => {
     const paths = await fixture();
     const processes = new FakeProcesses();
