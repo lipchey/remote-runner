@@ -74,9 +74,9 @@ These commands support the runbook and are not part of daily management.
 
 Each consumer commits a closed-schema `.remote-runner.yaml`. A profile declares its ID and schema
 version, mode and fallback policy, remote target, workspace namespace, source root, synchronization
-exclusions, required remote capabilities, bootstrap versions, setup and fingerprint inputs,
-workload arguments, remote-child marker, allowed ephemeral environment names, probe timeouts,
-notification policy, and benchmark matrix.
+exclusions, required remote capabilities, bootstrap versions, setup commands, always-run ensure
+commands, exact fingerprint files and discovery patterns, workload arguments, remote-child marker,
+allowed ephemeral environment names, probe timeouts, notification policy, and benchmark matrix.
 
 Unknown fields, unsafe paths, duplicate IDs, interpolated shell fragments, unallowlisted
 environment names, and destructive targets outside generated roots fail validation. The manifest
@@ -148,9 +148,16 @@ directory, and promotes atomically. It installs the package-manager version decl
 consumer. Other providers cover pinned uv and gitleaks versions.
 
 Failures leave the last healthy environment active. Dependency fingerprints include the effective
-environment identity and every declared manifest, lockfile, workspace definition, submodule pin,
-setup script, and version input. Setup runs only after a change and persists the new fingerprint
-only after success. Dependencies and generated output stay on their creating machine.
+environment identity, exact files, every tracked or non-ignored untracked file matched by safe
+patterns, and every submodule gitlink OID. The sorted path/content set makes package addition,
+removal, or rename invalidate setup without a manual package allowlist. Dependencies and generated
+output stay on their creating machine.
+
+The fingerprint is an optimization rather than a correctness authority. Fixed-argv ensure commands
+run after every synchronized preparation. A matching fingerprint and successful ensure reuse the
+environment; a changed fingerprint or failed ensure runs the full setup once, after which every
+ensure command must pass before the healthy fingerprint is persisted. Persistent ensure failure is
+fail-closed.
 
 ### 6.6 Ephemeral environment
 
@@ -199,7 +206,7 @@ Every `run`, even with a healthy controller, performs:
 5. session create/resume;
 6. Git workspace reconciliation;
 7. synchronization flush;
-8. bootstrap and dependency reconciliation by fingerprint;
+8. bootstrap invalidation by fingerprint plus mandatory dependency convergence;
 9. allowed environment framing;
 10. remote child start and preparation-lock release.
 
@@ -250,7 +257,7 @@ Live acceptance proves:
 2. workstation bootstrap with no preinstalled Node/package manager;
 3. live source synchronization and generated-state isolation;
 4. dirty and untracked source visibility remotely;
-5. one setup per changed fingerprint;
+5. one setup per changed fingerprint, and setup-and-retry after a failed ensure;
 6. exact output and verdict propagation;
 7. no local retry after remote workload failure;
 8. unavailable workstation means one alert plus declared fallback;

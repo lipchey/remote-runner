@@ -5,11 +5,19 @@ import { ensureDependencySetup, packageManagerFromPackageJson, type DependencySe
 class FakeRuntime implements DependencySetupRuntime {
   readonly calls: string[] = [];
   writes: HealthySetupState[] = [];
-  constructor(public state?: HealthySetupState, private readonly failureAt?: string) {}
+  constructor(
+    public state?: HealthySetupState,
+    private readonly failureAt?: string,
+    private readonly ensureExitCodes: number[] = [],
+  ) {}
   async readHealthyState() { this.calls.push("read"); return this.state; }
   async runSetup(script: string, workspaceRoot: string, environment: HealthySetupState["environment"]) {
     this.calls.push(`run:${script}:${workspaceRoot}:${environment.node}`);
     return { exitCode: script === this.failureAt ? 9 : 0 };
+  }
+  async runEnsure(command: readonly string[], workspaceRoot: string, environment: HealthySetupState["environment"]) {
+    this.calls.push(`ensure:${JSON.stringify(command)}:${workspaceRoot}:${environment.node}`);
+    return { exitCode: this.ensureExitCodes.shift() ?? 0 };
   }
   async writeHealthyState(state: HealthySetupState) { this.calls.push("write"); this.writes.push(state); this.state = state; }
 }
@@ -20,6 +28,7 @@ const input = {
   environment,
   workspaceRoot: "/workspaces/ariadne",
   setup: ["./scripts/ds-bootstrap.sh", "./scripts/prepare.sh"],
+  ensure: [["node", "scripts/pnpm-state.mjs"], ["uv", "sync", "--locked", "--offline"]],
 };
 
 describe("dependency setup", () => {
@@ -29,10 +38,33 @@ describe("dependency setup", () => {
     expect(() => packageManagerFromPackageJson(new TextEncoder().encode('{"packageManager":"pnpm@11.9.0","packageManager":"pnpm@10.0.0"}'))).toThrow();
   });
 
-  it("skips setup only when both fingerprint and full environment match", async () => {
+  it("skips setup only when state matches and every ensure command succeeds", async () => {
     const runtime = new FakeRuntime({ fingerprint: input.fingerprint, environment });
     await expect(ensureDependencySetup(runtime, input)).resolves.toEqual({ fingerprint: input.fingerprint, environment, setupRan: false });
-    expect(runtime.calls).toEqual(["read"]);
+    expect(runtime.calls).toEqual([
+      "read",
+      'ensure:["node","scripts/pnpm-state.mjs"]:/workspaces/ariadne:26.5.0-linux-x64',
+      'ensure:["uv","sync","--locked","--offline"]:/workspaces/ariadne:26.5.0-linux-x64',
+    ]);
+  });
+
+  it("runs setup and retries every ensure command when a matching state fails convergence", async () => {
+    const runtime = new FakeRuntime(
+      { fingerprint: input.fingerprint, environment },
+      undefined,
+      [9, 0, 0],
+    );
+
+    await expect(ensureDependencySetup(runtime, input)).resolves.toMatchObject({ setupRan: true });
+    expect(runtime.calls).toEqual([
+      "read",
+      'ensure:["node","scripts/pnpm-state.mjs"]:/workspaces/ariadne:26.5.0-linux-x64',
+      "run:./scripts/ds-bootstrap.sh:/workspaces/ariadne:26.5.0-linux-x64",
+      "run:./scripts/prepare.sh:/workspaces/ariadne:26.5.0-linux-x64",
+      'ensure:["node","scripts/pnpm-state.mjs"]:/workspaces/ariadne:26.5.0-linux-x64',
+      'ensure:["uv","sync","--locked","--offline"]:/workspaces/ariadne:26.5.0-linux-x64',
+      "write",
+    ]);
   });
 
   it.each([
@@ -46,6 +78,8 @@ describe("dependency setup", () => {
       "read",
       "run:./scripts/ds-bootstrap.sh:/workspaces/ariadne:26.5.0-linux-x64",
       "run:./scripts/prepare.sh:/workspaces/ariadne:26.5.0-linux-x64",
+      'ensure:["node","scripts/pnpm-state.mjs"]:/workspaces/ariadne:26.5.0-linux-x64',
+      'ensure:["uv","sync","--locked","--offline"]:/workspaces/ariadne:26.5.0-linux-x64',
       "write",
     ]);
     expect(runtime.writes).toEqual([{ fingerprint: input.fingerprint, environment }]);
@@ -58,6 +92,24 @@ describe("dependency setup", () => {
     expect(runtime.state).toEqual(previous);
     expect(runtime.writes).toEqual([]);
     expect(runtime.calls).toHaveLength(2);
+  });
+
+  it("does not persist state when ensure still fails after setup", async () => {
+    const previous = { fingerprint: `sha256:${"b".repeat(64)}`, environment };
+    const runtime = new FakeRuntime(previous, undefined, [9]);
+
+    await expect(ensureDependencySetup(runtime, input)).rejects.toThrow(/ensure.*exit code 9/u);
+    expect(runtime.state).toEqual(previous);
+    expect(runtime.writes).toEqual([]);
+    expect(runtime.calls.at(-1)).toContain("ensure:");
+  });
+
+  it("preserves legacy fingerprint-only behavior when no ensure command is declared", async () => {
+    const runtime = new FakeRuntime({ fingerprint: input.fingerprint, environment });
+    await expect(ensureDependencySetup(runtime, { ...input, ensure: [] })).resolves.toMatchObject({
+      setupRan: false,
+    });
+    expect(runtime.calls).toEqual(["read"]);
   });
 
   it("rejects unsafe setup scripts before reading or running state", async () => {
