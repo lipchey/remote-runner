@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { installLocalApplication, type LocalLaunchRuntime } from "../../../src/node/local-install.js";
+import { parseInstallReceipt } from "../../../src/node/install-receipt.js";
 
 const roots: string[] = [];
 
@@ -50,6 +51,7 @@ async function sourceFixture(): Promise<string> {
   ]);
   await writeFile(join(sourceRoot, "dist/src/main.js"), "#!/usr/bin/env node\nconsole.log('runner');\n");
   await writeFile(join(sourceRoot, "assets/remote-launcher.mjs"), "export {};\n");
+  await writeFile(join(sourceRoot, "package.json"), '{"name":"remote-runner","version":"0.1.0","type":"module"}\n');
   await writeFile(join(sourceRoot, "node_modules/yaml/package.json"), '{"name":"yaml","type":"module"}\n');
   await writeFile(join(sourceRoot, "node_modules/yaml/index.js"), "export const parse = () => ({});\n");
   return sourceRoot;
@@ -66,6 +68,13 @@ describe("self-contained local macOS install", () => {
     const second = await installLocalApplication({ home, sourceRoot, nodePath: "/usr/bin/node", launch });
 
     expect(second.appRoot).toBe(first.appRoot);
+    expect(first.appIdentity).toMatch(/^[0-9a-f]{24}$/u);
+    expect(first.version).toBe("0.1.0");
+    expect(parseInstallReceipt(await readFile(join(first.appRoot, ".remote-runner-receipt.json"), "utf8"))).toEqual({
+      schemaVersion: 1,
+      version: "0.1.0",
+      appIdentity: first.appIdentity,
+    });
     expect(await readFile(join(first.appRoot, "src/main.js"), "utf8")).toContain("runner");
     expect(await readFile(join(first.appRoot, "assets/remote-launcher.mjs"), "utf8")).toContain("export");
     expect(await readFile(join(first.appRoot, "node_modules/yaml/package.json"), "utf8")).toContain('"yaml"');
@@ -76,6 +85,23 @@ describe("self-contained local macOS install", () => {
     expect(await readFile(first.plistPath, "utf8")).toContain(first.executablePath);
     expect((await stat(first.plistPath)).mode & 0o777).toBe(0o600);
     expect(launch.actions).toEqual(["bootstrap"]);
+  });
+
+  it("changes immutable identity when compiled code or package version changes", async () => {
+    const sourceRoot = await sourceFixture();
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-install-identity-"));
+    roots.push(home);
+    const launch = new FakeLaunch();
+
+    const original = await installLocalApplication({ home, sourceRoot, nodePath: "/usr/bin/node", launch });
+    await writeFile(join(sourceRoot, "dist/src/main.js"), "#!/usr/bin/env node\nconsole.log('changed');\n");
+    const codeChanged = await installLocalApplication({ home, sourceRoot, nodePath: "/usr/bin/node", launch });
+    await writeFile(join(sourceRoot, "package.json"), '{"name":"remote-runner","version":"0.2.0","type":"module"}\n');
+    const versionChanged = await installLocalApplication({ home, sourceRoot, nodePath: "/usr/bin/node", launch });
+
+    expect(codeChanged.appIdentity).not.toBe(original.appIdentity);
+    expect(versionChanged.appIdentity).not.toBe(codeChanged.appIdentity);
+    expect(versionChanged.version).toBe("0.2.0");
   });
 
   it("refuses to overwrite a foreign stable executable", async () => {

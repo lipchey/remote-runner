@@ -1,9 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { access, chmod, cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join, posix, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, posix, relative } from "node:path";
 import process from "node:process";
 
+import {
+  formatInstallReceipt,
+  INSTALL_RECEIPT_NAME,
+  packageVersion,
+  parseInstallReceipt,
+  type InstallReceipt,
+} from "./install-receipt.js";
 import { NodeProcessRuntime } from "./process.js";
 
 const LABEL = "com.lipchey.remote-runner";
@@ -43,6 +49,8 @@ async function bootstrapLaunchAgent(
 
 export interface LocalInstallResult {
   readonly appRoot: string;
+  readonly appIdentity: string;
+  readonly version: string;
   readonly executablePath: string;
   readonly plistPath: string;
 }
@@ -181,15 +189,21 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
   assertAbsolute(options.home, "install home");
   assertAbsolute(options.sourceRoot, "install source root");
   assertAbsolute(options.nodePath, "install Node path");
-  const sourceCompiled = await access(join(options.sourceRoot, "dist", "src", "main.js"))
-    .then(() => join(options.sourceRoot, "dist", "src"))
-    .catch(() => join(options.sourceRoot, "src"));
+  const sourceCompiled = join(options.sourceRoot, "dist", "src");
+  await access(join(sourceCompiled, "main.js")).catch((caught: unknown) => {
+    throw new Error("install source must contain built dist/src/main.js", { cause: caught });
+  });
+  const sourcePackage = join(options.sourceRoot, "package.json");
+  const sourcePackageContents = await readFile(sourcePackage, "utf8");
+  const version = packageVersion(sourcePackageContents);
   const sources = {
     compiled: sourceCompiled,
     assets: join(options.sourceRoot, "assets"),
     yaml: join(options.sourceRoot, "node_modules", "yaml"),
+    package: sourcePackage,
   };
-  const digest = await treeDigest([sources.compiled, sources.assets, sources.yaml]);
+  const digest = await treeDigest([sources.compiled, sources.assets, sources.yaml, sources.package]);
+  const receipt: InstallReceipt = { schemaVersion: 1, version, appIdentity: digest };
   const shareRoot = join(options.home, ".local", "share", "remote-runner");
   const appParent = join(shareRoot, "app");
   const appRoot = join(appParent, digest);
@@ -203,6 +217,10 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
   try {
     const marker = await readFile(join(appRoot, ".remote-runner-owned"), "utf8");
     if (marker !== `${digest}\n`) throw new Error("refusing to reuse a foreign install application");
+    const existingReceipt = parseInstallReceipt(await readFile(join(appRoot, INSTALL_RECEIPT_NAME), "utf8"));
+    if (formatInstallReceipt(existingReceipt) !== formatInstallReceipt(receipt)) {
+      throw new Error("refusing to reuse an install application with a mismatched receipt");
+    }
   } catch (caught) {
     if (!(
       typeof caught === "object" &&
@@ -219,8 +237,13 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
         cp(sources.assets, join(staging, "assets"), { recursive: true, dereference: true }),
         cp(sources.yaml, join(staging, "node_modules", "yaml"), { recursive: true, dereference: true }),
       ]);
-      await writeFile(join(staging, "package.json"), '{"private":true,"type":"module"}\n', { mode: 0o600 });
+      await writeFile(
+        join(staging, "package.json"),
+        `${JSON.stringify({ private: true, type: "module", version })}\n`,
+        { mode: 0o600 },
+      );
       await writeFile(join(staging, ".remote-runner-owned"), `${digest}\n`, { mode: 0o600 });
+      await writeFile(join(staging, INSTALL_RECEIPT_NAME), formatInstallReceipt(receipt), { mode: 0o600 });
       await rename(staging, appRoot);
     } catch (error) {
       await rm(staging, { recursive: true, force: true });
@@ -248,34 +271,16 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
   } else if (!launch.running) {
     await options.launch.kickstart();
   }
-  return { appRoot, executablePath, plistPath };
+  return { appRoot, appIdentity: digest, version, executablePath, plistPath };
 }
 
-export async function resolveInstallSourceRoot(moduleUrl: string): Promise<string> {
-  const modulePath = fileURLToPath(moduleUrl);
-  const candidates = [join(dirname(modulePath), "..", "..", ".."), join(dirname(modulePath), "..", "..")];
-  for (const candidate of candidates) {
-    const hasCompiled = await access(join(candidate, "dist", "src", "main.js"))
-      .then(() => true)
-      .catch(() => false);
-    const hasInstalled = await access(join(candidate, "src", "main.js"))
-      .then(() => true)
-      .catch(() => false);
-    const hasAssets = await access(join(candidate, "assets", "remote-launcher.mjs"))
-      .then(() => true)
-      .catch(() => false);
-    const hasYaml = await access(join(candidate, "node_modules", "yaml"))
-      .then(() => true)
-      .catch(() => false);
-    if ((hasCompiled || hasInstalled) && hasAssets && hasYaml) return candidate;
-  }
-  throw new Error("unable to locate install application sources");
-}
-
-export async function installCurrentApplication(home: string): Promise<LocalInstallResult> {
+export async function installCurrentApplication(
+  home: string,
+  sourceRoot: string = process.cwd(),
+): Promise<LocalInstallResult> {
   return installLocalApplication({
     home,
-    sourceRoot: await resolveInstallSourceRoot(import.meta.url),
+    sourceRoot,
     nodePath: process.execPath,
     launch: new NodeLocalLaunchRuntime(),
   });
