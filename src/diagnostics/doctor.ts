@@ -71,6 +71,7 @@ export async function doctor(runtime: DoctorRuntime): Promise<DoctorReport> {
 export interface StatusSnapshot {
   readonly profile: string;
   readonly controller: "running" | "stopped" | "incompatible" | "unknown";
+  readonly prewarm: "idle" | "queued" | "running" | "unknown";
   readonly session: "watching" | "paused" | "missing" | "unknown";
   readonly workspace: "ready" | "missing" | "dirty" | "unknown";
   readonly fingerprint: "current" | "stale" | "missing" | "unknown";
@@ -81,7 +82,7 @@ const STATUS_FIELD = /^[a-z][a-z0-9-]{0,62}$/u;
 
 export function formatStatus(snapshot: StatusSnapshot): string {
   if (!STATUS_FIELD.test(snapshot.profile)) throw new Error("status profile is invalid");
-  return `${snapshot.profile} controller=${snapshot.controller} session=${snapshot.session} workspace=${snapshot.workspace} fingerprint=${snapshot.fingerprint} outage=${snapshot.outage}`;
+  return `${snapshot.profile} controller=${snapshot.controller} prewarm=${snapshot.prewarm} session=${snapshot.session} workspace=${snapshot.workspace} fingerprint=${snapshot.fingerprint} outage=${snapshot.outage}`;
 }
 
 export interface DiagnosticLogRuntime {

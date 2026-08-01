@@ -97,9 +97,11 @@ describe("concrete Node CLI dependencies", () => {
     await mkdir(profileRoot, { recursive: true });
     await writeFile(join(profileRoot, "runner.log.1"), "older\n");
     await writeFile(join(profileRoot, "runner.log"), "current\n");
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+    await dependencies.enqueuePrewarm?.(profile, ".remote-runner.yaml");
 
     await expect(dependencies.statusProfile?.("verify-full")).resolves.toMatch(
-      /^verify-full controller=running session=watching workspace=ready fingerprint=current outage=clear$/u,
+      /^verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear$/u,
     );
     const report = await dependencies.doctorProfile?.("verify-full") as { checks: readonly unknown[] };
     expect(report.checks).toHaveLength(16);

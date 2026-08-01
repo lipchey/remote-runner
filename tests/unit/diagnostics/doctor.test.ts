@@ -75,6 +75,7 @@ describe("status formatting", () => {
     const output = formatStatus({
       profile: "verify-full",
       controller: "running",
+      prewarm: "queued",
       session: "watching",
       workspace: "ready",
       fingerprint: "current",
@@ -82,7 +83,7 @@ describe("status formatting", () => {
     });
 
     expect(output).toBe(
-      "verify-full controller=running session=watching workspace=ready fingerprint=current outage=clear",
+      "verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear",
     );
   });
 });

@@ -252,7 +252,7 @@ describe("runCli", () => {
       readFile: async () => validManifest,
       statusProfile: async (profile?: string) => {
         calls.push(`status:${profile ?? "all"}`);
-        return "verify-full controller=running session=watching workspace=ready fingerprint=current outage=clear";
+        return "verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear";
       },
       doctorProfile: async (profile?: string) => {
         calls.push(`doctor:${profile ?? "all"}`);
@@ -269,7 +269,7 @@ describe("runCli", () => {
     expect(await runCli(["logs", "verify-full"], io, dependencies)).toBe(0);
     expect(calls).toEqual(["status:verify-full", "doctor:all", "logs:verify-full"]);
     expect(stdout).toEqual([
-      "verify-full controller=running session=watching workspace=ready fingerprint=current outage=clear",
+      "verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear",
       '{"checks":[{"id":"ssh.transport","status":"ok","next":"remote-runner doctor"}]}',
       "line-1",
       "line-2",

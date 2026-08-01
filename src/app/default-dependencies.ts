@@ -21,7 +21,7 @@ import {
 import { NodeProcessRuntime } from "../node/process.js";
 import { worktreeIdentity } from "../runtime/identity.js";
 import { createJsonlLogger } from "../runtime/log.js";
-import { publishPrewarmRequest } from "../prewarm/queue.js";
+import { inspectPrewarmRequest, publishPrewarmRequest } from "../prewarm/queue.js";
 import { runProfile } from "../run/run-profile.js";
 import { runSsh, type SshProcessRuntime } from "../ssh/client.js";
 import { mutagenSessionName } from "../sync/mutagen.js";
@@ -395,7 +395,12 @@ export async function createNodeCliDependencies(
         const session = sessionResult.exitCode === 0 ? sessionStatus(sessionResult.stdout, expectedSession) : "unknown";
         const remote = await inspectRemoteStatus(processes, profile, identity, diagnosticSsh.knownHostsPath);
         const outage = await inspectOutage(join(profileRoot(home, profile, identity), "outage.json"));
-        lines.push(formatStatus({ profile: profile.id, controller, session, ...remote, outage }));
+        const prewarm = await inspectPrewarmRequest(home, {
+          consumer: profile.consumer,
+          profile: profile.id,
+          identity,
+        });
+        lines.push(formatStatus({ profile: profile.id, controller, prewarm, session, ...remote, outage }));
       }
       return lines.join("\n");
     },

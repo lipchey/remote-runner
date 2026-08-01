@@ -30,8 +30,11 @@ remote-runner doctor verify-full
 
 `run` uses the profile's declared workload by default. `REMOTE_RUNNER_MODE=auto|local|remote`
 selects the mode without consumer-side parsing. A command after `--` remains available as an
-explicit diagnostic override. `prewarm` forces remote preparation/execution but is fail-soft so a
-worktree creation hook never fails; the first ordinary `run` retries everything.
+explicit diagnostic override. `prewarm` validates the profile, coalesces an equivalent request in
+the controller-owned durable queue, and returns after that handoff; synchronization, setup, and the
+remote workload continue in the background. A handoff failure remains fail-soft so a worktree
+creation hook never fails, and the first ordinary `run` retries everything. `status` reports
+`prewarm=idle|queued|running|unknown`; `logs` records the eventual lifecycle verdict.
 
 For allowlisted development secrets, a profile may declare `dotenv: .env`. The runner reads only
 the named keys locally, never synchronizes the file, and sends values through framed SSH input. An
