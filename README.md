@@ -115,5 +115,8 @@ environment. Existing manifests that omit `artifacts` retain the empty-list beha
 fingerprint arrays remain accepted as exact-file lists.
 
 - Design: `docs/specs/2026-07-31-remote-runner-design.md`
-- Diagnostic runbook: `docs/RUNBOOK.md`
+
+## Documentation map
+
+- [Remote runner operations and troubleshooting](docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md)
 - Implementation plan: `docs/superpowers/plans/2026-07-31-remote-runner-implementation.md`

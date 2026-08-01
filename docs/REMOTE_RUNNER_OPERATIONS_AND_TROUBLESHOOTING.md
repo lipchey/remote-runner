@@ -1,4 +1,4 @@
-# remote-runner diagnostic runbook
+# remote-runner operations and troubleshooting
 
 Use this runbook from the Mac controller. Diagnostic commands are read-only and never print
 captured secret values. Replace angle-bracket placeholders with values from the validated profile;
