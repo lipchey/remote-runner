@@ -1,3 +1,5 @@
+import { posix } from "node:path";
+
 import { parseDocument } from "yaml";
 
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
@@ -54,6 +56,20 @@ function boundedInteger(value: unknown, maximum: number, label: string): number 
     throw new Error(`${label} must be a positive integer no greater than ${maximum}`);
   }
   return value;
+}
+
+function generatedRoot(value: unknown): string {
+  const root = nonEmptyString(value, "generated root");
+  if (root === GENERATED_ROOT) return root;
+  if (
+    !posix.isAbsolute(root) ||
+    posix.normalize(root) !== root ||
+    root === "/" ||
+    /[\u0000-\u001f\u007f]/u.test(root)
+  ) {
+    throw new Error(`generated root must be ${GENERATED_ROOT} or a canonical non-root absolute path`);
+  }
+  return root;
 }
 
 function stringArray(value: unknown, label: string): string[] {
@@ -179,10 +195,18 @@ function parseProfile(value: unknown): Profile {
     throw new Error("remote hostKeySha256 must be a trusted SHA256: fingerprint");
   }
 
-  const workspace = closed(source.workspace, ["generatedRoot", "baseRef"], "workspace");
-  if (workspace.generatedRoot !== GENERATED_ROOT) {
-    throw new Error(`generated root must be ${GENERATED_ROOT}`);
-  }
+  const workspace = closed(source.workspace, ["generatedRoot", "baseRef", "retention"], "workspace");
+  const retentionSource =
+    workspace.retention === undefined
+      ? undefined
+      : closed(workspace.retention, ["keep", "graceMinutes"], "workspace retention");
+  const retention =
+    retentionSource === undefined
+      ? undefined
+      : {
+          keep: boundedInteger(retentionSource.keep, 64, "workspace retention keep"),
+          graceMinutes: boundedInteger(retentionSource.graceMinutes, 10_080, "workspace retention graceMinutes"),
+        };
   const baseRef = workspace.baseRef === undefined ? undefined : nonEmptyString(workspace.baseRef, "workspace base ref");
   if (baseRef !== undefined && !BASE_REF.test(baseRef)) {
     throw new Error("workspace base ref must be a safe remote-tracking name");
@@ -235,8 +259,9 @@ function parseProfile(value: unknown): Profile {
       hostKeySha256,
     },
     workspace: {
-      generatedRoot: GENERATED_ROOT,
+      generatedRoot: generatedRoot(workspace.generatedRoot),
       ...(baseRef === undefined ? {} : { baseRef }),
+      ...(retention === undefined ? {} : { retention }),
     },
     probes: {
       attempts: 2,

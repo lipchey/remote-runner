@@ -26,17 +26,27 @@ import { classifySshFailure } from "../ssh/probe.js";
 import { runSsh, sshArguments, type BoundedProcessRequest, type SshProcessRuntime } from "../ssh/client.js";
 import { MutagenSyncLifecycle, type PausedMutagenSession } from "../sync/mutagen.js";
 import { reconcileWorkspace } from "../workspace/git-workspace.js";
+import {
+  pruneRemoteWorkspaces,
+  RemoteWorkspaceRetentionRuntime,
+  type WorkspaceQuarantineResult,
+  type WorkspaceRetentionCommandPort,
+} from "../workspace/retention.js";
 import type { ProfileExecutionServices } from "./profile-runtime.js";
 
 export interface RemotePaths {
   readonly generatedRoot: string;
+  readonly profileRoot: string;
   readonly workspace: string;
+  readonly workloadLock: string;
+  readonly activityMarker: string;
   readonly toolchainRoot: string;
   readonly launcher: string;
   readonly setupState: string;
 }
 
 const IDENTITY = /^[0-9a-f]{24}$/u;
+const LEGACY_GENERATED_ROOT = "~/.cache/remote-runner/workspaces";
 
 function canonicalRemotePath(value: string, label: string): void {
   if (
@@ -50,7 +60,7 @@ function canonicalRemotePath(value: string, label: string): void {
 
 export function resolveRemotePaths(
   remoteHome: string,
-  profile: Pick<Profile, "consumer" | "id">,
+  profile: Pick<Profile, "consumer" | "id" | "workspace">,
   identity: string,
 ): RemotePaths {
   canonicalRemotePath(remoteHome, "remote home");
@@ -58,10 +68,18 @@ export function resolveRemotePaths(
     throw new Error("remote profile path component is invalid");
   }
   if (!IDENTITY.test(identity)) throw new Error("remote identity is invalid");
-  const generatedRoot = posix.join(remoteHome, ".cache", "remote-runner", "workspaces");
+  const generatedRoot =
+    profile.workspace.generatedRoot === LEGACY_GENERATED_ROOT
+      ? posix.join(remoteHome, ".cache", "remote-runner", "workspaces")
+      : profile.workspace.generatedRoot;
+  canonicalRemotePath(generatedRoot, "generated root");
+  const profileRoot = posix.join(generatedRoot, profile.consumer, profile.id);
   return {
     generatedRoot,
-    workspace: posix.join(generatedRoot, profile.consumer, profile.id, identity),
+    profileRoot,
+    workspace: posix.join(profileRoot, identity),
+    workloadLock: posix.join(profileRoot, ".locks", identity),
+    activityMarker: posix.join(profileRoot, ".activity", identity),
     toolchainRoot: posix.join(remoteHome, ".local", "share", "remote-runner", "toolchains"),
     launcher: posix.join(remoteHome, ".local", "share", "remote-runner", "launcher", "remote-launcher.mjs"),
     setupState: posix.join(
@@ -101,6 +119,7 @@ export function remoteChildArguments(
   node: string,
   launcher: string,
   workspace: string,
+  workloadLock: string,
   pathEnvironment: string,
   profile: Pick<Profile, "workload" | "secrets">,
   command: readonly string[],
@@ -109,6 +128,7 @@ export function remoteChildArguments(
     ["remote node", node],
     ["remote launcher", launcher],
     ["remote workspace", workspace],
+    ["remote workload lock", workloadLock],
   ] as const) {
     canonicalRemotePath(path, label);
   }
@@ -126,9 +146,10 @@ export function remoteChildArguments(
   return [
     "sh",
     "-ceu",
-    'cd -- "$1"; shift; exec "$@" 3>&2',
+    'workspace=$1; lock=$2; shift 2; umask 077; mkdir -p -- "$(dirname -- "$lock")"; exec 9>"$lock"; flock -x 9; cd -- "$workspace"; exec "$@" 3>&2',
     "remote-runner-child",
     workspace,
+    workloadLock,
     "/usr/bin/env",
     `PATH=${pathEnvironment}`,
     ...childEnvironment.map(([name, value]) => `${name}=${value}`),
@@ -279,6 +300,7 @@ export interface NodeProfileServicesOptions {
   readonly managedSshPath?: string;
   readonly launcherSource: Uint8Array;
   readonly processes?: NodeProcessRuntime;
+  readonly streamProcess?: typeof runStreamingProcess;
   readonly stdout?: (chunk: Uint8Array) => void;
   readonly stderr?: (chunk: Uint8Array) => void;
   readonly recordFallback?: (reason: string) => Promise<void>;
@@ -292,6 +314,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
   private readonly lockRoot: string;
   private readonly knownHostsPath: string;
   private readonly mutagen: MutagenSyncLifecycle;
+  private readonly streamProcess: typeof runStreamingProcess;
   private pausedSession: PausedMutagenSession | undefined;
   private remotePaths?: RemotePaths;
   private nodeRoot?: string;
@@ -304,6 +327,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
     canonicalRemotePath(options.home, "local home");
     if (!join(options.sourceRoot).startsWith("/")) throw new Error("source root must be absolute");
     this.processes = options.processes ?? new NodeProcessRuntime();
+    this.streamProcess = options.streamProcess ?? runStreamingProcess;
     this.identity = worktreeIdentity(options.sourceRoot);
     this.stateRoot = join(options.home, ".local", "state", "remote-runner");
     this.lockRoot = join(this.stateRoot, "locks");
@@ -336,6 +360,74 @@ export class NodeProfileServices implements ProfileExecutionServices {
           CAPTURE_BYTES,
         ),
     };
+  }
+
+  private retentionCommands(): WorkspaceRetentionCommandPort {
+    return {
+      run: (args) => this.remote().run(args),
+      withLock: async (args, cleanup): Promise<WorkspaceQuarantineResult> => {
+        const lock = args[5];
+        if (lock === undefined) throw new Error("workspace retention lock command is malformed");
+        canonicalRemotePath(lock, "workspace retention lock");
+        let owned = false;
+        try {
+          const release = new TextEncoder().encode("release\n");
+          const result = await this.streamProcess({
+            command: "ssh",
+            args: sshArguments(
+              this.profile.remote.target,
+              args,
+              this.profile.probes.connectTimeoutSeconds,
+              this.knownHostsPath,
+            ),
+            marker: new TextEncoder().encode("\0REMOTE_RUNNER_RETENTION_LOCKED\0"),
+            releaseAfterMarker: release,
+            onMarker: async () => {
+              owned = true;
+              await cleanup();
+            },
+            stdout: () => undefined,
+            stderr: this.options.stderr ?? (() => undefined),
+          });
+          if (!result.spawned) throw new Error("workspace retention SSH did not start");
+          if (result.markerSeen) {
+            if (result.exitCode !== 0) throw new Error(`workspace retention lock exited ${result.exitCode}`);
+            return "removed";
+          }
+          if (result.exitCode === 75) return "locked";
+          if (result.exitCode === 76) return "missing";
+          if (result.exitCode === 77) return "unsafe";
+          throw new Error(`workspace retention lock failed with exit code ${result.exitCode}`);
+        } finally {
+          if (owned) {
+            const removal = await this.remote().run(["rm", "-f", "--", lock]);
+            if (removal.exitCode !== 0) throw new Error("workspace retention lock removal failed");
+          }
+        }
+      },
+    };
+  }
+
+  private async pruneRetention(): Promise<void> {
+    const policy = this.profile.workspace.retention;
+    if (policy === undefined) return;
+    const paths = this.paths();
+    const setupStateRoot = posix.dirname(posix.dirname(paths.setupState));
+    const runtime = new RemoteWorkspaceRetentionRuntime(
+      this.retentionCommands(),
+      { profileRoot: paths.profileRoot, setupStateRoot },
+      (identity) =>
+        this.mutagen.terminateOwned({
+          consumer: this.profile.consumer,
+          profile: this.profile.id,
+          identity,
+          betaTarget: this.profile.remote.target,
+          betaRoot: posix.join(paths.profileRoot, identity),
+        }),
+    );
+    await pruneRemoteWorkspaces(runtime, this.identity, policy, Date.now(), () =>
+      randomUUID().replaceAll("-", "").slice(0, 16),
+    );
   }
 
   async validate(): Promise<void> {
@@ -388,30 +480,51 @@ export class NodeProfileServices implements ProfileExecutionServices {
   }
 
   async probe(): Promise<void> {
-    const result = await runSsh(
+    const homeResult = await runSsh(
+      this.processes,
+      this.profile.remote.target,
+      ["sh", "-ceu", 'home=$(realpath -- "${HOME:?}"); printf \'%s\\n\' "$home"', "remote-runner-home-probe"],
+      this.profile.probes.connectTimeoutSeconds,
+      this.knownHostsPath,
+      CAPTURE_BYTES,
+    );
+    if (homeResult.exitCode !== 0) {
+      const reason = classifySshFailure(decode(homeResult.stderr, "SSH home probe"), homeResult.exitCode);
+      throw new PreparationError(reason, true);
+    }
+    const remoteHome = decode(homeResult.stdout, "SSH home probe").replace(/\r?\n$/u, "");
+    try {
+      canonicalRemotePath(remoteHome, "remote home");
+    } catch (caught) {
+      throw new PreparationError("remote-shell", false, { cause: caught });
+    }
+    const paths = resolveRemotePaths(remoteHome, this.profile, this.identity);
+    const capacityResult = await runSsh(
       this.processes,
       this.profile.remote.target,
       [
         "sh",
         "-ceu",
-        'home=${HOME:?}; blocks=$(df -Pk -- "$home" | awk \'NR==2 {print $4}\'); case "$blocks" in *[!0-9]*|"") exit 74;; esac; printf \'%s\\n%s\\n\' "$home" "$((blocks * 1024))"',
-        "remote-runner-probe",
+        'umask 077; root=$1; mkdir -p -- "$root"; resolved=$(realpath -- "$root"); [ "$resolved" = "$root" ] || exit 73; blocks=$(df -Pk -- "$resolved" | awk \'NR==2 {print $4}\'); case "$blocks" in *[!0-9]*|"") exit 74;; esac; printf \'%s\\n\' "$((blocks * 1024))"',
+        "remote-runner-capacity-probe",
+        paths.generatedRoot,
       ],
       this.profile.probes.connectTimeoutSeconds,
       this.knownHostsPath,
       CAPTURE_BYTES,
     );
-    if (result.exitCode !== 0) {
-      const reason = classifySshFailure(decode(result.stderr, "SSH probe"), result.exitCode);
+    if (capacityResult.exitCode !== 0) {
+      if (capacityResult.exitCode === 73) throw new PreparationError("workspace", false);
+      const reason = classifySshFailure(decode(capacityResult.stderr, "SSH capacity probe"), capacityResult.exitCode);
       throw new PreparationError(reason, true);
     }
-    let parsed: { home: string; availableBytes: number };
-    try {
-      parsed = parseProbeOutput(decode(result.stdout, "SSH probe"), this.profile.probes.minimumFreeBytes);
-    } catch (caught) {
-      throw new PreparationError("capacity", false, { cause: caught });
+    const capacity = decode(capacityResult.stdout, "SSH capacity probe").trim();
+    if (!/^(?:0|[1-9][0-9]*)$/u.test(capacity)) throw new PreparationError("capacity", false);
+    const availableBytes = Number(capacity);
+    if (!Number.isSafeInteger(availableBytes) || availableBytes < this.profile.probes.minimumFreeBytes) {
+      throw new PreparationError("capacity", false);
     }
-    this.remotePaths = resolveRemotePaths(parsed.home, this.profile, this.identity);
+    this.remotePaths = paths;
   }
 
   private paths(): RemotePaths {
@@ -419,8 +532,21 @@ export class NodeProfileServices implements ProfileExecutionServices {
     return this.remotePaths;
   }
 
+  private async touchActivity(): Promise<void> {
+    const marker = this.paths().activityMarker;
+    const result = await this.remote().run([
+      "sh",
+      "-ceu",
+      'umask 077; marker=$1; mkdir -p -- "$(dirname -- "$marker")"; : >"$marker"',
+      "remote-runner-touch-activity",
+      marker,
+    ]);
+    if (result.exitCode !== 0) throw new Error("remote activity marker update failed");
+  }
+
   async pauseSync(): Promise<void> {
     const paths = this.paths();
+    await this.touchActivity();
     this.pausedSession = await this.mutagen.pauseForGitReconcile({
       consumer: this.profile.consumer,
       profile: this.profile.id,
@@ -611,7 +737,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
       "/bin",
     ].join(":");
     const frame = encodeSecretFrame(secrets, this.profile.secrets.allow);
-    const result = await runStreamingProcess({
+    const result = await this.streamProcess({
       command: "ssh",
       args: sshArguments(
         this.profile.remote.target,
@@ -619,6 +745,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
           posix.join(this.nodeRoot, "bin", "node"),
           paths.launcher,
           paths.workspace,
+          paths.workloadLock,
           pathEnvironment,
           this.profile,
           command,
@@ -641,11 +768,20 @@ export class NodeProfileServices implements ProfileExecutionServices {
         }),
     });
     if (!result.spawned || !result.markerSeen) return { kind: "not-started", reason: "child-start" };
+    try {
+      await this.touchActivity();
+      await this.pruneRetention();
+    } catch {
+      const warning = new TextEncoder().encode(
+        "remote-runner: workspace retention cleanup failed; workload exit preserved\n",
+      );
+      (this.options.stderr ?? ((chunk: Uint8Array) => process.stderr.write(chunk)))(warning);
+    }
     return { kind: "completed", exitCode: result.exitCode };
   }
 
   async runLocal(command: readonly string[]): Promise<number> {
-    const result = await runStreamingProcess({
+    const result = await this.streamProcess({
       command: command[0]!,
       args: command.slice(1),
       cwd: this.options.sourceRoot,

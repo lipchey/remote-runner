@@ -81,12 +81,30 @@ starting the daemon. Do not bypass these wrappers to accept a prompt interactive
 
 For `workspace`, use the read-only remote `git status` command in the index. The generated workstation
 checkout is disposable runner state, but the laptop worktree is authoritative and must never be reset
-by a repair.
+by a repair. `workspace.generatedRoot` accepts the exact legacy
+`~/.cache/remote-runner/workspaces` literal or a canonical absolute non-root POSIX path. Do not use a
+symlink as the generated root: the capacity probe requires `realpath` to equal the configured path.
+
+When `workspace.retention` is configured, normal remote workloads update an external activity marker
+under `<profile-root>/.activity/<identity>` before synchronization and after a marker-seen child exit.
+The workload holds `<profile-root>/.locks/<identity>` through launcher exit. Post-workload cleanup
+keeps the configured number of newest identities, honors `graceMinutes`, and skips an identity whose
+lock is busy. Temporary `.gc-<identity>-<nonce>` quarantines are resumable after interruption.
+Symlinks and special entries are reported but never followed or removed.
+
+Steady-state identity count is `keep`; short bursts may exceed it while grace-protected or active
+identities remain. A warning reading `workspace retention cleanup failed; workload exit preserved`
+means the workload verdict is authoritative and cleanup will retry on a later marker-seen run. Inspect
+the profile root, `.activity`, `.locks`, owned Mutagen session names, and `.gc-*` entries before any
+manual intervention.
 
 ## Disk capacity
 
-For `capacity`, run `ssh <remote> df -Pk <workspace>`. Free space below the validated profile floor is
-an outage, so clean unrelated workstation data separately; do not weaken the capacity floor silently.
+For `capacity`, run `ssh <remote> df -Pk <generated-root>`. The runner creates and canonicalizes the
+configured generated root first, so an absolute root on a dedicated mount is measured on that mount
+rather than on `$HOME`. Free space below the validated profile floor is an outage; clean unrelated
+workstation data separately or move the canonical root to the intended filesystem, but do not weaken
+the capacity floor silently.
 
 ## Bootstrap
 

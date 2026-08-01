@@ -97,6 +97,7 @@ export interface StreamingProcessRequest {
   readonly cwd?: string;
   readonly environment?: Readonly<Record<string, string>>;
   readonly stdin?: Uint8Array;
+  readonly releaseAfterMarker?: Uint8Array;
   readonly marker: Uint8Array;
   readonly onMarker: () => Promise<void>;
   readonly stdout: (chunk: Uint8Array) => void;
@@ -120,7 +121,12 @@ function retainedPrefixLength(contents: Buffer, marker: Buffer): number {
 
 export async function runStreamingProcess(request: StreamingProcessRequest): Promise<StreamingProcessResult> {
   if (request.marker.byteLength === 0) throw new Error("stream marker must not be empty");
+  if (request.releaseAfterMarker !== undefined && request.stdin !== undefined) {
+    throw new Error("marker handshake cannot also provide initial stdin");
+  }
   const marker = Buffer.from(request.marker);
+  const markerRelease = request.releaseAfterMarker === undefined ? undefined : Buffer.from(request.releaseAfterMarker);
+  request.releaseAfterMarker?.fill(0);
   return new Promise((resolve, reject) => {
     const child = spawn(request.command, [...request.args], {
       cwd: request.cwd,
@@ -161,9 +167,12 @@ export async function runStreamingProcess(request: StreamingProcessRequest): Pro
         markerSeen = true;
         markerPromise = Promise.resolve()
           .then(request.onMarker)
+          .then(() => {
+            if (markerRelease === undefined) return;
+            child.stdin.end(markerRelease, () => markerRelease.fill(0));
+          })
           .catch((caught) => {
             failStream(caught);
-            throw caught;
           });
         write(request.stderr, contents.subarray(markerIndex + marker.byteLength));
         return;
@@ -192,10 +201,11 @@ export async function runStreamingProcess(request: StreamingProcessRequest): Pro
       }, reject);
     });
     child.stdin.on("error", () => undefined);
-    if (request.stdin === undefined) child.stdin.end();
-    else {
-      const copied = Buffer.from(request.stdin);
-      request.stdin.fill(0);
+    const initialInput = request.stdin;
+    if (request.releaseAfterMarker === undefined && initialInput === undefined) child.stdin.end();
+    else if (request.releaseAfterMarker === undefined) {
+      const copied = Buffer.from(initialInput!);
+      initialInput!.fill(0);
       child.stdin.end(copied);
     }
   });

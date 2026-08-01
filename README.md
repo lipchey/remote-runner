@@ -58,6 +58,27 @@ For allowlisted development secrets, a profile may declare `dotenv: .env`. The r
 the named keys locally, never synchronizes the file, and sends values through framed SSH input. An
 argv `provider` remains available for consumers that cannot use a dotenv file.
 
+## Remote workspace placement and retention
+
+The legacy generated root remains valid. A profile may instead select a canonical absolute POSIX
+path and opt into bounded cleanup:
+
+```yaml
+workspace:
+  generatedRoot: /mnt/DataAI/home/admin/.cache/remote-runner/workspaces
+  retention:
+    keep: 3
+    graceMinutes: 60
+```
+
+Capacity is probed on the filesystem containing `generatedRoot`, not on the remote home filesystem.
+Retention reserves the current identity, keeps the newest identities up to `keep`, and protects any
+additional identity active within `graceMinutes`. Active workloads hold a profile identity lock;
+cleanup takes the same lock non-blockingly, quarantines one exact stale directory, terminates only
+its owned Mutagen session, and then removes the quarantine and runner metadata. Cleanup never
+follows symlinks and never changes the workload exit code. A cleanup failure emits a bounded warning
+and is retried after a later workload.
+
 ## Bootstrap convergence
 
 Dependency fingerprints are a performance optimization, not the final correctness gate. Exact

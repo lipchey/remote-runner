@@ -58,6 +58,11 @@ interface ValidatedSession {
   readonly ignores: readonly string[];
 }
 
+interface ValidatedTermination {
+  readonly name: string;
+  readonly beta: string;
+}
+
 interface SessionRecord {
   readonly name: string;
   readonly alpha: string;
@@ -135,6 +140,15 @@ function validateOptions(options: MutagenSessionOptions): ValidatedSession {
     alpha: options.canonicalAlphaRoot,
     beta: betaEndpoint(options.betaTarget, options.betaRoot),
     ignores: compileIgnores(options.ignores),
+  };
+}
+
+function validateTerminationOptions(
+  options: Pick<MutagenSessionOptions, "consumer" | "profile" | "identity" | "betaTarget" | "betaRoot">,
+): ValidatedTermination {
+  return {
+    name: mutagenSessionName(options.consumer, options.profile, options.identity),
+    beta: betaEndpoint(options.betaTarget, options.betaRoot),
   };
 }
 
@@ -259,6 +273,12 @@ function assertOwnedRecord(record: SessionRecord, expected: ValidatedSession): v
   }
 }
 
+function assertOwnedTerminationRecord(record: SessionRecord, expected: ValidatedTermination): void {
+  assertCanonicalAbsolutePath(record.alpha, "Mutagen alpha root");
+  if (record.beta !== expected.beta) throw new Error("Mutagen session endpoint mismatch");
+  if (record.mode !== "one-way-replica") throw new Error("Mutagen session mode mismatch");
+}
+
 export class MutagenSyncLifecycle {
   private readonly descriptors = new WeakMap<object, DescriptorState>();
   constructor(
@@ -291,6 +311,22 @@ export class MutagenSyncLifecycle {
     const match = matches[0];
     if (match) assertOwnedRecord(match, expected);
     return match;
+  }
+
+  async terminateOwned(
+    options: Pick<MutagenSessionOptions, "consumer" | "profile" | "identity" | "betaTarget" | "betaRoot">,
+  ): Promise<void> {
+    const expected = validateTerminationOptions(options);
+    const result = await this.run(["sync", "list", "--template", LIST_TEMPLATE], "Mutagen session list");
+    if (result.exitCode !== 0) {
+      throw new Error(`Mutagen session list failed with exit code ${result.exitCode}`);
+    }
+    const matches = parseListing(result.stdout).filter(({ name }) => name === expected.name);
+    if (matches.length > 1) throw new Error("multiple Mutagen sessions have the owned name");
+    const match = matches[0];
+    if (!match) return;
+    assertOwnedTerminationRecord(match, expected);
+    await this.checked(["sync", "terminate", expected.name], "Mutagen session retention terminate");
   }
 
   private createArguments(session: ValidatedSession, paused: boolean): string[] {

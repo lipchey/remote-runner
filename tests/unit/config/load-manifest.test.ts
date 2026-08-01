@@ -24,6 +24,28 @@ describe("loadManifestText", () => {
     expect(manifest.profiles[0]?.workspace.baseRef).toBe("origin/main");
   });
 
+  it("accepts a canonical absolute generated root with bounded retention", () => {
+    const manifest = loadManifestText(
+      validManifest.replace(
+        'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces" }',
+        'workspace: { generatedRoot: "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces", retention: { keep: 3, graceMinutes: 60 } }',
+      ),
+    );
+
+    expect(manifest.profiles[0]?.workspace).toEqual({
+      generatedRoot: "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces",
+      retention: { keep: 3, graceMinutes: 60 },
+    });
+  });
+
+  it("keeps the legacy generated root backward compatible without enabling retention", () => {
+    const manifest = loadManifestText(validManifest);
+
+    expect(manifest.profiles[0]?.workspace).toEqual({
+      generatedRoot: "~/.cache/remote-runner/workspaces",
+    });
+  });
+
   it("accepts ensure commands and object-form fingerprint discovery", () => {
     const manifest = loadManifestText(
       validManifest.replace(
@@ -84,6 +106,11 @@ describe("loadManifestText", () => {
       "workspace",
       'generatedRoot: "~/.cache/remote-runner/workspaces"',
       'generatedRoot: "~/.cache/remote-runner/workspaces", extra: true',
+    ],
+    [
+      "workspace retention",
+      'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces" }',
+      'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces", retention: { keep: 3, graceMinutes: 60, extra: true } }',
     ],
     ["probes", "minimumFreeBytes: 10737418240", "minimumFreeBytes: 10737418240, extra: true"],
     ["sync", "ignores: [node_modules, .git]", "ignores: [node_modules, .git], extra: true"],
@@ -147,7 +174,7 @@ describe("loadManifestText", () => {
     ["mode", "mode: auto", "mode: sometimes", /profile mode/],
     ["fallback", "fallback: local", "fallback: remote", /profile fallback/],
     ["trusted fingerprint", 'hostKeySha256: "SHA256:trusted"', 'hostKeySha256: "MD5:bad"', /SHA256/],
-    ["generated root", "~/.cache/remote-runner/workspaces", "/tmp", /generated root/],
+    ["generated root", "~/.cache/remote-runner/workspaces", "relative/workspaces", /generated root/],
     [
       "workspace base ref",
       'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces" }',
@@ -168,6 +195,33 @@ describe("loadManifestText", () => {
     ["benchmark sample upper bound", "samples: 3", "samples: 1001", /benchmark samples/],
   ])("rejects an invalid %s", (_case, before, after, message) => {
     expect(() => loadManifestText(validManifest.replace(before, after))).toThrow(message);
+  });
+
+  it.each(["/", "/mnt/DataAI/../workspaces", "~/other", "relative/workspaces"])(
+    "rejects unsafe generated root %s",
+    (generatedRoot) => {
+      expect(() =>
+        loadManifestText(
+          validManifest.replace(
+            'generatedRoot: "~/.cache/remote-runner/workspaces"',
+            `generatedRoot: "${generatedRoot}"`,
+          ),
+        ),
+      ).toThrow(/generated root/u);
+    },
+  );
+
+  it.each([
+    ["keep lower", "keep: 3", "keep: 0"],
+    ["keep upper", "keep: 3", "keep: 65"],
+    ["grace lower", "graceMinutes: 60", "graceMinutes: 0"],
+    ["grace upper", "graceMinutes: 60", "graceMinutes: 10081"],
+  ])("rejects invalid retention %s", (_case, before, after) => {
+    const withRetention = validManifest.replace(
+      'workspace: { generatedRoot: "~/.cache/remote-runner/workspaces" }',
+      'workspace: { generatedRoot: "/mnt/DataAI/workspaces", retention: { keep: 3, graceMinutes: 60 } }',
+    );
+    expect(() => loadManifestText(withRetention.replace(before, after))).toThrow(/retention/u);
   });
 
   it("rejects missing or incorrectly typed required values", () => {

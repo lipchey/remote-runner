@@ -1,4 +1,7 @@
 import process from "node:process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -76,5 +79,65 @@ describe("runStreamingProcess", () => {
     });
 
     expect(result).toEqual({ exitCode: 127, signal: null, markerSeen: false, spawned: false });
+  });
+
+  it("releases marker-handshake stdin only after the marker callback completes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "remote-runner-marker-"));
+    const receipt = join(root, "cleanup-complete");
+    const release = new TextEncoder().encode("release\n");
+    try {
+      const result = await runStreamingProcess({
+        command: process.execPath,
+        args: [
+          "-e",
+          [
+            "const fs=require('node:fs');let value='';",
+            "process.stderr.write('RETENTION_LOCKED\\n');",
+            "process.stdin.setEncoding('utf8');",
+            "process.stdin.on('data',chunk=>value+=chunk);",
+            `process.stdin.on('end',()=>process.exit(value==='release\\n'&&fs.existsSync(${JSON.stringify(receipt)})?0:9));`,
+          ].join(""),
+        ],
+        marker: new TextEncoder().encode("RETENTION_LOCKED\n"),
+        releaseAfterMarker: release,
+        onMarker: async () => {
+          await writeFile(receipt, "ok");
+        },
+        stdout: () => undefined,
+        stderr: () => undefined,
+      });
+
+      expect(result).toEqual({ exitCode: 0, signal: null, markerSeen: true, spawned: true });
+      expect(release.every((byte) => byte === 0)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a marker callback failure without emitting an unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const observe = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", observe);
+    try {
+      await expect(
+        runStreamingProcess({
+          command: process.execPath,
+          args: ["-e", "process.stderr.write('RETENTION_LOCKED\\n');process.stdin.resume();"],
+          marker: new TextEncoder().encode("RETENTION_LOCKED\n"),
+          releaseAfterMarker: new TextEncoder().encode("release\n"),
+          onMarker: async () => {
+            throw new Error("retention callback failed");
+          },
+          stdout: () => undefined,
+          stderr: () => undefined,
+        }),
+      ).rejects.toThrow("retention callback failed");
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", observe);
+    }
   });
 });
