@@ -649,6 +649,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
       command: command[0]!,
       args: command.slice(1),
       cwd: this.options.sourceRoot,
+      environment: this.profile.workload.childEnvironment,
       marker: new TextEncoder().encode("\0REMOTE_RUNNER_UNUSED_MARKER\0"),
       onMarker: async () => undefined,
       stdout:

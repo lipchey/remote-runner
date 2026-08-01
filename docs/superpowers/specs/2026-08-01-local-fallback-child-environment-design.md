@@ -1,6 +1,6 @@
 # Local Fallback Child Environment Design
 
-**Status:** approved.
+**Status:** done.
 
 ## Problem
 
@@ -27,3 +27,12 @@ than merely testing manifest parsing or a fake runtime.
 - The installed CLI is refreshed from the fixed revision.
 - Ariadne completes `./scripts/verify --full` with `REMOTE_RUNNER_MODE=local` and without manually
   exporting its manifest-declared `PNPM_CONFIG_*` variables.
+
+## Acceptance evidence
+
+- The real local-child test failed with `received "missing"` before the fix and passed afterward.
+- Remote-runner passed 415/415 tests plus typecheck, formatting, and build.
+- The reinstalled CLI exposed all three Ariadne manifest variables in a forced-local probe.
+- `REMOTE_RUNNER_MODE=local ./scripts/verify --full` passed in the Ariadne feature worktree without
+  manually exporting `PNPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE` or
+  `PNPM_CONFIG_CONFIRM_MODULES_PURGE`.
