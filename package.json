@@ -12,6 +12,8 @@
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "format": "prettier . --write --ignore-unknown",
+    "format:check": "prettier . --check --ignore-unknown",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "pnpm typecheck && pnpm test && pnpm build"
@@ -21,6 +23,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.0",
+    "prettier": "3.9.5",
     "typescript": "^5.7.2",
     "vitest": "^3.2.7"
   }
