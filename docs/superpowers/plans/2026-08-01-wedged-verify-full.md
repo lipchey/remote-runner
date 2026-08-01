@@ -14,10 +14,13 @@ tests across 43 files plus formatting, typecheck, and build. The installed immut
 `remote-runner 0.1.0 (app 7a8c454469133bf4e4633bef)`; both the verified build bootstrap and the
 installed CLI's idempotent reinstall returned that identity.
 
-**Consumer status:** Active; the verified provider build is installed and Ariadne integration is
-the next milestone.
+**Consumer status:** Completed on 2026-08-01 by
+[Ariadne PR #211](https://github.com/lipchey/ariadne/pull/211), merged as `6576c09a` from head
+`c91549f`. Targeted tests passed
+13/13 consumer-policy and 5/5 pnpm-state; the final remote-only full gate exited 0 on Pop!_OS.
 
-**Overall status:** In progress pending Ariadne live acceptance and consumer publication.
+**Overall status:** In progress. Ariadne PR #211 was merged first; merge remote-runner PR #7 next so
+the published provider catches up with the already-installed build and the consumer contract.
 
 ---
 
@@ -417,7 +420,7 @@ the pushed SHA, `isDraft=false`, and no merge conflict. Poll CI with bounded `rt
 - Modify: `/Users/admin/Projects/worktrees/ariadne-wedged-verify-full/scripts/pnpm-state.mjs`
 - Test: `/Users/admin/Projects/worktrees/ariadne-wedged-verify-full/scripts/pnpm-state.tests.mjs`
 
-- [ ] **Step 1: Create the repository-owned linked worktree**
+- [x] **Step 1: Create the repository-owned linked worktree**
 
 From `/Users/admin/Projects/ariadne`, run:
 
@@ -429,7 +432,7 @@ node scripts/worktree-local.mjs create ../worktrees/ariadne-wedged-verify-full c
 Expected: worktree creation succeeds. Its automatic background prewarm is non-gating; do not wait
 for it, poll it, or start a duplicate baseline verify.
 
-- [ ] **Step 2: Write failing pnpm-policy tests**
+- [x] **Step 2: Write failing pnpm-policy tests**
 
 Replace the remote-only argv expectation with two cases, one with and one without
 `REMOTE_RUNNER_CHILD`. Both probes must be `PROBE_ARGUMENTS`, and both repair calls must be:
@@ -441,13 +444,13 @@ Replace the remote-only argv expectation with two cases, one with and one withou
 Set `PNPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE=false` in the remote environment and assert it is
 preserved in the spawned environment rather than duplicated as a CLI option.
 
-- [ ] **Step 3: Run the pnpm-state tests and observe RED**
+- [x] **Step 3: Run the pnpm-state tests and observe RED**
 
 Run: `rtk pnpm exec vitest run scripts/pnpm-state.tests.mjs`
 
 Expected: FAIL because current code injects both config flags only for `REMOTE_RUNNER_CHILD=1`.
 
-- [ ] **Step 4: Implement one inherited store policy**
+- [x] **Step 4: Implement one inherited store policy**
 
 Set:
 
@@ -458,13 +461,13 @@ const REPAIR_ARGUMENTS = ["--config.confirm-modules-purge=false", "install", "--
 Remove `remoteConfigArguments`; use `PROBE_ARGUMENTS` for probes and `REPAIR_ARGUMENTS` for repair
 in every environment. Preserve inherited `PNPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE` unchanged.
 
-- [ ] **Step 5: Run the pnpm-state tests and observe GREEN**
+- [x] **Step 5: Run the pnpm-state tests and observe GREEN**
 
 Run: `rtk pnpm exec vitest run scripts/pnpm-state.tests.mjs`
 
 Expected: all pnpm-state tests pass.
 
-- [ ] **Step 6: Commit the pnpm fix**
+- [x] **Step 6: Commit the pnpm fix**
 
 ```bash
 rtk git add -- scripts/pnpm-state.mjs scripts/pnpm-state.tests.mjs
@@ -479,7 +482,7 @@ rtk git commit -m "fix: align pnpm repair with workload policy"
 - Test: `/Users/admin/Projects/worktrees/ariadne-wedged-verify-full/scripts/worktree-local.test.mjs`
 - Modify: `/Users/admin/Projects/worktrees/ariadne-wedged-verify-full/.claude/memory/project-architecture.md`
 
-- [ ] **Step 1: Write a failing consumer-contract test**
+- [x] **Step 1: Write a failing consumer-contract test**
 
 In the existing remote-runner ownership test, assert the manifest includes:
 
@@ -491,13 +494,13 @@ assert.match(manifest, /vendor\/dev-standards\/runner\/dist\/\.built-from/u);
 Retain the existing assertions for `mode: remote`, `fallback: fail`, DataAI root, and retention
 `3/60`.
 
-- [ ] **Step 2: Run the contract test and observe RED**
+- [x] **Step 2: Run the contract test and observe RED**
 
 Run: `rtk pnpm exec vitest run scripts/worktree-local.test.mjs`
 
 Expected: FAIL because the manifest has no artifact declarations.
 
-- [ ] **Step 3: Add the two exact artifacts**
+- [x] **Step 3: Add the two exact artifacts**
 
 Under `bootstrap`, between `setup` and `ensure`, add:
 
@@ -511,7 +514,7 @@ Update the architecture memory to state that declared generated artifacts are ch
 preparation and missing artifacts trigger one setup/recheck cycle. Do not move setup logic into
 Ariadne.
 
-- [ ] **Step 4: Validate and run targeted tests**
+- [x] **Step 4: Validate and run targeted tests**
 
 Run:
 
@@ -522,7 +525,7 @@ rtk pnpm exec vitest run scripts/worktree-local.test.mjs scripts/pnpm-state.test
 
 Expected: manifest validation succeeds and all targeted tests pass.
 
-- [ ] **Step 5: Commit the consumer contract**
+- [x] **Step 5: Commit the consumer contract**
 
 ```bash
 rtk git add -- .remote-runner.yaml scripts/worktree-local.test.mjs .claude/memory/project-architecture.md
@@ -537,13 +540,13 @@ rtk git commit -m "fix: declare remote bootstrap artifacts"
 - Use consumer branch: `/Users/admin/Projects/worktrees/ariadne-wedged-verify-full`
 - Temporary manifest: `/private/tmp/ariadne-16b-artifact-regression.yaml`
 
-- [ ] **Step 1: Confirm the regression precondition**
+- [x] **Step 1: Confirm the regression precondition**
 
 Require the existing `cfd4838410ab64dd753c6679` workspace bundle to be absent and its Mutagen
 session to remain the exact connected `ariadne-16b` session. Do not terminate or recreate that
 session.
 
-- [ ] **Step 2: Create a fail-closed temporary manifest for the old workspace**
+- [x] **Step 2: Create a fail-closed temporary manifest for the old workspace**
 
 Using `apply_patch`, create `/private/tmp/ariadne-16b-artifact-regression.yaml` from the
 `ariadne-16b` manifest with only these deliberate differences:
@@ -562,19 +565,21 @@ bootstrap:
 Keep the existing target, host key, fingerprint, workload child environment, secrets, and
 benchmark contract byte-for-byte equivalent.
 
-- [ ] **Step 3: Run an attached repair canary from the wedged identity**
+- [x] **Step 3: Diagnose and preserve the legacy fixture**
 
-From `/Users/admin/Projects/worktrees/ariadne-16b`, run:
+The exact attached run failed before bootstrap with `reason=workspace`. Bounded provider diagnostics
+proved that the legacy home workspace's `.git` file points into the DataAI mirror after the earlier
+storage migration. Preserve its Mutagen session and source worktree; do not terminate, recreate, or
+use this cross-root-corrupt workspace as artifact-convergence evidence.
 
-```bash
-/Users/admin/.local/bin/remote-runner run verify-full --manifest /private/tmp/ariadne-16b-artifact-regression.yaml -- hostname
-```
+- [x] **Step 4: Prove controlled artifact-loss recovery on the clean DataAI identity**
 
-Expected: setup recreates both declared files, command prints `pop-os`, exit is 0, and latest runner
-logs show `mode=remote,status=0`. Confirm the remote bundle and stamp now exist. Remove the temporary
-manifest with `apply_patch`; do not change the `ariadne-16b` branch.
+On feature identity `d30c2e3a56d050a798074bed`, a baseline attached canary returned `pop-os`.
+Both declared generated artifacts were then removed from that exact runner-owned workspace. The
+next attached canary recreated both and recorded `mode=remote,status=0` without local fallback.
+The temporary legacy manifest was removed with `apply_patch`.
 
-- [ ] **Step 4: Run feature-branch canary and mandatory full verification**
+- [x] **Step 5: Run mandatory full verification**
 
 From `/Users/admin/Projects/worktrees/ariadne-wedged-verify-full`, run:
 
@@ -593,20 +598,20 @@ report path is under `/mnt/DataAI`; no local fallback event appears.
 - Modify: `/Users/admin/Projects/worktrees/ariadne-wedged-verify-full/.claude/memory/status.md`
 - Update external handoff after both PRs exist: `/Users/admin/.claude/handoff/remote-runner-2026-08-01-wedged-verify-full.md`
 
-- [ ] **Step 1: Record durable project evidence**
+- [x] **Step 1: Record durable project evidence**
 
 Update Ariadne status memory with the provider commit/PR, installed app identity, targeted test
 counts, old-workspace self-heal result, feature-branch full verify result, DataAI report path, and
 the next action `merge runner PR before Ariadne PR`. Do not leave a pending post-merge documentation
 step.
 
-- [ ] **Step 2: Re-run the final branch gate after documentation changes**
+- [x] **Step 2: Re-run the final branch gate after documentation changes**
 
 Run: `./scripts/verify --full`
 
 Expected: exit 0 on Pop!_OS with latest runner logs `mode=remote,status=0`.
 
-- [ ] **Step 3: Commit, push, and open the ready Ariadne PR**
+- [x] **Step 3: Commit, push, and open the ready Ariadne PR**
 
 ```bash
 rtk git add -- .claude/memory/status.md
@@ -624,7 +629,7 @@ In the remote-runner worktree, update this plan with both PR URLs and final acce
 set `Consumer status` and `Overall status` to `Completed`, commit the reconciliation, push the
 runner branch again, and require its CI to return green on the new head.
 
-- [ ] **Step 5: Close the external handoff with evidence**
+- [x] **Step 5: Close the external handoff with evidence**
 
 Append a `Resolution` section to the external handoff using `apply_patch`. Record both ready PR
 URLs, immutable runner receipt, live self-heal result, remote full-verification result, merge order,
