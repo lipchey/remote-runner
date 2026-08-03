@@ -13,6 +13,7 @@
 ### Task 1: Recover prunable worktree registrations
 
 **Files:**
+
 - Modify: `tests/unit/workspace/git-workspace.test.ts`
 - Modify: `src/workspace/git-workspace.ts`
 
@@ -56,6 +57,7 @@ git commit -m "fix: recover prunable remote worktrees"
 ### Task 2: Resolve diagnostic paths from the manifest
 
 **Files:**
+
 - Modify: `tests/unit/app/default-dependencies.test.ts`
 - Modify: `src/app/default-dependencies.ts`
 
@@ -96,6 +98,7 @@ git commit -m "fix: honor generated root in diagnostics"
 ### Task 3: Report stale worktree registrations explicitly
 
 **Files:**
+
 - Modify: `tests/unit/diagnostics/doctor.test.ts`
 - Modify: `tests/unit/app/default-dependencies.test.ts`
 - Modify: `src/diagnostics/doctor.ts`
@@ -144,6 +147,7 @@ git commit -m "feat: diagnose stale worktree registrations"
 ### Task 4: Verify and publish
 
 **Files:**
+
 - Modify: `docs/superpowers/plans/2026-08-03-stale-worktree-recovery.md`
 
 - [ ] **Step 1: Run complete verification**
