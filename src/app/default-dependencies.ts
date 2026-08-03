@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { arch, homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import process from "node:process";
 
 import { runBenchmark, type BenchmarkExecution } from "../benchmark/run-benchmark.js";
@@ -25,6 +25,7 @@ import { createProfileRuntime } from "./profile-runtime.js";
 import { NodeProfileServices } from "./pilot-services.js";
 
 const CAPTURE_BYTES = 64 * 1024;
+const LEGACY_GENERATED_ROOT = "~/.cache/remote-runner/workspaces";
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
 export interface NodeCliDependencyOptions {
@@ -102,8 +103,23 @@ function hostFromTarget(target: string): string {
   return target.includes("@") ? target.slice(target.lastIndexOf("@") + 1) : target;
 }
 
-function remoteWorkspace(profile: Profile, identity: string): string {
-  return `.cache/remote-runner/workspaces/${profile.consumer}/${profile.id}/${identity}`;
+function remoteDiagnosticPaths(
+  profile: Profile,
+  identity: string,
+): {
+  readonly generatedRoot: string;
+  readonly workspace: string;
+  readonly mirror: string;
+} {
+  const generatedRoot =
+    profile.workspace.generatedRoot === LEGACY_GENERATED_ROOT
+      ? ".cache/remote-runner/workspaces"
+      : profile.workspace.generatedRoot;
+  return {
+    generatedRoot,
+    workspace: posix.join(generatedRoot, profile.consumer, profile.id, identity),
+    mirror: posix.join(generatedRoot, profile.consumer, ".mirror.git"),
+  };
 }
 
 async function readOptionalUtf8(path: string): Promise<string | undefined> {
@@ -147,10 +163,11 @@ async function inspectRemoteStatus(
   readonly workspace: "ready" | "missing" | "dirty" | "unknown";
   readonly fingerprint: "current" | "stale" | "missing" | "unknown";
 }> {
-  const workspace = `.cache/remote-runner/workspaces/${profile.consumer}/${profile.id}/${identity}`;
+  const { workspace } = remoteDiagnosticPaths(profile, identity);
   const setupState = `.local/state/remote-runner/profiles/${profile.consumer}/${profile.id}/${identity}/setup.json`;
   const script = [
-    "workspace=$HOME/$1",
+    "workspace=$1",
+    'case "$workspace" in /*) ;; *) workspace=$HOME/$workspace;; esac',
     "setup=$HOME/$2",
     'if [ ! -d "$workspace" ]; then workspace_status=missing; elif [ -n "$(git -C "$workspace" status --porcelain 2>/dev/null)" ]; then workspace_status=dirty; else workspace_status=ready; fi',
     'if [ -f "$setup" ]; then fingerprint_status=current; else fingerprint_status=missing; fi',
@@ -220,7 +237,7 @@ async function inspectProbe(
   let command: string;
   let args: readonly string[];
   let environment: Readonly<Record<string, string>> | undefined;
-  const workspace = remoteWorkspace(profile, identity);
+  const remotePaths = remoteDiagnosticPaths(profile, identity);
   if (probe.id === "network.dns") {
     command = "dscacheutil";
     args = ["-q", "host", "-a", "name", hostFromTarget(profile.remote.target)];
@@ -240,7 +257,13 @@ async function inspectProbe(
   } else {
     const remoteArguments =
       probe.id === "remote.capacity"
-        ? ["sh", "-ceu", 'exec df -Pk "$HOME/$1"', "remote-runner-capacity", workspace]
+        ? [
+            "sh",
+            "-ceu",
+            'path=$1; case "$path" in /*) ;; *) path=$HOME/$path;; esac; exec df -Pk "$path"',
+            "remote-runner-capacity",
+            remotePaths.generatedRoot,
+          ]
         : probe.id === "remote.bootstrap"
           ? [
               "sh",
@@ -248,10 +271,31 @@ async function inspectProbe(
               'set -- "$HOME"/.local/share/remote-runner/toolchains/node-v*/bin; [ -x "$1/node" ] && [ -x "$1/pnpm" ]',
             ]
           : probe.id === "remote.workspace"
-            ? ["sh", "-ceu", 'exec git -C "$HOME/$1" status --short --branch', "remote-runner-workspace", workspace]
-            : probe.id === "secrets.persistence"
-              ? ["sh", "-ceu", 'exec find "$HOME/$1" -maxdepth 1 -name .env -print', "remote-runner-secrets", workspace]
-              : ["true"];
+            ? [
+                "sh",
+                "-ceu",
+                'path=$1; case "$path" in /*) ;; *) path=$HOME/$path;; esac; exec git -C "$path" status --short --branch',
+                "remote-runner-workspace",
+                remotePaths.workspace,
+              ]
+            : probe.id === "remote.workspace-registration"
+              ? [
+                  "sh",
+                  "-ceu",
+                  'workspace=$1; mirror=$2; case "$workspace" in /*) ;; *) workspace=$HOME/$workspace;; esac; case "$mirror" in /*) ;; *) mirror=$HOME/$mirror;; esac; [ ! -d "$workspace" ] || exit 0; [ -d "$mirror" ] || exit 0; listing=$(git --git-dir="$mirror" worktree list --porcelain); if printf \'%s\\n\' "$listing" | grep -Fqx -- "worktree $workspace"; then exit 74; fi',
+                  "remote-runner-workspace-registration",
+                  remotePaths.workspace,
+                  remotePaths.mirror,
+                ]
+              : probe.id === "secrets.persistence"
+                ? [
+                    "sh",
+                    "-ceu",
+                    'path=$1; case "$path" in /*) ;; *) path=$HOME/$path;; esac; exec find "$path" -maxdepth 1 -name .env -print',
+                    "remote-runner-secrets",
+                    remotePaths.workspace,
+                  ]
+                : ["true"];
     const result = await runSsh(
       options.processes,
       profile.remote.target,

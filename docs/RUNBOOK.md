@@ -46,24 +46,25 @@ policy.
 
 ## Stable reason-code index
 
-| Reason           | Read-only diagnosis                                                         |
-| ---------------- | --------------------------------------------------------------------------- |
-| `dns`            | `dscacheutil -q host -a name <remote>`                                      |
-| `host-key`       | `ssh-keygen -F <remote>`                                                    |
-| `authentication` | `ssh -o BatchMode=yes <remote> true`                                        |
-| `transport`      | `ssh -o ConnectTimeout=5 <remote> true`                                     |
-| `remote-shell`   | `ssh <remote> printf remote-shell-ok`                                       |
-| `capacity`       | `ssh <remote> df -Pk <workspace>`                                           |
-| `bootstrap`      | `ssh <remote> test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm` |
-| `validation`     | `remote-runner validate <profile>`                                          |
-| `lock`           | `ls -ld <lock-root>`                                                        |
-| `sync`           | `mutagen sync list <session>`                                               |
-| `workspace`      | `ssh <remote> git -C <workspace> status --short --branch`                   |
-| `secrets`        | `ssh <remote> find <workspace> -maxdepth 1 -name .env -print`               |
-| `controller`     | `launchctl print gui/<uid>/com.lipchey.remote-runner`                       |
-| `child-start`    | `tail -n 50 <runner-log>`                                                   |
-| `timeout`        | `ssh -o ConnectTimeout=2 <remote> true`                                     |
-| `unknown`        | `remote-runner status <profile>`                                            |
+| Reason                   | Read-only diagnosis                                                         |
+| ------------------------ | --------------------------------------------------------------------------- |
+| `dns`                    | `dscacheutil -q host -a name <remote>`                                      |
+| `host-key`               | `ssh-keygen -F <remote>`                                                    |
+| `authentication`         | `ssh -o BatchMode=yes <remote> true`                                        |
+| `transport`              | `ssh -o ConnectTimeout=5 <remote> true`                                     |
+| `remote-shell`           | `ssh <remote> printf remote-shell-ok`                                       |
+| `capacity`               | `ssh <remote> df -Pk <workspace>`                                           |
+| `bootstrap`              | `ssh <remote> test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm` |
+| `validation`             | `remote-runner validate <profile>`                                          |
+| `lock`                   | `ls -ld <lock-root>`                                                        |
+| `sync`                   | `mutagen sync list <session>`                                               |
+| `workspace`              | `ssh <remote> git -C <workspace> status --short --branch`                   |
+| `workspace-registration` | `ssh <remote> inspect exact Git worktree registration for <workspace>`      |
+| `secrets`                | `ssh <remote> find <workspace> -maxdepth 1 -name .env -print`               |
+| `controller`             | `launchctl print gui/<uid>/com.lipchey.remote-runner`                       |
+| `child-start`            | `tail -n 50 <runner-log>`                                                   |
+| `timeout`                | `ssh -o ConnectTimeout=2 <remote> true`                                     |
+| `unknown`                | `remote-runner status <profile>`                                            |
 
 ## SSH and Tailscale
 
@@ -101,6 +102,14 @@ The workload holds `<profile-root>/.locks/<identity>` through launcher exit. Pos
 keeps the configured number of newest identities, honors `graceMinutes`, and skips an identity whose
 lock is busy. Temporary `.gc-<identity>-<nonce>` quarantines are resumable after interruption.
 Symlinks and special entries are reported but never followed or removed.
+
+`remote-runner doctor <profile>` reports `workspace-registration` when the exact generated
+workspace directory is missing but the consumer's bare mirror still lists it as a registered Git
+worktree. A normal `remote-runner run <profile>` self-heals that state under the consumer lock: it
+prunes Git-admin records that are already prunable, relists live worktrees, and recreates the
+confined candidate. For an older installed runner that predates this recovery, inspect
+`git --git-dir=<consumer-mirror> worktree list --porcelain` before manually pruning; never delete or
+reset the authoritative laptop worktree.
 
 Steady-state identity count is `keep`; short bursts may exceed it while grace-protected or active
 identities remain. A warning reading `workspace retention cleanup failed; workload exit preserved`

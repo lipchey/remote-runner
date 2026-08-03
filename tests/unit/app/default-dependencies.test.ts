@@ -15,7 +15,7 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-async function fixture() {
+async function fixture(manifest = validManifest) {
   const root = await mkdtemp(join(tmpdir(), "remote-runner-defaults-"));
   temporaryRoots.push(root);
   const sourceRoot = join(root, "source");
@@ -23,7 +23,7 @@ async function fixture() {
   const managedSshPath = join(home, ".local", "share", "remote-runner", "ssh");
   const knownHostsPath = join(home, ".local", "state", "remote-runner", "known_hosts", "managed");
   await mkdir(sourceRoot, { recursive: true });
-  await writeFile(join(sourceRoot, ".remote-runner.yaml"), validManifest);
+  await writeFile(join(sourceRoot, ".remote-runner.yaml"), manifest);
   return { root, sourceRoot, home, managedSshPath, knownHostsPath };
 }
 
@@ -38,6 +38,7 @@ function result(stdout = "", exitCode = 0): BoundedProcessResult {
 
 class FakeProcesses {
   readonly requests: BoundedProcessRequest[] = [];
+  registrationExitCode = 0;
 
   async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
     this.requests.push(request);
@@ -47,6 +48,9 @@ class FakeProcesses {
     }
     if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-status")) {
       return result('{"workspace":"ready","fingerprint":"current"}\n');
+    }
+    if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-workspace-registration")) {
+      return result("", this.registrationExitCode);
     }
     return result();
   }
@@ -113,9 +117,38 @@ describe("concrete Node CLI dependencies", () => {
       /^verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear$/u,
     );
     const report = (await dependencies.doctorProfile?.("verify-full")) as { checks: readonly unknown[] };
-    expect(report.checks).toHaveLength(16);
+    expect(report.checks).toHaveLength(17);
     expect(await dependencies.logsProfile?.("verify-full")).toEqual(["older", "current"]);
     expect(processes.requests.every((request) => request.command !== "sh" && request.command !== "bash")).toBe(true);
+  });
+
+  it("uses an absolute generated root and reports an exact stale worktree registration", async () => {
+    const generatedRoot = "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces";
+    const paths = await fixture(validManifest.replace('"~/.cache/remote-runner/workspaces"', `"${generatedRoot}"`));
+    const processes = new FakeProcesses();
+    processes.registrationExitCode = 74;
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
+    });
+
+    await dependencies.statusProfile?.("verify-full");
+    const report = (await dependencies.doctorProfile?.("verify-full")) as {
+      checks: readonly { id: string; status: string; reason?: string }[];
+    };
+    const serializedRequests = JSON.stringify(processes.requests);
+
+    expect(serializedRequests).toContain(`${generatedRoot}/ariadne/verify-full/`);
+    expect(serializedRequests).toContain(`${generatedRoot}/ariadne/.mirror.git`);
+    expect(report.checks).toContainEqual({
+      id: "remote.workspace-registration",
+      status: "fail",
+      reason: "workspace-registration",
+      next: "ssh <remote> inspect exact Git worktree registration for <workspace>",
+    });
+    expect(JSON.stringify(report)).not.toContain(generatedRoot);
   });
 
   it("keeps repair actions inside one profile identity and requires its exact dry-run receipt", async () => {
