@@ -104,8 +104,9 @@ lock is busy. Temporary `.gc-<identity>-<nonce>` quarantines are resumable after
 Symlinks and special entries are reported but never followed or removed.
 
 Activity refresh takes the same identity lock as quarantine. Retention rechecks the marker under
-that lock immediately before moving a workspace, so a candidate selected from an older listing but
-refreshed by concurrent preparation is kept as grace-protected.
+that lock immediately before moving a workspace or resuming an existing `.gc-*` cleanup, so a
+candidate selected from an older listing but refreshed by concurrent preparation is kept as
+grace-protected.
 
 `remote-runner doctor <profile>` reports `workspace-registration` when the exact generated
 workspace directory is missing but the consumer's bare mirror still lists it as a registered Git

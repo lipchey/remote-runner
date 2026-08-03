@@ -57,8 +57,9 @@ reconciliation, and other profiles sharing the mirror.
 
 Retention uses a separate per-identity workload lock, so selection is not treated as final.
 Activity-marker refresh takes that same lock, and retention rechecks the marker against the grace
-cutoff after acquiring it and immediately before quarantine. A candidate refreshed by concurrent
-preparation is returned as `refreshed` and left in place. This closes the
+cutoff after acquiring it and immediately before either a new quarantine or resumed cleanup of an
+existing quarantine. A candidate refreshed by concurrent preparation is returned as `refreshed`
+and left in place. This closes the
 selection-before-reconcile race without serializing unrelated identities for an entire workload.
 
 ## Diagnostics design

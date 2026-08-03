@@ -229,6 +229,40 @@ describe("pruneRemoteWorkspaces", () => {
 });
 
 describe("RemoteWorkspaceRetentionRuntime", () => {
+  it("rechecks fresh activity before resuming an existing quarantine", async () => {
+    const target = identity(49);
+    let command: readonly string[] | undefined;
+    let cleaned = false;
+    const port: WorkspaceRetentionCommandPort = {
+      async run() {
+        return { exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array() };
+      },
+      async withLock(args) {
+        command = args;
+        return "refreshed";
+      },
+    };
+    const runtime = new RemoteWorkspaceRetentionRuntime(
+      port,
+      {
+        profileRoot: "/profiles/verify-full",
+        setupStateRoot: "/state/verify-full",
+      },
+      async () => undefined,
+    );
+
+    await expect(
+      runtime.withQuarantine(target, `.gc-${target}-eeeeeeeeeeeeeeee`, true, nowMs - minute, async () => {
+        cleaned = true;
+      }),
+    ).resolves.toBe("refreshed");
+
+    const script = command?.[2] ?? "";
+    expect(script.indexOf('stat -c %Y -- "$activity"')).toBeGreaterThan(-1);
+    expect(script.indexOf('stat -c %Y -- "$activity"')).toBeLessThan(script.indexOf('if [ "$existing" = 1 ]'));
+    expect(cleaned).toBe(false);
+  });
+
   it("uses confined fixed-argv commands and parses only bounded NUL records", async () => {
     const current = identity(50);
     const remnant = identity(51);
