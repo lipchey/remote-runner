@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -211,6 +211,82 @@ describe("confined Git workspace reconciliation", () => {
     ).toHaveLength(1);
   });
 
+  it("recreates a candidate whose Git worktree registration is prunable", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "remote-runner-prunable-")));
+    temporaryRoots.push(root);
+    const { options, processes } = await fixture(root);
+    const identity = worktreeIdentity(options.sourceRoot);
+    const mirror = join(root, "ariadne", ".mirror.git");
+    const candidate = join(root, "ariadne", "verify-full", identity);
+    const tools = join(root, "test-bin");
+    await Promise.all([
+      mkdir(join(root, "ariadne"), { recursive: true, mode: 0o700 }),
+      mkdir(join(root, ".locks"), { mode: 0o700 }),
+      mkdir(tools, { mode: 0o700 }),
+    ]);
+    await writeExecutable(
+      join(tools, "realpath"),
+      `#!/usr/bin/python3
+import os, sys
+print(os.path.realpath(sys.argv[-1]))
+`,
+    );
+    await writeExecutable(
+      join(tools, "stat"),
+      `#!/usr/bin/python3
+import os, stat, sys
+value = os.stat(sys.argv[-1])
+print(value.st_uid if "%u" in sys.argv else format(stat.S_IMODE(value.st_mode), "o"))
+`,
+    );
+    await writeExecutable(
+      join(tools, "flock"),
+      `#!/usr/bin/python3
+import fcntl, sys
+fcntl.flock(int(sys.argv[-1]), fcntl.LOCK_EX)
+`,
+    );
+    await writeExecutable(
+      join(tools, "chmod"),
+      `#!/usr/bin/python3
+import os, sys
+arguments = [value for value in sys.argv[1:] if value != "--"]
+os.chmod(arguments[-1], int(arguments[0], 8))
+`,
+    );
+    execFileSync("git", ["clone", "--bare", process.cwd(), mirror], { stdio: "ignore" });
+    await chmod(mirror, 0o700);
+    const oid = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    processes.localOid = oid;
+    processes.existingMirrorFormat = "sha1";
+    execFileSync("git", [`--git-dir=${mirror}`, "worktree", "add", "--detach", candidate, oid], {
+      stdio: "ignore",
+    });
+    await rm(candidate, { recursive: true, force: true });
+
+    const staleListing = execFileSync("git", [`--git-dir=${mirror}`, "worktree", "list", "--porcelain"], {
+      encoding: "utf8",
+    });
+    expect(staleListing).toContain(`worktree ${candidate}`);
+    expect(staleListing).toContain("prunable");
+
+    await reconcileWorkspace(options, processes);
+    const transaction = processes.requests
+      .filter((request) => request.command === "ssh")
+      .map(remoteCommand)
+      .find((command) => command.includes("remote-runner-git-reconcile"))!;
+
+    await expect(runShell(transaction, { ...process.env, PATH: `${tools}:${process.env.PATH ?? ""}` })).resolves.toBe(
+      0,
+    );
+    expect(execFileSync("git", ["-C", candidate, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()).toBe(oid);
+    expect(
+      execFileSync("git", [`--git-dir=${mirror}`, "worktree", "list", "--porcelain"], {
+        encoding: "utf8",
+      }),
+    ).not.toContain(`worktree ${candidate}\nHEAD ${oid}\ndetached\nprunable`);
+  });
+
   it("rejects root, sibling, prefix-trick, and relative candidates", () => {
     expect(() => assertConfinedWorkspace("/cache/workspaces", "/cache/workspaces")).toThrow("strict descendant");
     expect(() => assertConfinedWorkspace("/cache/workspaces", "/cache/sibling")).toThrow("strict descendant");
@@ -315,6 +391,9 @@ describe("confined Git workspace reconciliation", () => {
     const transaction = remote.find((command) => command.includes("remote-runner-git-reconcile"));
 
     expect(transaction).toContain("flock -x");
+    expect(transaction).toContain("git --git-dir=. worktree prune --expire=now");
+    expect(transaction!.indexOf("flock -x")).toBeLessThan(transaction!.indexOf("worktree prune"));
+    expect(transaction!.indexOf("worktree prune")).toBeLessThan(transaction!.indexOf("worktree list"));
     expect(transaction).toContain('mkdir -p -- "$candidate_parent"');
     expect(transaction!.indexOf("mkdir -p --")).toBeLessThan(transaction!.indexOf("worktree add"));
     const ordered = [
