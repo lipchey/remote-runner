@@ -55,6 +55,12 @@ when a generated directory may be removed. Leaving Git's default expiry window w
 failure during that window. The consumer lock serializes prune with prepare, receive-pack,
 reconciliation, and other profiles sharing the mirror.
 
+Retention uses a separate per-identity workload lock, so selection is not treated as final.
+Activity-marker refresh takes that same lock, and retention rechecks the marker against the grace
+cutoff after acquiring it and immediately before quarantine. A candidate refreshed by concurrent
+preparation is returned as `refreshed` and left in place. This closes the
+selection-before-reconcile race without serializing unrelated identities for an entire workload.
+
 ## Diagnostics design
 
 Diagnostic path construction will honor `workspace.generatedRoot`:
@@ -80,6 +86,8 @@ mutate the mirror.
 - Preserve a countertest proving a valid registered candidate is reused.
 - Assert transaction ordering: consumer lock, prune, worktree listing, optional add, then reset and
   cleanup.
+- Assert activity refresh and quarantine share the identity lock and that a marker refreshed after
+  retention planning prevents quarantine.
 - Add diagnostic tests for legacy and absolute generated roots and for the exact stale-registration
   reason without raw output.
 - Run focused workspace/diagnostic tests, then `pnpm verify` (format, typecheck, all tests, build).

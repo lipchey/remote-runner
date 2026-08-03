@@ -22,7 +22,7 @@ export type WorkspaceRetentionEntry =
   | (WorkspaceActivity & { readonly kind: "quarantine"; readonly quarantineName: string })
   | (WorkspaceActivity & { readonly kind: "unsafe" });
 
-export type WorkspaceQuarantineResult = "removed" | "locked" | "missing" | "unsafe";
+export type WorkspaceQuarantineResult = "removed" | "locked" | "missing" | "unsafe" | "refreshed";
 
 export interface WorkspaceRetentionRuntime {
   list(): Promise<readonly WorkspaceRetentionEntry[]>;
@@ -30,6 +30,7 @@ export interface WorkspaceRetentionRuntime {
     identity: string,
     quarantineName: string,
     existing: boolean,
+    graceCutoffMs: number,
     cleanup: () => Promise<void>,
   ): Promise<WorkspaceQuarantineResult>;
   terminateOwnedSync(identity: string): Promise<void>;
@@ -194,24 +195,29 @@ export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntim
     identity: string,
     quarantineName: string,
     existing: boolean,
+    graceCutoffMs: number,
     cleanup: () => Promise<void>,
   ): Promise<WorkspaceQuarantineResult> {
     if (!IDENTITY.test(identity)) throw new Error("workspace retention identity is invalid");
+    requireSafeInteger(graceCutoffMs, "workspace retention grace cutoff");
     const match = QUARANTINE.exec(quarantineName);
     if (!match || match[1] !== identity) throw new Error("workspace quarantine name is invalid");
     const lock = posix.join(this.lockRoot, identity);
     const workspace = posix.join(this.paths.profileRoot, identity);
     const quarantine = posix.join(this.paths.profileRoot, quarantineName);
+    const activity = posix.join(this.activityRoot, identity);
     return this.commands.withLock(
       [
         "sh",
         "-ceu",
-        'umask 077; existing=$1; lock=$2; workspace=$3; quarantine=$4; mkdir -p -- "$(dirname -- "$lock")"; exec 9>"$lock"; flock -n 9 || exit 75; if [ "$existing" = 1 ]; then [ -d "$quarantine" ] || exit 76; [ ! -L "$quarantine" ] || exit 77; else [ -d "$workspace" ] || exit 76; [ ! -L "$workspace" ] || exit 77; [ ! -e "$quarantine" ] || exit 77; mv -- "$workspace" "$quarantine"; fi; printf "\\0REMOTE_RUNNER_RETENTION_LOCKED\\0" >&2; IFS= read -r release; [ "$release" = release ]',
+        'umask 077; existing=$1; lock=$2; workspace=$3; quarantine=$4; activity=$5; cutoff=$6; mkdir -p -- "$(dirname -- "$lock")"; exec 9>"$lock"; flock -n 9 || exit 75; if [ "$existing" = 1 ]; then [ -d "$quarantine" ] || exit 76; [ ! -L "$quarantine" ] || exit 77; else if [ -f "$activity" ] && [ ! -L "$activity" ] && [ "$(stat -c %Y -- "$activity")" -ge "$cutoff" ]; then exit 78; fi; [ -d "$workspace" ] || exit 76; [ ! -L "$workspace" ] || exit 77; [ ! -e "$quarantine" ] || exit 77; mv -- "$workspace" "$quarantine"; fi; printf "\\0REMOTE_RUNNER_RETENTION_LOCKED\\0" >&2; IFS= read -r release; [ "$release" = release ]',
         "remote-runner-retention-lock",
         existing ? "1" : "0",
         lock,
         workspace,
         quarantine,
+        activity,
+        String(Math.floor(graceCutoffMs / 1000)),
       ],
       cleanup,
     );
@@ -260,14 +266,16 @@ export async function pruneRemoteWorkspaces(
       entry.kind === "directory" && IDENTITY.test(entry.identity),
   );
   const plan = planWorkspaceRetention(directories, currentIdentity, policy, nowMs);
+  const graceCutoffMs = nowMs - policy.graceMinutes * MINUTES_TO_MS;
   let locked = 0;
+  let refreshed = 0;
   let removed = 0;
   let failed = 0;
   let ignored = entries.filter((entry) => entry.kind === "unsafe" || !IDENTITY.test(entry.identity)).length;
 
   const cleanup = async (identity: string, quarantineName: string, existing: boolean): Promise<void> => {
     try {
-      const result = await runtime.withQuarantine(identity, quarantineName, existing, async () => {
+      const result = await runtime.withQuarantine(identity, quarantineName, existing, graceCutoffMs, async () => {
         await runtime.terminateOwnedSync(identity);
         await runtime.removeQuarantine(quarantineName);
         await runtime.removeActivity(identity);
@@ -275,6 +283,7 @@ export async function pruneRemoteWorkspaces(
       });
       if (result === "removed") removed += 1;
       else if (result === "locked") locked += 1;
+      else if (result === "refreshed") refreshed += 1;
       else if (result === "unsafe") ignored += 1;
     } catch {
       failed += 1;
@@ -304,7 +313,7 @@ export async function pruneRemoteWorkspaces(
 
   return {
     retained: plan.retained.length,
-    graceProtected: plan.graceProtected.length,
+    graceProtected: plan.graceProtected.length + refreshed,
     locked,
     removed,
     failed,

@@ -103,6 +103,10 @@ keeps the configured number of newest identities, honors `graceMinutes`, and ski
 lock is busy. Temporary `.gc-<identity>-<nonce>` quarantines are resumable after interruption.
 Symlinks and special entries are reported but never followed or removed.
 
+Activity refresh takes the same identity lock as quarantine. Retention rechecks the marker under
+that lock immediately before moving a workspace, so a candidate selected from an older listing but
+refreshed by concurrent preparation is kept as grace-protected.
+
 `remote-runner doctor <profile>` reports `workspace-registration` when the exact generated
 workspace directory is missing but the consumer's bare mirror still lists it as a registered Git
 worktree. A normal `remote-runner run <profile>` self-heals that state under the consumer lock: it

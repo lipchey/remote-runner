@@ -56,11 +56,11 @@ describe("pilot service boundaries", () => {
     const exitCode = await services.runLocal([
       process.execPath,
       "-e",
-      'process.stdout.write(process.env.LOCAL_FALLBACK_CANARY ?? "missing")',
+      'process.stdout.write([process.env.LOCAL_FALLBACK_CANARY, process.env.REMOTE_RUNNER_CHILD, process.env.REMOTE_RUNNER_PROVIDER].join("|"))',
     ]);
 
     expect(exitCode).toBe(0);
-    expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("manifest");
+    expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("manifest|1|local");
   });
 
   it("resolves every generated target below the canonical remote home", () => {
@@ -164,6 +164,8 @@ describe("pilot service boundaries", () => {
 
     expect(requests[0]?.command).toBe("ssh");
     expect(JSON.stringify(requests[0]?.args)).toContain("remote-runner-touch-activity");
+    expect(JSON.stringify(requests[0]?.args)).toContain("flock -x 9");
+    expect(JSON.stringify(requests[0]?.args)).toContain(`${current}`);
     expect(requests.slice(1).map(({ args }) => args.slice(0, 2).join(" "))).toEqual([
       "daemon start",
       "sync list",
@@ -186,6 +188,7 @@ describe("pilot service boundaries", () => {
     expect(args.slice(0, 3)).toEqual(["sh", "-ceu", expect.any(String)]);
     expect(serialized).toContain("NEON_DEV_DATABASE_URL");
     expect(serialized).toContain("REMOTE_RUNNER_CHILD");
+    expect(args).toContain("REMOTE_RUNNER_PROVIDER=remote");
     expect(args).toContain("PATH=/remote/node/bin:/remote/uv:/usr/bin:/bin");
     expect(args).toContain("/remote/profile/.locks/0123456789abcdef01234567");
     expect(args[2]).toContain("flock -x 9");
@@ -205,7 +208,7 @@ describe("pilot service boundaries", () => {
     expect(args).toEqual([
       "sh",
       "-ceu",
-      'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; shift 2; exec "$@"',
+      'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
       "remote-runner-workspace-command",
       "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
       "/remote/node/bin:/remote/uv:/usr/bin:/bin",
@@ -225,7 +228,7 @@ describe("pilot service boundaries", () => {
     expect(args).toEqual([
       "sh",
       "-ceu",
-      'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; shift 2; exec "$@"',
+      'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
       "remote-runner-workspace-command",
       "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
       "/remote/node/bin:/remote/uv:/usr/bin:/bin",

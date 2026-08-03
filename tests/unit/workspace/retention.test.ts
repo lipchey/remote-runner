@@ -120,7 +120,7 @@ describe("pruneRemoteWorkspaces", () => {
           { kind: "directory", identity: stale, activityMs: nowMs - 61 * minute },
         ];
       },
-      async withQuarantine(target, quarantine, existing, cleanup) {
+      async withQuarantine(target, quarantine, existing, _graceCutoffMs, cleanup) {
         calls.push(`quarantine:${target}:${quarantine}:${existing}`);
         await cleanup();
         calls.push(`remove-lock:${target}`);
@@ -167,6 +167,7 @@ describe("pruneRemoteWorkspaces", () => {
     const locked = identity(42);
     const failed = identity(43);
     const removed = identity(44);
+    const refreshed = identity(45);
     const calls: string[] = [];
     const runtime: WorkspaceRetentionRuntime = {
       async list() {
@@ -177,12 +178,14 @@ describe("pruneRemoteWorkspaces", () => {
           { kind: "directory", identity: locked, activityMs: nowMs - 61 * minute },
           { kind: "directory", identity: failed, activityMs: nowMs - 62 * minute },
           { kind: "directory", identity: removed, activityMs: nowMs - 63 * minute },
+          { kind: "directory", identity: refreshed, activityMs: nowMs - 64 * minute },
           { kind: "unsafe", identity: "symlink", activityMs: 0 },
         ];
       },
-      async withQuarantine(target, _quarantine, existing, cleanup) {
+      async withQuarantine(target, _quarantine, existing, _graceCutoffMs, cleanup) {
         calls.push(`quarantine:${target}:${existing}`);
         if (target === locked) return "locked";
+        if (target === refreshed) return "refreshed";
         if (target === failed) throw new Error("bounded candidate failure");
         await cleanup();
         calls.push(`remove-lock:${target}`);
@@ -218,9 +221,10 @@ describe("pruneRemoteWorkspaces", () => {
         `quarantine:${failed}:false`,
         `quarantine:${removed}:false`,
         `terminate:${removed}`,
+        `quarantine:${refreshed}:false`,
       ]),
     );
-    expect(result).toEqual({ retained: 1, graceProtected: 0, locked: 1, removed: 2, failed: 1, ignored: 1 });
+    expect(result).toEqual({ retained: 1, graceProtected: 1, locked: 1, removed: 2, failed: 1, ignored: 1 });
   });
 });
 
@@ -266,7 +270,7 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
       },
       { kind: "unsafe", identity: "hostile", activityMs: 0 },
     ]);
-    await runtime.withQuarantine(current, `.gc-${current}-dddddddddddddddd`, false, async () => {
+    await runtime.withQuarantine(current, `.gc-${current}-dddddddddddddddd`, false, nowMs - minute, async () => {
       await runtime.terminateOwnedSync(current);
       await runtime.removeQuarantine(`.gc-${current}-dddddddddddddddd`);
       await runtime.removeActivity(current);
@@ -283,8 +287,12 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
         "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/.gc-" +
           current +
           "-dddddddddddddddd",
+        "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/.activity/" + current,
+        String(Math.floor((nowMs - minute) / 1000)),
       ]),
     );
+    expect(commands[1]?.[2]).toContain("flock -n 9");
+    expect(commands[1]?.[2]).toContain('stat -c %Y -- "$activity"');
     expect(commands.at(-1)).toEqual([
       "rm",
       "-rf",

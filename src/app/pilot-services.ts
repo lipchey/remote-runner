@@ -153,6 +153,8 @@ export function remoteChildArguments(
     "/usr/bin/env",
     `PATH=${pathEnvironment}`,
     ...childEnvironment.map(([name, value]) => `${name}=${value}`),
+    "REMOTE_RUNNER_CHILD=1",
+    "REMOTE_RUNNER_PROVIDER=remote",
     node,
     launcher,
     JSON.stringify(profile.secrets.allow),
@@ -179,7 +181,7 @@ export function remoteWorkspaceCommandArguments(
   return [
     "sh",
     "-ceu",
-    'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; shift 2; exec "$@"',
+    'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
     "remote-runner-workspace-command",
     workspace,
     pathEnvironment,
@@ -405,6 +407,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
           if (result.exitCode === 75) return "locked";
           if (result.exitCode === 76) return "missing";
           if (result.exitCode === 77) return "unsafe";
+          if (result.exitCode === 78) return "refreshed";
           throw new Error(`workspace retention lock failed with exit code ${result.exitCode}`);
         } finally {
           if (owned) {
@@ -541,13 +544,15 @@ export class NodeProfileServices implements ProfileExecutionServices {
   }
 
   private async touchActivity(): Promise<void> {
-    const marker = this.paths().activityMarker;
+    const paths = this.paths();
+    const marker = paths.activityMarker;
     const result = await this.remote().run([
       "sh",
       "-ceu",
-      'umask 077; marker=$1; mkdir -p -- "$(dirname -- "$marker")"; : >"$marker"',
+      'umask 077; marker=$1; lock=$2; mkdir -p -- "$(dirname -- "$marker")" "$(dirname -- "$lock")"; exec 9>"$lock"; flock -x 9; : >"$marker"',
       "remote-runner-touch-activity",
       marker,
+      paths.workloadLock,
     ]);
     if (result.exitCode !== 0) throw new Error("remote activity marker update failed");
   }
@@ -798,7 +803,11 @@ export class NodeProfileServices implements ProfileExecutionServices {
       command: command[0]!,
       args: command.slice(1),
       cwd: this.options.sourceRoot,
-      environment: this.profile.workload.childEnvironment,
+      environment: {
+        ...this.profile.workload.childEnvironment,
+        REMOTE_RUNNER_CHILD: "1",
+        REMOTE_RUNNER_PROVIDER: "local",
+      },
       marker: new TextEncoder().encode("\0REMOTE_RUNNER_UNUSED_MARKER\0"),
       onMarker: async () => undefined,
       stdout:

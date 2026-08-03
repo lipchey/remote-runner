@@ -142,6 +142,12 @@ describe("concrete Node CLI dependencies", () => {
 
     expect(serializedRequests).toContain(`${generatedRoot}/ariadne/verify-full/`);
     expect(serializedRequests).toContain(`${generatedRoot}/ariadne/.mirror.git`);
+    const registrationRequest = processes.requests.find((request) =>
+      request.args.at(-1)?.includes("remote-runner-workspace-registration"),
+    );
+    expect(registrationRequest?.args.at(-1)).toContain(
+      'if ! listing=$(git --git-dir="$mirror" worktree list --porcelain)',
+    );
     expect(report.checks).toContainEqual({
       id: "remote.workspace-registration",
       status: "fail",

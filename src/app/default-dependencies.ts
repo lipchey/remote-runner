@@ -282,7 +282,7 @@ async function inspectProbe(
               ? [
                   "sh",
                   "-ceu",
-                  'workspace=$1; mirror=$2; case "$workspace" in /*) ;; *) workspace=$HOME/$workspace;; esac; case "$mirror" in /*) ;; *) mirror=$HOME/$mirror;; esac; [ ! -d "$workspace" ] || exit 0; [ -d "$mirror" ] || exit 0; listing=$(git --git-dir="$mirror" worktree list --porcelain); if printf \'%s\\n\' "$listing" | grep -Fqx -- "worktree $workspace"; then exit 74; fi',
+                  'workspace=$1; mirror=$2; case "$workspace" in /*) ;; *) workspace=$HOME/$workspace;; esac; case "$mirror" in /*) ;; *) mirror=$HOME/$mirror;; esac; [ ! -d "$workspace" ] || exit 0; [ -d "$mirror" ] || exit 0; if ! listing=$(git --git-dir="$mirror" worktree list --porcelain); then exit 0; fi; if printf \'%s\\n\' "$listing" | grep -Fqx -- "worktree $workspace"; then exit 74; fi',
                   "remote-runner-workspace-registration",
                   remotePaths.workspace,
                   remotePaths.mirror,
