@@ -60,6 +60,17 @@ describe("dependency fingerprint", () => {
     for (const variant of variants) expect(await variant).not.toBe(expected);
   });
 
+  it("versions the serialized fingerprint contract", async () => {
+    const fingerprint = await dependencyFingerprint(
+      new FakeRuntime({ "package.json": "same" }, [{ path: "sub", oid: "a".repeat(40) }]),
+      { environment, files: ["package.json"] },
+    );
+
+    const serialized = Buffer.from(fingerprint.slice("sha256:fixture:".length), "hex").toString("utf8");
+    expect(serialized).toContain("fingerprint schema");
+    expect(serialized).toContain("1:2");
+  });
+
   it("accepts an explicitly declared gitlink path without reading it as a file", async () => {
     const runtime = new FakeRuntime({ "package.json": "same" }, [
       { path: "vendor/dev-standards", oid: "a".repeat(40) },
