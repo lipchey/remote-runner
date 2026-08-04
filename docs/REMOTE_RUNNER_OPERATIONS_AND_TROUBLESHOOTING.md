@@ -66,6 +66,11 @@ policy.
 | `timeout`                | `ssh -o ConnectTimeout=2 <remote> true`                                     |
 | `unknown`                | `remote-runner status <profile>`                                            |
 
+A workload command that cannot be executed at all is not one of these reasons: the run exits `127`
+with `remote-runner launcher: child spawn failed`, without a local fallback or an outage
+notification. The usual cause is passing a shell line as the workload — `run <profile> -- 'a && b'`
+is one argv entry, so wrap it: `run <profile> -- sh -c 'a && b'`.
+
 ## SSH and Tailscale
 
 For `dns`, `transport`, `authentication`, `remote-shell`, or `timeout`, run the exact index command

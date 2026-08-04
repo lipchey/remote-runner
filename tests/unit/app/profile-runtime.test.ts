@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { createProfileRuntime, type ProfileExecutionServices } from "../../../src/app/profile-runtime.js";
-import { runProfile } from "../../../src/run/run-profile.js";
+import { WORKLOAD_COMMAND_REASON, runProfile } from "../../../src/run/run-profile.js";
 
 class FakeServices implements ProfileExecutionServices {
   readonly calls: string[] = [];
   failProbe = false;
   remoteExit = 0;
+  notStartedReason?: string;
   async validate() {
     this.calls.push("validate");
   }
@@ -42,6 +43,9 @@ class FakeServices implements ProfileExecutionServices {
     marker: () => Promise<void>,
   ) {
     this.calls.push("remote");
+    if (this.notStartedReason !== undefined) {
+      return { kind: "not-started" as const, reason: this.notStartedReason };
+    }
     await marker();
     return { kind: "completed" as const, exitCode: this.remoteExit };
   }
@@ -102,6 +106,27 @@ describe("profile runtime composition", () => {
       "recovery",
     ]);
     expect(services.calls).not.toContain("local");
+  });
+
+  it("neither notifies nor falls back when the workload command cannot be executed", async () => {
+    const services = new FakeServices();
+    services.notStartedReason = WORKLOAD_COMMAND_REASON;
+
+    const code = await runProfile(createProfileRuntime(services), profile, ["rm -rf .nx/cache && ls .nx"]);
+
+    expect(code).toBe(127);
+    expect(services.calls).toEqual([
+      "validate",
+      "lock",
+      "probe",
+      "pause",
+      "workspace",
+      "flush",
+      "bootstrap",
+      "secrets",
+      "remote",
+      "release",
+    ]);
   });
 
   it("does not notify or prepare when the caller selects local mode", async () => {

@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -83,8 +86,20 @@ describe("fixed remote launcher", () => {
       ["SECRET"],
       ["/definitely/missing"],
     );
-    expect(result.code).toBe(70);
+    expect(result.code).toBe(69);
     expect(result.marker).toBe("");
     expect(result.stderr).not.toContain("secret-canary");
+  });
+
+  it("keeps the outage code for a spawn failure that does not prove the command unusable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "remote-launcher-loop-"));
+    try {
+      await symlink(join(directory, "b"), join(directory, "a"));
+      await symlink(join(directory, "a"), join(directory, "b"));
+      const result = await runLauncher(encodeSecretFrame({}, []).stdin, [], [join(directory, "a")]);
+      expect(result).toMatchObject({ code: 70, marker: "" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

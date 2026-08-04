@@ -19,6 +19,7 @@ import { acquireProfileLock } from "../runtime/lock.js";
 import { worktreeIdentity } from "../runtime/identity.js";
 import { PreparationError } from "../run/prepare.js";
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
+import { WORKLOAD_COMMAND_REASON } from "../run/run-profile.js";
 import type { RemoteExecutionResult } from "../run/run-profile.js";
 import { encodeSecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
@@ -206,6 +207,10 @@ const UV_SHA256 = {
 } as const;
 const GITLEAKS_VERSION = "8.30.1";
 const CHILD_MARKER = new TextEncoder().encode("RR_CHILD_STARTED\n");
+/* Mirrors assets/remote-launcher.mjs: the launcher exits with this before the marker when the
+   workload command itself cannot be executed. Only the launcher emits it pre-marker, so a broken
+   remote shell (126/127) still reads as an outage. */
+const WORKLOAD_SPAWN_EXIT_CODE = 69;
 
 function decode(contents: Uint8Array, label: string): string {
   try {
@@ -805,7 +810,10 @@ export class NodeProfileServices implements ProfileExecutionServices {
           process.stderr.write(chunk);
         }),
     });
-    if (!result.spawned || !result.markerSeen) return { kind: "not-started", reason: "child-start" };
+    if (!result.spawned || !result.markerSeen) {
+      const workloadCommand = result.spawned && result.exitCode === WORKLOAD_SPAWN_EXIT_CODE;
+      return { kind: "not-started", reason: workloadCommand ? WORKLOAD_COMMAND_REASON : "child-start" };
+    }
     try {
       await this.touchActivity();
       await this.pruneRetention();

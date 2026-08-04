@@ -2,6 +2,10 @@ import type { Profile, RunMode } from "../config/types.js";
 import type { PrepareResult } from "./prepare.js";
 
 export const INFRASTRUCTURE_EXIT_CODE = 75;
+/* An unexecutable workload command is the caller's error: it fails identically on the remote and
+   locally, so it must not spend a local fallback run nor raise an outage notification. */
+export const WORKLOAD_COMMAND_REASON = "workload-command";
+const WORKLOAD_COMMAND_EXIT_CODE = 127;
 const USAGE_EXIT_CODE = 64;
 const MAX_PREPARATION_ATTEMPTS = 2;
 
@@ -91,6 +95,7 @@ export async function runProfile(
       return INFRASTRUCTURE_EXIT_CODE;
     }
     if (childStarted) return INFRASTRUCTURE_EXIT_CODE;
+    if (remote.reason === WORKLOAD_COMMAND_REASON) return WORKLOAD_COMMAND_EXIT_CODE;
     return mayFallback(mode, profile) ? runLocal(runtime, command) : INFRASTRUCTURE_EXIT_CODE;
   }
 
