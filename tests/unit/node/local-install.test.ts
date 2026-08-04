@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,7 +18,9 @@ class FakeLaunch implements LocalLaunchRuntime {
   loaded = false;
   running = false;
   bootstrapFailures = 0;
+  statusFailure?: string;
   async status() {
+    if (this.statusFailure !== undefined) throw new Error(this.statusFailure);
     return { loaded: this.loaded, running: this.running };
   }
   async bootout() {
@@ -119,6 +121,21 @@ describe("self-contained local macOS install", () => {
         launch: new FakeLaunch(),
       }),
     ).rejects.toThrow(/foreign/u);
+  });
+
+  it("finishes every artifact write before reporting a failure", async () => {
+    const sourceRoot = await sourceFixture();
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-install-inflight-"));
+    roots.push(home);
+    const launch = new FakeLaunch();
+    /* Rejects on the first microtask, so the plist write — three filesystem round trips behind — is
+       still in flight: the rejection is the moment an escaped write would slip past the caller. */
+    launch.statusFailure = "launchd is unreachable";
+
+    await expect(installLocalApplication({ home, sourceRoot, nodePath: "/usr/bin/node", launch })).rejects.toThrow(
+      /unreachable/u,
+    );
+    expect(await readdir(join(home, "Library", "LaunchAgents"))).toEqual(["com.lipchey.remote-runner.plist"]);
   });
 
   it("retries bootstrap after an upgrade bootout while launchd settles", async () => {
