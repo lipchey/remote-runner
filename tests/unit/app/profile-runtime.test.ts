@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createProfileRuntime, type ProfileExecutionServices } from "../../../src/app/profile-runtime.js";
+import { DiagnosableError } from "../../../src/runtime/diagnostic.js";
 import { WORKLOAD_COMMAND_REASON, runProfile } from "../../../src/run/run-profile.js";
 
 class FakeServices implements ProfileExecutionServices {
@@ -19,7 +20,7 @@ class FakeServices implements ProfileExecutionServices {
   }
   async probe() {
     this.calls.push("probe");
-    if (this.failProbe) throw new Error("offline");
+    if (this.failProbe) throw new DiagnosableError("offline");
   }
   async pauseSync() {
     this.calls.push("pause");
@@ -59,8 +60,10 @@ class FakeServices implements ProfileExecutionServices {
   async recordRemoteChildStarted() {
     this.calls.push("recovery");
   }
-  reportUnavailable(reason: string) {
+  reportedDetail: string | undefined;
+  reportUnavailable(reason: string, detail?: string) {
     this.calls.push(`unavailable:${reason}`);
+    this.reportedDetail = detail;
   }
 }
 
@@ -83,6 +86,8 @@ describe("profile runtime composition", () => {
       "outage:transport",
       "local",
     ]);
+    /* The outage stays a stable reason while the operator gets the underlying failure. */
+    expect(services.reportedDetail).toBe("offline");
   });
 
   it("records recovery at child start and keeps a remote failure authoritative", async () => {

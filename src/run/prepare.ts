@@ -1,3 +1,5 @@
+import { diagnosableMessage } from "../runtime/diagnostic.js";
+
 export const PREPARATION_STEPS = [
   "validate",
   "lock",
@@ -63,7 +65,24 @@ export type PrepareResult =
       readonly ok: false;
       readonly reason: PreparationReason | string;
       readonly retryable: boolean;
+      readonly detail?: string;
     };
+
+const MAX_DETAIL_CHARS = 200;
+
+/* `reason` is a closed enum consumed by notifications, so the operator never sees WHICH sync rule
+   failed. The detail carries that one line — and only for a failure raised as diagnosable, never
+   for text a remote, a provider or a native error contributed. */
+function preparationDetail(caught: unknown): string | undefined {
+  /* A PreparationError's own message only restates the reason; its cause carries what actually
+     failed, and there is nothing to add when it has none. */
+  const message = diagnosableMessage(caught instanceof PreparationError ? caught.cause : caught);
+  if (message === undefined) return undefined;
+  const [first = ""] = message.split("\n");
+  const sanitized = first.replaceAll(/[\u0000-\u001f\u007f]/gu, " ").trim();
+  if (sanitized.length === 0) return undefined;
+  return sanitized.length > MAX_DETAIL_CHARS ? `${sanitized.slice(0, MAX_DETAIL_CHARS - 3)}...` : sanitized;
+}
 
 function reasonFor(step: (typeof PREPARATION_STEPS)[number]): PreparationReason {
   if (step === "validate") return "validation";
@@ -108,10 +127,12 @@ export async function prepareRemote(runtime: PreparationRuntime): Promise<Prepar
         return { ok: false, reason: "lock", retryable: false };
       }
     }
+    const detail = preparationDetail(caught);
     return {
       ok: false,
       reason: caught instanceof PreparationError ? caught.reason : reasonFor(step),
       retryable: caught instanceof PreparationError ? caught.retryable : caught instanceof RetryablePreparationError,
+      ...(detail === undefined ? {} : { detail }),
     };
   }
 }

@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 
+import { DiagnosableError, diagnosableMessage } from "../runtime/diagnostic.js";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../ssh/client.js";
 
 const CAPTURE_BYTES = 64 * 1024;
@@ -7,6 +8,9 @@ const COMPONENT = /^[a-z][a-z0-9-]{0,62}$/u;
 const IDENTITY = /^[0-9a-f]{24}$/u;
 const SSH_TARGET = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$/u;
 const LIST_TEMPLATE = "{{ json . }}";
+/* Diagnostics list sessions exactly as the run does, so a probe can never green on a listing the
+   run would reject. */
+export const MUTAGEN_LIST_ARGUMENTS: readonly string[] = ["sync", "list", "--template", LIST_TEMPLATE];
 
 export const MANDATORY_MUTAGEN_IGNORES = [
   ".git",
@@ -173,13 +177,13 @@ function parseListing(contents: Uint8Array): SessionRecord[] {
   try {
     value = JSON.parse(output);
   } catch {
-    throw new Error("Mutagen session list returned malformed JSON");
+    throw new DiagnosableError("Mutagen session list returned malformed JSON");
   }
-  if (!Array.isArray(value)) throw new Error("Mutagen session list must return a JSON array");
+  if (!Array.isArray(value)) throw new DiagnosableError("Mutagen session list must return a JSON array");
   // Mirrors Mutagen's public Session JSON emitted by sync/list.go via `{{ json . }}`.
   return value.map((item) => {
     if (!isRecord(item) || !text(item.identifier) || !text(item.name) || typeof item.paused !== "boolean")
-      throw new Error("Mutagen session list returned a malformed session");
+      throw new DiagnosableError("Mutagen session list returned a malformed session");
     const alpha = endpointText(item.alpha);
     const betaValue = endpointText(item.beta);
     const mode = text(item.mode) ? item.mode : nestedText(item.configuration, "synchronizationMode");
@@ -187,10 +191,10 @@ function parseListing(contents: Uint8Array): SessionRecord[] {
     const conflicts = item.conflicts === undefined ? [] : item.conflicts;
     const excludedConflicts = item.excludedConflicts === undefined ? 0 : item.excludedConflicts;
     if (!Array.isArray(conflicts) || !Number.isSafeInteger(excludedConflicts) || Number(excludedConflicts) < 0)
-      throw new Error("Mutagen session list returned malformed conflict state");
+      throw new DiagnosableError("Mutagen session list returned malformed conflict state");
     if (item.status !== undefined && typeof item.status !== "string")
-      throw new Error("Mutagen session list returned malformed status");
-    if (!item.paused && !text(item.status)) throw new Error("active Mutagen session is missing status");
+      throw new DiagnosableError("Mutagen session list returned malformed status");
+    if (!item.paused && !text(item.status)) throw new DiagnosableError("active Mutagen session is missing status");
     return {
       name: item.name,
       alpha,
@@ -213,28 +217,29 @@ function text(value: unknown): value is string {
 }
 function nestedText(value: unknown, key: string): string {
   if (!isRecord(value) || !text(value[key]))
-    throw new Error("Mutagen session list returned a malformed endpoint or configuration");
+    throw new DiagnosableError("Mutagen session list returned a malformed endpoint or configuration");
   return value[key];
 }
 
 function nestedStringArray(value: unknown, key: string): string[] {
   if (!isRecord(value) || !Array.isArray(value[key]) || !value[key].every(text)) {
-    throw new Error("Mutagen session list returned malformed ignore configuration");
+    throw new DiagnosableError("Mutagen session list returned malformed ignore configuration");
   }
   return [...value[key]];
 }
 
 function endpointText(value: unknown): string {
-  if (!isRecord(value)) throw new Error("Mutagen session list returned a malformed endpoint or configuration");
+  if (!isRecord(value))
+    throw new DiagnosableError("Mutagen session list returned a malformed endpoint or configuration");
   if (text(value.url)) return value.url;
   if (value.protocol === "local" && text(value.path)) return value.path;
   if (value.protocol === "ssh" && text(value.host) && text(value.path)) {
     if (value.user !== undefined && !text(value.user)) {
-      throw new Error("Mutagen session list returned a malformed endpoint or configuration");
+      throw new DiagnosableError("Mutagen session list returned a malformed endpoint or configuration");
     }
     return `${value.user === undefined ? "" : `${value.user}@`}${value.host}:${value.path}`;
   }
-  throw new Error("Mutagen session list returned a malformed endpoint or configuration");
+  throw new DiagnosableError("Mutagen session list returned a malformed endpoint or configuration");
 }
 
 function statusKind(record: SessionRecord): "paused" | "healthy" | "recoverable" | "conflict" {
@@ -260,7 +265,7 @@ function statusKind(record: SessionRecord): "paused" | "healthy" | "recoverable"
   throw new Error(`Mutagen session has unrecognized status: ${status}`);
 }
 
-function ignoresMatch(record: SessionRecord, expected: ValidatedSession): boolean {
+function ignoresMatch(record: SessionRecord, expected: { readonly ignores: readonly string[] }): boolean {
   return (
     record.ignores.length === expected.ignores.length &&
     expected.ignores.every((pattern) => record.ignores.includes(pattern))
@@ -269,21 +274,75 @@ function ignoresMatch(record: SessionRecord, expected: ValidatedSession): boolea
 
 function assertOwnedRecord(record: SessionRecord, expected: ValidatedSession, repairableIgnores = false): void {
   if (record.alpha !== expected.alpha || record.beta !== expected.beta) {
-    throw new Error("Mutagen session endpoint mismatch");
+    throw new DiagnosableError("Mutagen session endpoint mismatch");
   }
-  if (record.mode !== "one-way-replica") throw new Error("Mutagen session mode mismatch");
+  if (record.mode !== "one-way-replica") throw new DiagnosableError("Mutagen session mode mismatch");
   /* Tolerated only before the pause, where drift is still repairable by recreation: once a
      descriptor is prepared, a session swapped in under the owned name must never sync under
      exclusions this run did not compile. */
   if (!repairableIgnores && !ignoresMatch(record, expected)) {
-    throw new Error("Mutagen session ignore mismatch");
+    throw new DiagnosableError("Mutagen session ignore mismatch");
+  }
+}
+
+export interface OwnedSessionExpectation {
+  readonly consumer: string;
+  readonly profile: string;
+  readonly identity: string;
+  readonly canonicalAlphaRoot: string;
+  readonly betaTarget: string;
+  /* Absolute only. Diagnostics cannot resolve the remote `$HOME` themselves, and a suffix match
+     against a home-relative root would accept any prefix — the very false green this probe exists to
+     remove — so an endpoint that could not be resolved is reported as unverified instead. */
+  readonly betaRoot?: string;
+  readonly ignores: readonly string[];
+}
+
+export interface OwnedSessionObservation {
+  readonly status: "ok" | "warn" | "fail";
+  readonly detail?: string;
+}
+
+/* `mutagen sync list <name>` exiting 0 only proves a session with the owned NAME exists — it was
+   green through an incident where every run failed at sync-pause. This applies the same rules the
+   run applies before pausing, minus ignore drift, which the run now repairs by recreation. */
+export function inspectOwnedSession(listing: Uint8Array, expected: OwnedSessionExpectation): OwnedSessionObservation {
+  try {
+    const name = mutagenSessionName(expected.consumer, expected.profile, expected.identity);
+    assertCanonicalAbsolutePath(expected.canonicalAlphaRoot, "Mutagen alpha root");
+    const matches = parseListing(listing).filter((record) => record.name === name);
+    if (matches.length > 1) throw new DiagnosableError("multiple Mutagen sessions have the owned name");
+    const record = matches[0];
+    /* A missing session is the normal state before the first run and after retention: the next run
+       creates it. */
+    if (!record) return { status: "ok" };
+    const beta = expected.betaRoot === undefined ? undefined : betaEndpoint(expected.betaTarget, expected.betaRoot);
+    if (record.alpha !== expected.canonicalAlphaRoot || (beta !== undefined && record.beta !== beta)) {
+      throw new DiagnosableError("Mutagen session endpoint mismatch");
+    }
+    if (record.mode !== "one-way-replica") throw new DiagnosableError("Mutagen session mode mismatch");
+    const kind = statusKind(record);
+    if (kind === "conflict") throw new DiagnosableError("Mutagen session has conflicts");
+    /* Both states are repaired by the next run recreating the session, so neither is a failure —
+       but until then the session is not synchronizing, or is excluding the pre-drift set: a path
+       added to the manifest because it is sensitive is still being synchronized right now. */
+    if (kind === "recoverable") {
+      return { status: "warn", detail: "Mutagen session is disconnected; the next run recreates it" };
+    }
+    if (!ignoresMatch(record, { ignores: compileIgnores(expected.ignores) })) {
+      return { status: "warn", detail: "Mutagen session ignores drifted; the next run recreates it" };
+    }
+    if (beta === undefined) return { status: "warn", detail: "Mutagen beta endpoint unverified" };
+    return { status: "ok" };
+  } catch (caught) {
+    return { status: "fail", detail: diagnosableMessage(caught) ?? "Mutagen session inspection failed" };
   }
 }
 
 function assertOwnedTerminationRecord(record: SessionRecord, expected: ValidatedTermination): void {
   assertCanonicalAbsolutePath(record.alpha, "Mutagen alpha root");
-  if (record.beta !== expected.beta) throw new Error("Mutagen session endpoint mismatch");
-  if (record.mode !== "one-way-replica") throw new Error("Mutagen session mode mismatch");
+  if (record.beta !== expected.beta) throw new DiagnosableError("Mutagen session endpoint mismatch");
+  if (record.mode !== "one-way-replica") throw new DiagnosableError("Mutagen session mode mismatch");
 }
 
 export class MutagenSyncLifecycle {
@@ -309,12 +368,12 @@ export class MutagenSyncLifecycle {
   }
 
   private async listOwned(expected: ValidatedSession, repairableIgnores = false): Promise<SessionRecord | undefined> {
-    const result = await this.run(["sync", "list", "--template", LIST_TEMPLATE], "Mutagen session list");
+    const result = await this.run(MUTAGEN_LIST_ARGUMENTS, "Mutagen session list");
     if (result.exitCode !== 0) {
-      throw new Error(`Mutagen session list failed with exit code ${result.exitCode}`);
+      throw new DiagnosableError("Mutagen session list failed");
     }
     const matches = parseListing(result.stdout).filter(({ name }) => name === expected.name);
-    if (matches.length > 1) throw new Error("multiple Mutagen sessions have the owned name");
+    if (matches.length > 1) throw new DiagnosableError("multiple Mutagen sessions have the owned name");
     const match = matches[0];
     if (match) assertOwnedRecord(match, expected, repairableIgnores);
     return match;
@@ -324,12 +383,12 @@ export class MutagenSyncLifecycle {
     options: Pick<MutagenSessionOptions, "consumer" | "profile" | "identity" | "betaTarget" | "betaRoot">,
   ): Promise<void> {
     const expected = validateTerminationOptions(options);
-    const result = await this.run(["sync", "list", "--template", LIST_TEMPLATE], "Mutagen session list");
+    const result = await this.run(MUTAGEN_LIST_ARGUMENTS, "Mutagen session list");
     if (result.exitCode !== 0) {
-      throw new Error(`Mutagen session list failed with exit code ${result.exitCode}`);
+      throw new DiagnosableError("Mutagen session list failed");
     }
     const matches = parseListing(result.stdout).filter(({ name }) => name === expected.name);
-    if (matches.length > 1) throw new Error("multiple Mutagen sessions have the owned name");
+    if (matches.length > 1) throw new DiagnosableError("multiple Mutagen sessions have the owned name");
     const match = matches[0];
     if (!match) return;
     assertOwnedTerminationRecord(match, expected);
@@ -361,7 +420,7 @@ export class MutagenSyncLifecycle {
     await this.checked(["daemon", "start"], "Mutagen daemon start");
     let existing = await this.listOwned(expected, true);
     if (existing && statusKind(existing) === "conflict") {
-      throw new Error("Mutagen session has conflicts");
+      throw new DiagnosableError("Mutagen session has conflicts");
     }
     /* Mutagen cannot reconfigure a live session, so a manifest ignore edit is repaired by
        recreating it; a session left disconnected by a laptop sleep or a remote reboot is repaired

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { DiagnosableError } from "../../../src/runtime/diagnostic.js";
 import {
   PREPARATION_STEPS,
   PreparationError,
@@ -92,6 +93,49 @@ describe("remote preparation", () => {
     const result = await prepareRemote(runtime);
     expect(result).toEqual({ ok: false, reason, retryable });
     expect(runtime.calls.includes("release")).toBe(runtime.calls.includes("lock") && step !== "lock");
+  });
+
+  it("reports a diagnosable failure as a single sanitized line", async () => {
+    const runtime = new FakePreparation();
+    runtime.pauseSync = async () => {
+      runtime.calls.push("sync-pause");
+      throw new DiagnosableError(`Mutagen session ignore mismatch\nstack noise${"x".repeat(400)}`);
+    };
+    const result = await prepareRemote(runtime);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.reason).toBe("sync");
+    expect(result.detail).toBe("Mutagen session ignore mismatch");
+  });
+
+  it("never reports text an untrusted source could have contributed", async () => {
+    const native = new FakePreparation();
+    native.bootstrap = async () => {
+      throw new Error("unsupported Linux architecture: secret-canary");
+    };
+    const wrapped = new FakePreparation();
+    wrapped.bootstrap = async () => {
+      throw new PreparationError("bootstrap", false, { cause: new Error("remote said secret-canary") });
+    };
+
+    expect(await prepareRemote(native)).not.toHaveProperty("detail");
+    expect(JSON.stringify(await prepareRemote(wrapped))).not.toContain("secret-canary");
+  });
+
+  it("truncates an oversized detail and drops a non-Error failure", async () => {
+    const long = new FakePreparation();
+    long.bootstrap = async () => {
+      throw new DiagnosableError("y".repeat(400));
+    };
+    const truncated = await prepareRemote(long);
+    if (truncated.ok) throw new Error("expected failure");
+    expect(truncated.detail).toHaveLength(200);
+    expect(truncated.detail?.endsWith("...")).toBe(true);
+
+    const thrown = new FakePreparation();
+    thrown.bootstrap = async () => {
+      throw "bare string";
+    };
+    expect(await prepareRemote(thrown)).toEqual({ ok: false, reason: "bootstrap", retryable: false });
   });
 
   it("preserves an explicit stable capacity reason from the probe boundary", async () => {
