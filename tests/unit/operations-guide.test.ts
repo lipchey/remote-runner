@@ -4,9 +4,12 @@ import { describe, expect, it } from "vitest";
 
 import { DIAGNOSTIC_PROBES } from "../../src/diagnostics/doctor.js";
 
-describe("diagnostic runbook", () => {
+describe("remote-runner operations guide", () => {
   it("documents every stable reason with its read-only doctor command", async () => {
-    const runbook = await readFile(new URL("../../docs/RUNBOOK.md", import.meta.url), "utf8");
+    const runbook = await readFile(
+      new URL("../../docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md", import.meta.url),
+      "utf8",
+    );
 
     for (const probe of DIAGNOSTIC_PROBES) {
       expect(runbook).toContain(`\`${probe.reason}\``);
@@ -15,7 +18,10 @@ describe("diagnostic runbook", () => {
   });
 
   it("covers every required symptom and puts dry-run before every apply example", async () => {
-    const runbook = await readFile(new URL("../../docs/RUNBOOK.md", import.meta.url), "utf8");
+    const runbook = await readFile(
+      new URL("../../docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md", import.meta.url),
+      "utf8",
+    );
     for (const topic of [
       "SSH and Tailscale",
       "Host key",
