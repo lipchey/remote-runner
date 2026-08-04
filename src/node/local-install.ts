@@ -169,6 +169,11 @@ async function atomicOwnedFile(
   return true;
 }
 
+function settledValue<T>(result: PromiseSettledResult<T>): T {
+  if (result.status === "rejected") throw result.reason;
+  return result.value;
+}
+
 function plist(executablePath: string): string {
   if (/[<>&]/u.test(executablePath)) throw new Error("LaunchAgent executable path is not XML-safe");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -252,7 +257,10 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
   }
   const executable = `#!/bin/sh\n${OWNED_MARKER}\nexec ${shellArgument(options.nodePath)} ${shellArgument(join(appRoot, "src", "main.js"))} "$@"\n`;
   const launchPlist = plist(executablePath);
-  const [executableChanged, plistChanged, launch] = await Promise.all([
+  /* allSettled, not all: Promise.all returns at the first rejection while the sibling artifact is
+     mid-write, so its `.tmp-<uuid>` file lands after the caller has already given up on the
+     install — an orphan in ~/Library/LaunchAgents nobody owns. */
+  const written = await Promise.allSettled([
     atomicOwnedFile(
       executablePath,
       executable,
@@ -262,6 +270,9 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
     atomicOwnedFile(plistPath, launchPlist, 0o600, (value) => value.includes(`<string>${LABEL}</string>`)),
     options.launch.status(),
   ]);
+  const executableChanged = settledValue(written[0]);
+  const plistChanged = settledValue(written[1]);
+  const launch = settledValue(written[2]);
   const settleLaunchd = options.settleLaunchd ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 100)));
   if (launch.loaded && (executableChanged || plistChanged)) {
     await options.launch.bootout();
