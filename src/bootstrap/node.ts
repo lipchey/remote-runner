@@ -5,6 +5,7 @@ const PACKAGE_MANAGER = /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+@\d+\.\d+\.\d+(?:-[0-9
 const SHA256 = /^[0-9a-f]{64}$/u;
 
 export interface NodeInstallRuntime {
+  installed(path: string): Promise<boolean>;
   createTemporaryDirectory(label: string): Promise<string>;
   download(url: string, destination: string): Promise<void>;
   readText(url: string): Promise<string>;
@@ -61,6 +62,10 @@ function assertConfinedTemporary(root: string, temporary: string): void {
   }
 }
 
+function slug(packageManager: string): string {
+  return packageManager.replaceAll(/[^A-Za-z0-9.]/gu, "-");
+}
+
 function manifestDigest(manifest: string, archive: string): string {
   if (manifest.length > 1024 * 1024 || /\u0000/u.test(manifest)) {
     throw new Error("Node checksum manifest is invalid");
@@ -82,6 +87,16 @@ export async function installNode(runtime: NodeInstallRuntime, options: NodeInst
   const arch = nodeLinuxArchitecture(options.machine);
   const distribution = `node-v${options.version}-linux-${arch}`;
   const archive = `${distribution}.tar.xz`;
+  /* The package manager is installed INTO this tree before promotion, so the directory has to name
+     it too: keyed on the Node version alone, a package-manager bump would silently reuse a tree
+     carrying the old one. */
+  const finalRoot = posix.join(options.toolchainRoot, `${distribution}-${slug(options.packageManager)}`);
+  /* Everything below the promotion is content-addressed by that name, so a promoted tree is final:
+     re-downloading it every run only costs tens of megabytes and makes each run depend on
+     nodejs.org answering right now. */
+  if (await runtime.installed(posix.join(finalRoot, "bin", "node"))) {
+    return { version: options.version, arch, root: finalRoot, packageManager: options.packageManager };
+  }
   const baseUrl = `https://nodejs.org/dist/v${options.version}`;
   const expectedDigest = manifestDigest(await runtime.readText(`${baseUrl}/SHASUMS256.txt`), archive);
   const temporary = await runtime.createTemporaryDirectory(`node-${options.version}-${arch}`);
@@ -89,7 +104,6 @@ export async function installNode(runtime: NodeInstallRuntime, options: NodeInst
   const archivePath = posix.join(temporary, archive);
   const extractRoot = posix.join(temporary, "extract");
   const stagedRoot = posix.join(extractRoot, distribution);
-  const finalRoot = posix.join(options.toolchainRoot, distribution);
   try {
     await runtime.download(`${baseUrl}/${archive}`, archivePath);
     const actualDigest = await runtime.sha256(archivePath);

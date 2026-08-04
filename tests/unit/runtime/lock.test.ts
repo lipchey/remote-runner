@@ -221,7 +221,32 @@ describe("acquireProfileLock", () => {
     expect(files.exists(lockPath)).toBe(true);
   });
 
-  it("recovers only after the lease expired and the owner is absent", async () => {
+  it("reclaims a dead owner's lock without waiting out its lease", async () => {
+    const files = new MemoryLockFiles();
+    files.seed(lockPath, { token: "theirs", pid: 7, acquiredAt: 0, leaseUntil: 120_000 });
+    const adapter = runtime(files, { now: 5 });
+
+    const release = await acquireProfileLock(adapter, "ariadne/identity", 500);
+
+    expect(adapter.sleeps).toEqual([]);
+    expect(files.diagnostics[0]).toContain(".stale-");
+    await release();
+  });
+
+  it("waits between attempts when the published lock vanishes mid-check", async () => {
+    const files = new MemoryLockFiles();
+    files.seed(lockPath, { token: "theirs", pid: 7, acquiredAt: 0, leaseUntil: 10 });
+    files.beforeMkdir = async (path) => {
+      if (path === `${lockPath}/.operation`) throw fileError("ENOENT");
+    };
+    const adapter = runtime(files, { alive: [7], now: 20 });
+
+    await expect(acquireProfileLock(adapter, "ariadne/identity", 250)).rejects.toBeInstanceOf(LockTimeoutError);
+
+    expect(adapter.sleeps).toEqual([100, 100, 50]);
+  });
+
+  it("recovers once the owner process is absent", async () => {
     const files = new MemoryLockFiles();
     files.seed(lockPath, { token: "theirs", pid: 7, acquiredAt: 0, leaseUntil: 10 });
     const adapter = runtime(files, { now: 20 });

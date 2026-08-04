@@ -1,12 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isOutageReason,
   recordFallback,
   recordRemoteChildStarted,
   type NotificationEvent,
   type OutageRuntime,
   type OutageState,
 } from "../../../src/notifications/outage.js";
+
+describe("outage reasons", () => {
+  it("excludes the reasons that say nothing about the remote being reachable", () => {
+    expect(["transport", "dns", "bootstrap", "child-start"].every(isOutageReason)).toBe(true);
+    expect(["lock", "validation"].some(isOutageReason)).toBe(false);
+    expect(isOutageReason("not-a-reason")).toBe(false);
+  });
+});
 
 class FakeRuntime implements OutageRuntime {
   state?: OutageState;

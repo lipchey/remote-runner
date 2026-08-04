@@ -37,6 +37,8 @@ describe("managed Mutagen SSH transport", () => {
       expect(contents).toContain(`UserKnownHostsFile=${first.knownHostsPath}`);
       expect(contents).toContain("StrictHostKeyChecking=yes");
       expect(contents).toContain("GlobalKnownHostsFile=/dev/null");
+      expect(contents).toContain("ServerAliveInterval=15");
+      expect(contents).toContain("ServerAliveCountMax=4");
       expect(contents).not.toContain("~/.ssh");
       expect((await stat(path)).mode & 0o777).toBe(0o700);
     }

@@ -77,7 +77,13 @@ export async function runProfile(
     remote = await runtime.startRemote(command, prepared.secrets, async () => {
       if (childStarted) return;
       childStarted = true;
-      await prepared.release();
+      try {
+        await prepared.release();
+      } catch {
+        /* The workload is already running. A rejection here reaches the stream as a failure and
+           SIGKILLs it; an unreleased lock is instead reclaimed by the next run's dead-owner
+           takeover, so losing the release is strictly cheaper than losing the run. */
+      }
     });
   } catch {
     try {

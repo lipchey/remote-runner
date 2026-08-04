@@ -249,7 +249,12 @@ export async function acquireProfileLock(
 
     const guardPath = `${lockPath}/.operation`;
     const guard = await acquireOperationGuard(runtime, guardPath);
-    if (guard === "missing") continue;
+    /* "missing" means the published lock vanished between the two calls. Retrying without the
+       sleep spins at 100% CPU forever on a dangling symlink, which never resolves on its own. */
+    if (guard === "missing") {
+      await waitForRetry(runtime, identity, waitBudgetMs, deadline);
+      continue;
+    }
     if (guard === "busy") {
       await waitForRetry(runtime, identity, waitBudgetMs, deadline);
       continue;
@@ -274,8 +279,11 @@ export async function acquireProfileLock(
         continue;
       }
 
-      const now = runtime.clock.now();
-      if (now >= owner.leaseUntil && !(await runtime.processes.isAlive(owner.pid))) {
+      /* A dead owner is reclaimed the moment it is observed dead: the lease added nothing to the
+         liveness check (an owner whose PID was reused stays alive forever either way) and only
+         made every crashed run block the next one for a whole lease. leaseUntil is kept as a
+         diagnostic record of when the owner expected to be done. */
+      if (!(await runtime.processes.isAlive(owner.pid))) {
         moved = await renameForDiagnosis(runtime, lockPath, "stale", token, diagnosticAttempt++);
         continue;
       }

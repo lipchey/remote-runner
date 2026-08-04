@@ -66,6 +66,12 @@ policy.
 | `timeout`                | `ssh -o ConnectTimeout=2 <remote> true`                                                                          |
 | `unknown`                | `remote-runner status <profile>`                                                                                 |
 
+`lock` and `validation` never raise an outage notification: neither says the remote is unreachable.
+A `lock` means another run of the same workspace — usually a queued prewarm — is already holding it.
+The runner waits for it, printing `another run holds this workspace; waiting for it to finish`, and
+offers the attempt again before any fallback, so a concurrent prewarm does not turn into a duplicate
+local workload.
+
 A workload command that cannot be executed at all is not one of these reasons: the run exits `127`
 with `remote-runner launcher: child spawn failed`, without a local fallback or an outage
 notification. The usual cause is passing a shell line as the workload — `run <profile> -- 'a && b'`
@@ -155,6 +161,12 @@ runner-owned remote toolchain root rather than the login shell `PATH`. A normal 
 the pinned native Node, exact pnpm, uv, gitleaks, and project dependencies under owned runner paths.
 Never sync `node_modules`, `.pnpm-store`, `.nx`, build output, or coverage from the laptop.
 
+The toolchain is downloaded once, not once per run: a promoted directory names the exact pinned
+version it holds, and the Node tree also names the package manager installed into it, so a run
+reuses it after a single `test -x` probe. A Node, uv, or package-manager version bump therefore
+names a new directory and downloads again; the superseded tree stays on disk until it is cleaned
+up. A run no longer depends on nodejs.org or github.com answering once its toolchain is in place.
+
 The dependency fingerprint is only the fast invalidation path. On every preparation the runner
 checks every declared repository-relative bootstrap artifact, then the profile's fixed-argv ensure
 commands validate the synchronized workspace against its installed environment. A changed
@@ -207,7 +219,8 @@ self-healing, so a stopped controller cannot silently disable session reconcilia
 healthy login service reports `state = running`; repair it idempotently with `remote-runner install`
 if it is missing or stopped. A prewarm request claimed before a controller restart remains in the
 owned `.running` state and is retried by the next controller pass; an equivalent new request
-coalesces instead of starting another workload.
+coalesces instead of starting another workload. A claim whose run merely _failed_ is dropped
+instead — otherwise the controller would replay the same failing request on every pass.
 
 ## Corrupt state
 

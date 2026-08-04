@@ -5,6 +5,8 @@ import { dirname } from "node:path";
 import type { ProcessRequest, ProcessResult } from "../runtime/contracts.js";
 
 const MAX_CONNECT_TIMEOUT_SECONDS = 300;
+export const SERVER_ALIVE_INTERVAL_SECONDS = 15;
+export const SERVER_ALIVE_COUNT_MAX = 4;
 const DEFAULT_CAPTURE_BYTES = 64 * 1024;
 const HOST_KEY_TYPE =
   /^(?:ssh-(?:rsa|dss|ed25519)|ecdsa-sha2-nistp(?:256|384|521)|sk-(?:ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$/u;
@@ -83,6 +85,12 @@ export function sshArguments(
     "GlobalKnownHostsFile=/dev/null",
     "-o",
     `ConnectTimeout=${connectTimeoutSeconds}`,
+    /* ConnectTimeout only bounds the TCP handshake. Without keepalives a laptop that sleeps or a
+       Wi-Fi drop mid-workload never closes the channel, so the CLI waits forever on a dead run. */
+    "-o",
+    `ServerAliveInterval=${SERVER_ALIVE_INTERVAL_SECONDS}`,
+    "-o",
+    `ServerAliveCountMax=${SERVER_ALIVE_COUNT_MAX}`,
     "--",
     target,
     encodePosixCommand(remoteArguments),

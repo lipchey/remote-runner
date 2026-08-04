@@ -4,6 +4,7 @@ const VERSION = /^\d+\.\d+\.\d+$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 
 export interface UvInstallRuntime {
+  installed(path: string): Promise<boolean>;
   createTemporaryDirectory(label: string): Promise<string>;
   download(url: string, destination: string): Promise<void>;
   sha256(path: string): Promise<string>;
@@ -41,6 +42,12 @@ export async function installUv(runtime: UvInstallRuntime, options: UvInstallOpt
   validate(options);
   const target = uvLinuxTarget(options.machine);
   const archive = `uv-${target}.tar.gz`;
+  const installedRoot = posix.join(options.toolchainRoot, `uv-${options.version}-${target}`);
+  /* The promoted directory names the exact pinned version, so re-downloading it every run only
+     buys a tens-of-megabytes transfer and a hard dependency on github.com being up right now. */
+  if (await runtime.installed(posix.join(installedRoot, "uv"))) {
+    return { version: options.version, target, root: installedRoot } as const;
+  }
   const temporary = await runtime.createTemporaryDirectory(`uv-${options.version}-${target}`);
   const temporaryParent = posix.join(options.toolchainRoot, ".tmp");
   if (!temporary.startsWith(`${temporaryParent}/`) || posix.normalize(temporary) !== temporary) {
@@ -49,7 +56,7 @@ export async function installUv(runtime: UvInstallRuntime, options: UvInstallOpt
   const archivePath = posix.join(temporary, archive);
   const extractRoot = posix.join(temporary, "extract");
   const stagedRoot = posix.join(extractRoot, `uv-${target}`);
-  const finalRoot = posix.join(options.toolchainRoot, `uv-${options.version}-${target}`);
+  const finalRoot = installedRoot;
   try {
     await runtime.download(
       `https://github.com/astral-sh/uv/releases/download/${options.version}/${archive}`,

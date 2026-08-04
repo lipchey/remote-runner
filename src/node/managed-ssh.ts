@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 
-import { enrollKnownHost, NodeKnownHostsStore, type SshProcessRuntime } from "../ssh/client.js";
+import {
+  enrollKnownHost,
+  NodeKnownHostsStore,
+  SERVER_ALIVE_COUNT_MAX,
+  SERVER_ALIVE_INTERVAL_SECONDS,
+  type SshProcessRuntime,
+} from "../ssh/client.js";
 
 const TARGET = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$/u;
 
@@ -27,10 +33,12 @@ function quote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+/* Mutagen drives its transport through this wrapper, so the keepalives that stop a slept laptop
+   from wedging a run have to be here too — the ssh/client.ts arguments never reach it. */
 function wrapper(tool: "ssh" | "scp", knownHostsPath: string): string {
   return [
     "#!/bin/sh",
-    `exec /usr/bin/${tool} -o BatchMode=yes -o StrictHostKeyChecking=yes -o ${quote(`UserKnownHostsFile=${knownHostsPath}`)} -o GlobalKnownHostsFile=/dev/null "$@"`,
+    `exec /usr/bin/${tool} -o BatchMode=yes -o StrictHostKeyChecking=yes -o ${quote(`UserKnownHostsFile=${knownHostsPath}`)} -o GlobalKnownHostsFile=/dev/null -o ServerAliveInterval=${SERVER_ALIVE_INTERVAL_SECONDS} -o ServerAliveCountMax=${SERVER_ALIVE_COUNT_MAX} "$@"`,
     "",
   ].join("\n");
 }

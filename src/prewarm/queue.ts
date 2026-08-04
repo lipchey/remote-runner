@@ -201,8 +201,13 @@ export async function consumeNextPrewarmRequest(
       await rm(runningPath, { force: true });
       return "discarded";
     }
-    await run(request);
-    await rm(runningPath, { force: true });
+    try {
+      await run(request);
+    } finally {
+      /* Without this the claim survives the failure, and because .running entries are claimed
+         first the controller re-runs that same request every pass, forever. */
+      await rm(runningPath, { force: true });
+    }
     return "processed";
   }
   return "idle";

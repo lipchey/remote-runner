@@ -144,6 +144,14 @@ export class RemoteToolchainRuntime {
     );
   }
 
+  async installed(path: string): Promise<boolean> {
+    this.assertBelowRoot(path, "installed path");
+    const result = await this.remote.run(["sh", "-ceu", 'test -x "$1"', "remote-runner-toolchain-installed", path]);
+    if (result.exitCode === 0) return true;
+    if (result.exitCode === 1) return false;
+    throw new Error(`probe remote toolchain failed with exit code ${result.exitCode}`);
+  }
+
   async promote(from: string, to: string): Promise<void> {
     this.assertTemporary(from);
     this.assertBelowRoot(to, "promotion target");

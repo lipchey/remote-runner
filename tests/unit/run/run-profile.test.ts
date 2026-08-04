@@ -58,6 +58,25 @@ function prepared(runtime: FakeRuntime): PrepareResult {
   };
 }
 const failed = (reason = "transport", retryable = false): PrepareResult => ({ ok: false, reason, retryable });
+
+describe("early lock release", () => {
+  it("keeps the started workload when releasing the lock fails", async () => {
+    const runtime = new FakeRuntime();
+    runtime.remoteExit = 3;
+    runtime.preparations = [
+      {
+        ok: true,
+        secrets: {},
+        release: async () => {
+          throw new Error("release failed");
+        },
+      },
+    ];
+
+    await expect(runProfile(runtime, { mode: "auto", fallback: "local" }, ["true"])).resolves.toBe(3);
+    expect(runtime.calls).not.toContain("local:true");
+  });
+});
 const profile = { mode: "auto" as const, fallback: "local" as const };
 
 describe("run profile selection", () => {

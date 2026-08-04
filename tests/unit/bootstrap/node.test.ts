@@ -11,7 +11,12 @@ class FakeRuntime implements NodeInstallRuntime {
   readonly calls: string[] = [];
   manifest = "";
   digest = "a".repeat(64);
+  present = false;
 
+  async installed(path: string) {
+    this.calls.push(`installed:${path}`);
+    return this.present;
+  }
   async createTemporaryDirectory(label: string) {
     this.calls.push(`temp:${label}`);
     return "/tools/.tmp/token";
@@ -70,7 +75,7 @@ describe("native Node bootstrap", () => {
     expect(result).toEqual({
       version: "26.5.0",
       arch: "x64",
-      root: "/tools/node-v26.5.0-linux-x64",
+      root: "/tools/node-v26.5.0-linux-x64-pnpm-11.9.0",
       packageManager: "pnpm@11.9.0",
     });
     expect(runtime.calls.findIndex((call) => call.startsWith("sha256:"))).toBeLessThan(
@@ -80,6 +85,35 @@ describe("native Node bootstrap", () => {
       runtime.calls.findIndex((call) => call.startsWith("promote:")),
     );
     expect(runtime.calls.at(-1)).toBe("cleanup:/tools/.tmp/token");
+  });
+
+  it("reuses a promoted tree but keys it on the package manager it carries", async () => {
+    const runtime = new FakeRuntime();
+    runtime.present = true;
+
+    const result = await installNode(runtime, {
+      version: "26.5.0",
+      machine: "x86_64",
+      packageManager: "pnpm@11.9.0",
+      toolchainRoot: "/tools",
+    });
+
+    expect(result.root).toBe("/tools/node-v26.5.0-linux-x64-pnpm-11.9.0");
+    expect(runtime.calls).toEqual(["installed:/tools/node-v26.5.0-linux-x64-pnpm-11.9.0/bin/node"]);
+
+    const bumped = new FakeRuntime();
+    bumped.present = false;
+    bumped.manifest = `${"a".repeat(64)}  node-v26.5.0-linux-x64.tar.xz\n`;
+    const reinstalled = await installNode(bumped, {
+      version: "26.5.0",
+      machine: "x86_64",
+      packageManager: "pnpm@11.10.0",
+      toolchainRoot: "/tools",
+    });
+    expect(reinstalled.root).toBe("/tools/node-v26.5.0-linux-x64-pnpm-11.10.0");
+    expect(bumped.calls).toContain(
+      "promote:/tools/.tmp/token/extract/node-v26.5.0-linux-x64:/tools/node-v26.5.0-linux-x64-pnpm-11.10.0",
+    );
   });
 
   it("never extracts or promotes a checksum mismatch and still cleans temporary data", async () => {

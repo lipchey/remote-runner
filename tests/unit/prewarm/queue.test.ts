@@ -87,6 +87,19 @@ describe("durable prewarm queue", () => {
     await expect(inspectPrewarmRequest(home, request)).resolves.toBe("idle");
   });
 
+  it("drops the claim when the run fails, so the controller does not replay it forever", async () => {
+    const { home, request } = await fixture();
+    await publishPrewarmRequest(home, request);
+
+    await expect(
+      consumeNextPrewarmRequest(home, async () => {
+        throw new Error("prewarm failed");
+      }),
+    ).rejects.toThrow("prewarm failed");
+
+    await expect(inspectPrewarmRequest(home, request)).resolves.toBe("idle");
+  });
+
   it("discards a malformed owned request without invoking the workload", async () => {
     const { home, queueRoot, basename } = await fixture();
     await mkdir(queueRoot, { recursive: true });
