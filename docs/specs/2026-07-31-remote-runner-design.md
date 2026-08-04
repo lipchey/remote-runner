@@ -56,7 +56,9 @@ Profiles support three modes:
 - `remote` fails closed if preparation cannot complete.
 
 Fallback is allowed only before the remote child starts. A remote child’s non-zero exit, signal,
-timeout, or workload error is authoritative and never triggers a local retry.
+timeout, or workload error is authoritative and never triggers a local retry. A workload command the
+remote cannot execute at all is the caller’s error, not an outage: it exits `127` with no fallback
+and no notification, because the same command fails identically on the laptop.
 
 ## 4. Diagnostic interface
 

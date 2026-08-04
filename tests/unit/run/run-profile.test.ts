@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { INFRASTRUCTURE_EXIT_CODE, runProfile, type RunProfileRuntime } from "../../../src/run/run-profile.js";
+import {
+  INFRASTRUCTURE_EXIT_CODE,
+  WORKLOAD_COMMAND_REASON,
+  runProfile,
+  type RunProfileRuntime,
+} from "../../../src/run/run-profile.js";
 import type { PrepareResult } from "../../../src/run/prepare.js";
 
 class FakeRuntime implements RunProfileRuntime {
@@ -9,6 +14,7 @@ class FakeRuntime implements RunProfileRuntime {
   localExit = 17;
   remoteExit = 0;
   remoteKind: "completed" | "not-started" = "completed";
+  notStartedReason = "spawn";
   marker = true;
   seenSecrets?: Readonly<Record<string, string>>;
 
@@ -29,7 +35,7 @@ class FakeRuntime implements RunProfileRuntime {
   ) {
     this.seenSecrets = secrets;
     this.calls.push(`remote:${command.join("|")}`);
-    if (this.remoteKind === "not-started") return { kind: "not-started" as const, reason: "spawn" };
+    if (this.remoteKind === "not-started") return { kind: "not-started" as const, reason: this.notStartedReason };
     if (this.marker) {
       this.calls.push("marker");
       await onChildStarted();
@@ -74,6 +80,15 @@ describe("run profile selection", () => {
     runtime.remoteKind = "not-started";
     expect(await runProfile(runtime, profile, ["./verify", "--full"])).toBe(17);
     expect(runtime.calls).toEqual(["prepare", "remote:./verify|--full", "release", "local:./verify|--full"]);
+  });
+
+  it("returns command-not-found without a local fallback when the workload command cannot spawn", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [prepared(runtime)];
+    runtime.remoteKind = "not-started";
+    runtime.notStartedReason = WORKLOAD_COMMAND_REASON;
+    expect(await runProfile(runtime, profile, ["rm -rf .nx/cache && ls .nx"])).toBe(127);
+    expect(runtime.calls).toEqual(["prepare", "remote:rm -rf .nx/cache && ls .nx", "release"]);
   });
 
   it("releases at the child marker and propagates remote child failure without local retry", async () => {

@@ -6,6 +6,14 @@ import { writeSync } from "node:fs";
 
 const MAGIC = Buffer.from("RRSE1\0", "ascii");
 const CHILD_MARKER = Buffer.from("RR_CHILD_STARTED\n", "ascii");
+/* The workload command itself is not executable: a caller error, not a remote outage. The runner
+   matches this code before the marker, so it must stay distinct from the shell's own 126/127,
+   which a broken remote shell (missing flock or node) emits for the same ssh invocation. */
+const WORKLOAD_SPAWN_EXIT_CODE = 69;
+/* Only errors that prove the command itself is unusable may claim the caller's error. Everything
+   else a spawn can fail with — EAGAIN, EMFILE, ENOMEM under remote load — is a genuine remote
+   failure that must keep its outage code so the runner still notifies and falls back. */
+const WORKLOAD_SPAWN_ERRORS = new Set(["ENOENT", "EACCES", "EISDIR", "ENOTDIR", "ENOEXEC", "ENAMETOOLONG"]);
 const MAX_FRAME_BYTES = 128 * 1024;
 const MAX_SECRET_BYTES = 64 * 1024;
 const SECRET_NAME = /^[A-Z][A-Z0-9_]*$/u;
@@ -14,6 +22,10 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 function fail(message, code = 64) {
   process.stderr.write(`remote-runner launcher: ${message}\n`);
   process.exitCode = code;
+}
+
+function spawnExitCode(error) {
+  return WORKLOAD_SPAWN_ERRORS.has(error?.code) ? WORKLOAD_SPAWN_EXIT_CODE : 70;
 }
 
 function controlArguments() {
@@ -115,12 +127,13 @@ async function launch() {
       env: { ...process.env, ...secrets },
       stdio: ["ignore", "inherit", "inherit"],
     });
-  } catch {
-    fail("child spawn failed", 70);
+  } catch (error) {
+    fail("child spawn failed", spawnExitCode(error));
     return;
   }
   secrets = undefined;
   const exit = once(child, "exit").catch(() => [null, null]);
+  let spawnError;
   const start = await new Promise((resolve) => {
     child.once("spawn", () => {
       try {
@@ -131,11 +144,17 @@ async function launch() {
         resolve("marker-failed");
       }
     });
-    child.once("error", () => resolve("spawn-failed"));
+    child.once("error", (error) => {
+      spawnError = error;
+      resolve("spawn-failed");
+    });
   });
   if (start !== "started") {
     if (start === "marker-failed") await exit;
-    fail(start === "marker-failed" ? "child marker failed" : "child spawn failed", 70);
+    fail(
+      start === "marker-failed" ? "child marker failed" : "child spawn failed",
+      start === "marker-failed" ? 70 : spawnExitCode(spawnError),
+    );
     return;
   }
   const [code, signal] = await exit;

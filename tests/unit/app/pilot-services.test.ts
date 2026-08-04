@@ -336,7 +336,10 @@ describe("pilot service boundaries", () => {
     expect(new TextDecoder().decode(warnings[0])).not.toContain("secret-canary");
   });
 
-  it("does not touch activity or run retention when the child marker is absent", async () => {
+  it.each([
+    [255, "child-start"],
+    [69, "workload-command"],
+  ])("does not touch activity or run retention when the child marker is absent (exit %i)", async (exitCode, reason) => {
     const current = worktreeIdentity(process.cwd());
     let processCalls = 0;
     const processes = {
@@ -354,7 +357,7 @@ describe("pilot service boundaries", () => {
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
       processes,
-      streamProcess: async () => ({ exitCode: 255, signal: null, markerSeen: false, spawned: true }),
+      streamProcess: async () => ({ exitCode, signal: null, markerSeen: false, spawned: true }),
     });
     Object.assign(services, {
       remotePaths: paths,
@@ -368,7 +371,7 @@ describe("pilot service boundaries", () => {
         { NEON_DEV_DATABASE_URL: "secret-canary" },
         async () => undefined,
       ),
-    ).toEqual({ kind: "not-started", reason: "child-start" });
+    ).toEqual({ kind: "not-started", reason });
     expect(processCalls).toBe(0);
   });
 
