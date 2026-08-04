@@ -21,6 +21,7 @@ import { PreparationError } from "../run/prepare.js";
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
 import { WORKLOAD_COMMAND_REASON } from "../run/run-profile.js";
 import type { RemoteExecutionResult } from "../run/run-profile.js";
+import { isNotificationReason } from "../notifications/outage.js";
 import { encodeSecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
 import { classifySshFailure } from "../ssh/probe.js";
@@ -220,52 +221,33 @@ function decode(contents: Uint8Array, label: string): string {
   }
 }
 
-function parseGitlinks(output: Uint8Array): GitlinkIdentity[] {
-  const result: GitlinkIdentity[] = [];
-  for (const line of decode(output, "gitlink listing").split("\n")) {
-    if (line.length === 0) continue;
-    const match = /^160000 ([0-9a-f]{40}|[0-9a-f]{64}) 0\t(.+)$/u.exec(line);
-    if (match) result.push({ oid: match[1]!, path: match[2]! });
-  }
-  return result;
-}
+/* Prefix is one of " " (current), "+" (working copy ahead of the index — its sha IS the checked-out
+   commit, which is what Mutagen replicates and therefore what we want), "-" (not initialized — the
+   sha is the recorded index gitlink while the working copy is empty, so it would not change across
+   `git submodule update --init`), or "U" (merge conflict — git prints an all-zero oid, so every
+   conflicted state fingerprints identically). Only " " and "+" name a usable working-copy commit;
+   the describe suffix mirrors `git describe --contains --all` and is absent only when git can
+   resolve no describe at all, which is rare once a submodule is initialized. */
+const SUBMODULE_STATUS_LINE = /^([ +\-U])([0-9a-f]{40}|[0-9a-f]{64}) (.+)$/u;
+const SUBMODULE_STATUS_DESCRIBE = / \(.*\)$/u;
 
-export async function listLocalGitlinks(processes: SshProcessRuntime, sourceRoot: string): Promise<GitlinkIdentity[]> {
-  const result = await processes.run({
-    command: "git",
-    args: ["ls-files", "--stage"],
-    cwd: sourceRoot,
-    maxOutputBytes: LOCAL_GIT_CAPTURE_BYTES,
+function parseSubmoduleStatus(output: Uint8Array): GitlinkIdentity[] {
+  const text = decode(output, "submodule status listing");
+  if (text.length === 0) return [];
+  const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
+  return lines.map((line) => {
+    const match = SUBMODULE_STATUS_LINE.exec(line);
+    if (match === null) throw new Error("submodule status line is malformed");
+    const prefix = match[1]!;
+    const oid = match[2]!;
+    const rest = match[3]!;
+    const describe = SUBMODULE_STATUS_DESCRIBE.exec(rest);
+    const path = describe ? rest.slice(0, -describe[0].length) : rest;
+    if (prefix !== " " && prefix !== "+") {
+      throw new Error(`submodule ${path} has an unusable status prefix "${prefix}"`);
+    }
+    return { oid, path };
   });
-  if (
-    result.exitCode !== 0 ||
-    result.outputTruncated ||
-    result.stdout.byteLength > LOCAL_GIT_CAPTURE_BYTES ||
-    result.stderr.byteLength > LOCAL_GIT_CAPTURE_BYTES
-  ) {
-    throw new Error("local Git inspection failed");
-  }
-  return Promise.all(
-    parseGitlinks(result.stdout).map(async (gitlink) => {
-      const recorded = await processes.run({
-        command: "git",
-        args: ["rev-parse", `HEAD:${gitlink.path}`],
-        cwd: sourceRoot,
-        maxOutputBytes: LOCAL_GIT_CAPTURE_BYTES,
-      });
-      if (
-        recorded.exitCode !== 0 ||
-        recorded.outputTruncated ||
-        recorded.stdout.byteLength > LOCAL_GIT_CAPTURE_BYTES ||
-        recorded.stderr.byteLength > LOCAL_GIT_CAPTURE_BYTES
-      ) {
-        throw new Error(`local Git inspection failed for recorded gitlink ${gitlink.path}`);
-      }
-      const match = /^([0-9a-f]{40}|[0-9a-f]{64})\n$/u.exec(decode(recorded.stdout, "recorded gitlink"));
-      if (match === null) throw new Error(`recorded gitlink is malformed for ${gitlink.path}`);
-      return { path: gitlink.path, oid: match[1]! };
-    }),
-  );
 }
 
 function checkedGitOutput(result: Awaited<ReturnType<SshProcessRuntime["run"]>>, label: string): Uint8Array {
@@ -278,6 +260,20 @@ function checkedGitOutput(result: Awaited<ReturnType<SshProcessRuntime["run"]>>,
     throw new Error(`local Git inspection failed for ${label}`);
   }
   return result.stdout;
+}
+
+/* Reports the submodule's checked-out working-copy commit, not the superproject's committed
+   gitlink oid: Mutagen replicates the working copy, so fingerprinting the committed oid would
+   cache-hit stale bootstrap artefacts against a submodule that was checked out to a new SHA but
+   not yet committed in the superproject. */
+export async function listLocalGitlinks(processes: SshProcessRuntime, sourceRoot: string): Promise<GitlinkIdentity[]> {
+  const result = await processes.run({
+    command: "git",
+    args: ["submodule", "status", "--recursive"],
+    cwd: sourceRoot,
+    maxOutputBytes: LOCAL_GIT_CAPTURE_BYTES,
+  });
+  return parseSubmoduleStatus(checkedGitOutput(result, "submodule status listing"));
 }
 
 function parseNulPaths(output: Uint8Array, label: string): string[] {
@@ -340,6 +336,7 @@ export interface NodeProfileServicesOptions {
   readonly stderr?: (chunk: Uint8Array) => void;
   readonly recordFallback?: (reason: string) => Promise<void>;
   readonly recordRemoteChildStarted?: () => Promise<void>;
+  readonly onLocalExecution?: () => void;
 }
 
 export class NodeProfileServices implements ProfileExecutionServices {
@@ -827,6 +824,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
   }
 
   async runLocal(command: readonly string[]): Promise<number> {
+    this.options.onLocalExecution?.();
     const result = await this.streamProcess({
       command: command[0]!,
       args: command.slice(1),
@@ -853,7 +851,12 @@ export class NodeProfileServices implements ProfileExecutionServices {
   }
 
   async recordFallback(reason: string): Promise<void> {
-    await this.options.recordFallback?.(reason);
+    /* reason crosses into a log line and a persistence callback, so it is mapped to the closed
+       notification-reason set here, at the boundary, rather than trusted from the caller. */
+    const stable = isNotificationReason(reason) ? reason : "unknown";
+    const line = new TextEncoder().encode(`remote-runner: running locally (fallback reason=${stable})\n`);
+    (this.options.stderr ?? ((chunk) => process.stderr.write(chunk)))(line);
+    await this.options.recordFallback?.(stable);
   }
 
   async recordRemoteChildStarted(): Promise<void> {

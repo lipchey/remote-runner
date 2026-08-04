@@ -63,6 +63,62 @@ describe("pilot service boundaries", () => {
     expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("manifest|1|local");
   });
 
+  it("notifies onLocalExecution before running a local workload", async () => {
+    let notified = false;
+    const services = new NodeProfileServices(profile, {
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      stdout: () => undefined,
+      stderr: () => undefined,
+      onLocalExecution: () => {
+        notified = true;
+      },
+    });
+
+    await services.runLocal([process.execPath, "-e", ""]);
+
+    expect(notified).toBe(true);
+  });
+
+  it("announces the local fallback reason to the operator before recording it", async () => {
+    const lines: string[] = [];
+    let recorded: string | undefined;
+    const services = new NodeProfileServices(profile, {
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      stderr: (chunk) => lines.push(new TextDecoder().decode(chunk)),
+      recordFallback: async (reason) => {
+        recorded = reason;
+      },
+    });
+
+    await services.recordFallback("child-start");
+
+    expect(lines).toEqual(["remote-runner: running locally (fallback reason=child-start)\n"]);
+    expect(recorded).toBe("child-start");
+  });
+
+  it("maps a hostile fallback reason to the closed set before logging or forwarding it", async () => {
+    const lines: string[] = [];
+    let recorded: string | undefined;
+    const services = new NodeProfileServices(profile, {
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      stderr: (chunk) => lines.push(new TextDecoder().decode(chunk)),
+      recordFallback: async (reason) => {
+        recorded = reason;
+      },
+    });
+
+    await services.recordFallback("evil\x1b[31m\ninjected");
+
+    expect(lines).toEqual(["remote-runner: running locally (fallback reason=unknown)\n"]);
+    expect(recorded).toBe("unknown");
+  });
+
   it("resolves every generated target below the canonical remote home", () => {
     const paths = resolveRemotePaths("/home/admin", profile, "0123456789abcdef01234567");
 
@@ -375,19 +431,21 @@ describe("pilot service boundaries", () => {
     expect(processCalls).toBe(0);
   });
 
-  it("bounds a large local index separately while retaining only gitlinks", async () => {
-    const regular = `100644 ${"a".repeat(40)} 0\tfile\n`.repeat(1_200);
-    const gitlink = `160000 ${"b".repeat(40)} 0\tpackages/submodule\n`;
-    const requests: Array<{ readonly maxOutputBytes: number }> = [];
+  it("fingerprints the submodule working-copy checkout in one bounded submodule status call", async () => {
+    const workingCopyOid = "b".repeat(40);
+    const nestedOid = "c".repeat(40);
+    const requests: BoundedProcessRequest[] = [];
     const result = await listLocalGitlinks(
       {
         async run(request) {
           requests.push(request);
+          const lines = [
+            `+${workingCopyOid} vendor/dev-standards (heads/main)`,
+            ` ${nestedOid} packages/nested/submodule`,
+          ];
           return {
             exitCode: 0,
-            stdout: new TextEncoder().encode(
-              request.args[0] === "ls-files" ? regular + gitlink : `${"b".repeat(40)}\n`,
-            ),
+            stdout: new TextEncoder().encode(`${lines.join("\n")}\n`),
             stderr: new Uint8Array(),
             outputTruncated: false,
           };
@@ -396,37 +454,58 @@ describe("pilot service boundaries", () => {
       "/worktree",
     );
 
-    expect(requests.map(({ maxOutputBytes }) => maxOutputBytes)).toEqual([4 * 1024 * 1024, 4 * 1024 * 1024]);
-    expect(result).toEqual([{ oid: "b".repeat(40), path: "packages/submodule" }]);
+    expect(requests).toEqual([
+      {
+        command: "git",
+        args: ["submodule", "status", "--recursive"],
+        cwd: "/worktree",
+        maxOutputBytes: 4 * 1024 * 1024,
+      },
+    ]);
+    expect(result).toEqual([
+      { oid: workingCopyOid, path: "vendor/dev-standards" },
+      { oid: nestedOid, path: "packages/nested/submodule" },
+    ]);
   });
 
-  it("fingerprints a gitlink from the superproject HEAD instead of the staged index", async () => {
-    const indexedOid = "a".repeat(40);
-    const headOid = "b".repeat(40);
-    const requests: Array<{ readonly args: readonly string[]; readonly cwd: string | undefined }> = [];
-    const result = await listLocalGitlinks(
-      {
-        async run(request) {
-          requests.push({ args: request.args, cwd: request.cwd });
-          const listing = request.args[0] === "ls-files";
-          return {
-            exitCode: 0,
-            stdout: new TextEncoder().encode(
-              listing ? `160000 ${indexedOid} 0\tvendor/dev-standards\n` : `${headOid}\n`,
-            ),
-            stderr: new Uint8Array(),
-            outputTruncated: false,
-          };
+  it("fails closed on a malformed submodule status line and returns none for no submodules", async () => {
+    const run = (stdout: string) =>
+      listLocalGitlinks(
+        {
+          async run() {
+            return {
+              exitCode: 0,
+              stdout: new TextEncoder().encode(stdout),
+              stderr: new Uint8Array(),
+              outputTruncated: false,
+            };
+          },
         },
-      },
-      "/worktree",
-    );
+        "/worktree",
+      );
 
-    expect(result).toEqual([{ oid: headOid, path: "vendor/dev-standards" }]);
-    expect(requests).toEqual([
-      { args: ["ls-files", "--stage"], cwd: "/worktree" },
-      { args: ["rev-parse", "HEAD:vendor/dev-standards"], cwd: "/worktree" },
-    ]);
+    await expect(run("not a submodule status line\n")).rejects.toThrow(/malformed/u);
+    await expect(run("")).resolves.toEqual([]);
+  });
+
+  it("fails closed on an uninitialized or conflicted submodule status prefix", async () => {
+    const run = (stdout: string) =>
+      listLocalGitlinks(
+        {
+          async run() {
+            return {
+              exitCode: 0,
+              stdout: new TextEncoder().encode(stdout),
+              stderr: new Uint8Array(),
+              outputTruncated: false,
+            };
+          },
+        },
+        "/worktree",
+      );
+
+    await expect(run(`-${"a".repeat(40)} vendor/dev-standards\n`)).rejects.toThrow(/unusable status prefix "-"/u);
+    await expect(run(`U${"0".repeat(40)} vendor/dev-standards\n`)).rejects.toThrow(/unusable status prefix "U"/u);
   });
 
   it("discovers tracked and non-ignored untracked fingerprint files while subtracting deletions", async () => {

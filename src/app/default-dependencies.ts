@@ -335,7 +335,7 @@ async function inspectProbe(
                 ? [
                     "sh",
                     "-ceu",
-                    'path=$1; case "$path" in /*) ;; *) path=$HOME/$path;; esac; exec find "$path" -maxdepth 1 -name .env -print',
+                    'path=$1; case "$path" in /*) ;; *) path=$HOME/$path;; esac; if found=$(find "$path" -maxdepth 1 -name .env -print); then [ -z "$found" ]; else exit 1; fi',
                     "remote-runner-secrets",
                     remotePaths.workspace,
                   ]
@@ -396,29 +396,45 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       return { managedSsh, launcherSource };
     })());
 
-  const executeWorkload =
-    options.executeProfile ??
-    (async (profile: Profile, command: readonly string[], mode: RunMode): Promise<number> => {
-      const resources = await executionResources();
-      const notifications = createNodeNotificationCallbacks({
-        statePath: join(profileRoot(home, profile, identity), "outage.json"),
-        configPath: join(home, ".claude", ".telegram-ask.conf"),
-        context: { consumer: profile.consumer, profile: profile.id, remoteLabel: profile.remote.label },
-        stderr: (line) => process.stderr.write(`${line}\n`),
-      });
-      const services = new NodeProfileServices(profile, {
-        home,
-        sourceRoot,
-        launcherSource: resources.launcherSource,
-        mutagenCommand,
-        managedSshPath: resources.managedSsh.directory,
-        knownHostsPath: resources.managedSsh.knownHostsPath,
-        processes,
-        recordFallback: notifications.recordFallback,
-        recordRemoteChildStarted: notifications.recordRemoteChildStarted,
-      });
-      return runProfile(createProfileRuntime(services), profile, command, mode);
-    });
+  const executeWorkload: (
+    profile: Profile,
+    command: readonly string[],
+    mode: RunMode,
+  ) => Promise<{ readonly status: number; readonly provider: "remote" | "local" }> =
+    options.executeProfile !== undefined
+      ? async (profile, command, mode) => ({
+          status: await options.executeProfile!(profile, command, mode),
+          provider: "remote",
+        })
+      : async (profile: Profile, command: readonly string[], mode: RunMode) => {
+          const resources = await executionResources();
+          const notifications = createNodeNotificationCallbacks({
+            statePath: join(profileRoot(home, profile, identity), "outage.json"),
+            configPath: join(home, ".claude", ".telegram-ask.conf"),
+            context: { consumer: profile.consumer, profile: profile.id, remoteLabel: profile.remote.label },
+            stderr: (line) => process.stderr.write(`${line}\n`),
+          });
+          /* Local to this call's own async activation, unlike the closure-shared variable this
+             replaces: overlapping executeProfile calls each get their own binding, so one run's
+             fallback to local can never bleed into a concurrently running remote run's record. */
+          let provider: "remote" | "local" = "remote";
+          const services = new NodeProfileServices(profile, {
+            home,
+            sourceRoot,
+            launcherSource: resources.launcherSource,
+            mutagenCommand,
+            managedSshPath: resources.managedSsh.directory,
+            knownHostsPath: resources.managedSsh.knownHostsPath,
+            processes,
+            recordFallback: notifications.recordFallback,
+            recordRemoteChildStarted: notifications.recordRemoteChildStarted,
+            onLocalExecution: () => {
+              provider = "local";
+            },
+          });
+          const status = await runProfile(createProfileRuntime(services), profile, command, mode);
+          return { status, provider };
+        };
 
   const executeProfile = async (profile: Profile, command: readonly string[], mode: RunMode): Promise<number> => {
     const root = profileRoot(home, profile, identity);
@@ -446,13 +462,14 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       mode,
     });
     try {
-      const status = await executeWorkload(profile, command, mode);
+      const { status, provider } = await executeWorkload(profile, command, mode);
       await writeLog({
         at: (options.now ?? (() => new Date().toISOString()))(),
         event: "run-finish",
         profile: profile.id,
         mode,
         status,
+        provider,
       });
       return status;
     } catch (caught) {
@@ -462,6 +479,10 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         profile: profile.id,
         mode,
         error: caught instanceof Error ? caught.name : "UnknownError",
+        /* A throw here always precedes local/remote branching (resource setup, not the run
+           itself — runProfile absorbs its own execution failures into a status code), so the
+           attempted path is always the remote one. */
+        provider: "remote",
       });
       throw caught;
     }
