@@ -1,5 +1,6 @@
 .artifacts/
 .codegraph/
+.handoff/
 .remote-execute-state/
 .remote-runner-state/
 coverage/

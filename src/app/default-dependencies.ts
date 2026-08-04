@@ -479,10 +479,9 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         profile: profile.id,
         mode,
         error: caught instanceof Error ? caught.name : "UnknownError",
-        /* A throw here always precedes local/remote branching (resource setup, not the run
-           itself — runProfile absorbs its own execution failures into a status code), so the
-           attempted path is always the remote one. */
-        provider: "remote",
+        /* Deliberately no provider field: a throw reaches here only from resource setup, before
+           either path ran (runProfile absorbs execution failures into a status code), so any
+           value would name a path that was never attempted. */
       });
       throw caught;
     }
