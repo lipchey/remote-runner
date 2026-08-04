@@ -363,13 +363,12 @@ export class MutagenSyncLifecycle {
     if (existing && statusKind(existing) === "conflict") {
       throw new Error("Mutagen session has conflicts");
     }
-    if (existing && statusKind(existing) === "recoverable") {
-      throw new Error("Mutagen session is disconnected before Git reconciliation");
-    }
     /* Mutagen cannot reconfigure a live session, so a manifest ignore edit is repaired by
-       recreating it; failing closed here would make every later run unavailable instead. */
-    if (existing && !ignoresMatch(existing, expected)) {
-      await this.checked(["sync", "terminate", expected.name], "Mutagen session ignore drift terminate");
+       recreating it; a session left disconnected by a laptop sleep or a remote reboot is repaired
+       the same way resumeAndFlush already repairs it. Failing closed on either would make every
+       later run unavailable instead. */
+    if (existing && (statusKind(existing) === "recoverable" || !ignoresMatch(existing, expected))) {
+      await this.checked(["sync", "terminate", expected.name], "Mutagen session drift or recovery terminate");
       existing = undefined;
     }
     if (!existing) await this.create(expected, true);
