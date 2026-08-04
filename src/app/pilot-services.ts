@@ -240,7 +240,27 @@ export async function listLocalGitlinks(processes: SshProcessRuntime, sourceRoot
   ) {
     throw new Error("local Git inspection failed");
   }
-  return parseGitlinks(result.stdout);
+  return Promise.all(
+    parseGitlinks(result.stdout).map(async (gitlink) => {
+      const recorded = await processes.run({
+        command: "git",
+        args: ["rev-parse", `HEAD:${gitlink.path}`],
+        cwd: sourceRoot,
+        maxOutputBytes: LOCAL_GIT_CAPTURE_BYTES,
+      });
+      if (
+        recorded.exitCode !== 0 ||
+        recorded.outputTruncated ||
+        recorded.stdout.byteLength > LOCAL_GIT_CAPTURE_BYTES ||
+        recorded.stderr.byteLength > LOCAL_GIT_CAPTURE_BYTES
+      ) {
+        throw new Error(`local Git inspection failed for recorded gitlink ${gitlink.path}`);
+      }
+      const match = /^([0-9a-f]{40}|[0-9a-f]{64})\n$/u.exec(decode(recorded.stdout, "recorded gitlink"));
+      if (match === null) throw new Error(`recorded gitlink is malformed for ${gitlink.path}`);
+      return { path: gitlink.path, oid: match[1]! };
+    }),
+  );
 }
 
 function checkedGitOutput(result: Awaited<ReturnType<SshProcessRuntime["run"]>>, label: string): Uint8Array {

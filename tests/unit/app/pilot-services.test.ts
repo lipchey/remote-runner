@@ -382,7 +382,9 @@ describe("pilot service boundaries", () => {
           requests.push(request);
           return {
             exitCode: 0,
-            stdout: new TextEncoder().encode(regular + gitlink),
+            stdout: new TextEncoder().encode(
+              request.args[0] === "ls-files" ? regular + gitlink : `${"b".repeat(40)}\n`,
+            ),
             stderr: new Uint8Array(),
             outputTruncated: false,
           };
@@ -391,8 +393,37 @@ describe("pilot service boundaries", () => {
       "/worktree",
     );
 
-    expect(requests.map(({ maxOutputBytes }) => maxOutputBytes)).toEqual([4 * 1024 * 1024]);
+    expect(requests.map(({ maxOutputBytes }) => maxOutputBytes)).toEqual([4 * 1024 * 1024, 4 * 1024 * 1024]);
     expect(result).toEqual([{ oid: "b".repeat(40), path: "packages/submodule" }]);
+  });
+
+  it("fingerprints a gitlink from the superproject HEAD instead of the staged index", async () => {
+    const indexedOid = "a".repeat(40);
+    const headOid = "b".repeat(40);
+    const requests: Array<{ readonly args: readonly string[]; readonly cwd: string | undefined }> = [];
+    const result = await listLocalGitlinks(
+      {
+        async run(request) {
+          requests.push({ args: request.args, cwd: request.cwd });
+          const listing = request.args[0] === "ls-files";
+          return {
+            exitCode: 0,
+            stdout: new TextEncoder().encode(
+              listing ? `160000 ${indexedOid} 0\tvendor/dev-standards\n` : `${headOid}\n`,
+            ),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+          };
+        },
+      },
+      "/worktree",
+    );
+
+    expect(result).toEqual([{ oid: headOid, path: "vendor/dev-standards" }]);
+    expect(requests).toEqual([
+      { args: ["ls-files", "--stage"], cwd: "/worktree" },
+      { args: ["rev-parse", "HEAD:vendor/dev-standards"], cwd: "/worktree" },
+    ]);
   });
 
   it("discovers tracked and non-ignored untracked fingerprint files while subtracting deletions", async () => {
