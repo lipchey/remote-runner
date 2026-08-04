@@ -258,7 +258,6 @@ describe("Mutagen one-way lifecycle", () => {
     ["alpha mismatch", session("paused", { alpha: "/other" })],
     ["beta mismatch", session("paused", { beta: "runner@example.test:/other" })],
     ["mode mismatch", session("paused", { mode: "two-way-resolved" })],
-    ["ignore mismatch", session("paused", { ignores: [".git", "node_modules"] })],
     ["conflict", session("watching", { conflicts: [{}] })],
   ])("fails closed on %s before pausing", async (_label, listing) => {
     const processes = new FakeProcesses([{}, { stdout: listing }]);
@@ -266,6 +265,38 @@ describe("Mutagen one-way lifecycle", () => {
 
     await expect(lifecycle.pauseForGitReconcile(options)).rejects.toThrow();
     expect(commandNames(processes)).toEqual(["daemon start", "sync list"]);
+  });
+
+  it.each(["watching", "paused"])("recreates a %s session whose ignores drifted from the manifest", async (status) => {
+    const listing = session(status, { ignores: [".git", "node_modules"] });
+    const processes = new FakeProcesses([{}, { stdout: listing }, {}, {}]);
+    const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
+
+    await lifecycle.pauseForGitReconcile(options);
+
+    expect(commandNames(processes)).toEqual(["daemon start", "sync list", "sync terminate", "sync create"]);
+    expect(processes.requests[3]?.args).toEqual([
+      "sync",
+      "create",
+      "--name",
+      name,
+      "--sync-mode",
+      "one-way-replica",
+      "--paused",
+      ...compileIgnores(options.ignores).flatMap((pattern) => ["--ignore", pattern]),
+      "--",
+      options.canonicalAlphaRoot,
+      beta,
+    ]);
+  });
+
+  it("fails closed when a session replaced after the pause carries different ignores", async () => {
+    const replaced = session("watching", { ignores: [".git", "node_modules"] });
+    const processes = new FakeProcesses([{}, { stdout: session("paused") }, {}, {}, { stdout: replaced }]);
+    const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([100]));
+    const paused = await lifecycle.pauseForGitReconcile(options);
+
+    await expect(lifecycle.resumeAndFlush(paused)).rejects.toThrowError("Mutagen session ignore mismatch");
   });
 
   it("resumes only on explicit invocation, flushes, inspects, and returns measured transfer data", async () => {

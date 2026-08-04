@@ -260,15 +260,22 @@ function statusKind(record: SessionRecord): "paused" | "healthy" | "recoverable"
   throw new Error(`Mutagen session has unrecognized status: ${status}`);
 }
 
-function assertOwnedRecord(record: SessionRecord, expected: ValidatedSession): void {
+function ignoresMatch(record: SessionRecord, expected: ValidatedSession): boolean {
+  return (
+    record.ignores.length === expected.ignores.length &&
+    expected.ignores.every((pattern) => record.ignores.includes(pattern))
+  );
+}
+
+function assertOwnedRecord(record: SessionRecord, expected: ValidatedSession, repairableIgnores = false): void {
   if (record.alpha !== expected.alpha || record.beta !== expected.beta) {
     throw new Error("Mutagen session endpoint mismatch");
   }
   if (record.mode !== "one-way-replica") throw new Error("Mutagen session mode mismatch");
-  if (
-    record.ignores.length !== expected.ignores.length ||
-    !expected.ignores.every((pattern) => record.ignores.includes(pattern))
-  ) {
+  /* Tolerated only before the pause, where drift is still repairable by recreation: once a
+     descriptor is prepared, a session swapped in under the owned name must never sync under
+     exclusions this run did not compile. */
+  if (!repairableIgnores && !ignoresMatch(record, expected)) {
     throw new Error("Mutagen session ignore mismatch");
   }
 }
@@ -301,7 +308,7 @@ export class MutagenSyncLifecycle {
     if (result.exitCode !== 0) throw new Error(`${label} failed with exit code ${result.exitCode}`);
   }
 
-  private async listOwned(expected: ValidatedSession): Promise<SessionRecord | undefined> {
+  private async listOwned(expected: ValidatedSession, repairableIgnores = false): Promise<SessionRecord | undefined> {
     const result = await this.run(["sync", "list", "--template", LIST_TEMPLATE], "Mutagen session list");
     if (result.exitCode !== 0) {
       throw new Error(`Mutagen session list failed with exit code ${result.exitCode}`);
@@ -309,7 +316,7 @@ export class MutagenSyncLifecycle {
     const matches = parseListing(result.stdout).filter(({ name }) => name === expected.name);
     if (matches.length > 1) throw new Error("multiple Mutagen sessions have the owned name");
     const match = matches[0];
-    if (match) assertOwnedRecord(match, expected);
+    if (match) assertOwnedRecord(match, expected, repairableIgnores);
     return match;
   }
 
@@ -352,15 +359,21 @@ export class MutagenSyncLifecycle {
   async pauseForGitReconcile(options: MutagenSessionOptions): Promise<PausedMutagenSession> {
     const expected = validateOptions(options);
     await this.checked(["daemon", "start"], "Mutagen daemon start");
-    const existing = await this.listOwned(expected);
-    if (!existing) await this.create(expected, true);
+    let existing = await this.listOwned(expected, true);
     if (existing && statusKind(existing) === "conflict") {
       throw new Error("Mutagen session has conflicts");
     }
     if (existing && statusKind(existing) === "recoverable") {
       throw new Error("Mutagen session is disconnected before Git reconciliation");
     }
-    if (existing && statusKind(existing) !== "paused") {
+    /* Mutagen cannot reconfigure a live session, so a manifest ignore edit is repaired by
+       recreating it; failing closed here would make every later run unavailable instead. */
+    if (existing && !ignoresMatch(existing, expected)) {
+      await this.checked(["sync", "terminate", expected.name], "Mutagen session ignore drift terminate");
+      existing = undefined;
+    }
+    if (!existing) await this.create(expected, true);
+    else if (statusKind(existing) !== "paused") {
       await this.checked(["sync", "pause", expected.name], "Mutagen session pause");
     }
     const descriptor = {} as PausedMutagenSession;
