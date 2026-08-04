@@ -97,7 +97,11 @@ export const DIAGNOSTIC_PROBES = [
     id: "secrets.persistence",
     reason: "secrets",
     readOnly: true,
-    command: ["ssh", "<remote>", "find <workspace> -maxdepth 1 -name .env -print"],
+    command: [
+      "ssh",
+      "<remote>",
+      'if found=$(find <workspace> -maxdepth 1 -name .env -print); then [ -z "$found" ]; else exit 1; fi',
+    ],
   },
   {
     id: "controller.health",

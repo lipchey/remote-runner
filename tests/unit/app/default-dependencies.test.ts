@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -42,6 +42,7 @@ function result(stdout = "", exitCode = 0): BoundedProcessResult {
 class FakeProcesses {
   readonly requests: BoundedProcessRequest[] = [];
   registrationExitCode = 0;
+  secretsProbeExitCode = 0;
   sessionListing = "[]";
 
   async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
@@ -57,6 +58,9 @@ class FakeProcesses {
     }
     if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-workspace-registration")) {
       return result("", this.registrationExitCode);
+    }
+    if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-secrets")) {
+      return result("", this.secretsProbeExitCode);
     }
     return result();
   }
@@ -217,6 +221,40 @@ describe("concrete Node CLI dependencies", () => {
     });
   });
 
+  it.each([
+    ["ok", 0],
+    ["fail", 1],
+  ])("reports secrets.persistence as %s from the presence test's exit code", async (status, secretsProbeExitCode) => {
+    const paths = await fixture();
+    const processes = new FakeProcesses();
+    processes.secretsProbeExitCode = secretsProbeExitCode;
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
+    });
+
+    const report = (await dependencies.doctorProfile?.("verify-full")) as {
+      checks: readonly { id: string; status: string }[];
+    };
+
+    expect(report.checks).toContainEqual(
+      status === "ok"
+        ? { id: "secrets.persistence", status: "ok", next: expect.stringContaining("if found=$(find") }
+        : {
+            id: "secrets.persistence",
+            status: "fail",
+            reason: "secrets",
+            next: expect.stringContaining("if found=$(find"),
+          },
+    );
+    const secretsRequest = processes.requests.find((request) => request.args.at(-1)?.includes("remote-runner-secrets"));
+    expect(secretsRequest?.args.at(-1)).toContain(
+      'if found=$(find "$path" -maxdepth 1 -name .env -print); then [ -z "$found" ]; else exit 1; fi',
+    );
+  });
+
   it("keeps repair actions inside one profile identity and requires its exact dry-run receipt", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
@@ -301,7 +339,70 @@ describe("concrete Node CLI dependencies", () => {
     expect(lines).toHaveLength(2);
     expect(lines?.[0]).toContain('"event":"run-start"');
     expect(lines?.[1]).toContain('"event":"run-finish"');
+    expect(lines?.[1]).toContain('"provider":"remote"');
     expect(lines?.join("\n")).not.toContain("ignored-secret-like-argument");
+  });
+
+  it("marks a genuinely local run-finish record with provider local", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+      now: () => "2026-07-31T12:34:56.000Z",
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.runProfile!(profile, [process.execPath, "-e", ""], "local")).resolves.toBe(0);
+
+    const lines = await dependencies.logsProfile?.("verify-full");
+    expect(lines?.[1]).toContain('"event":"run-finish"');
+    expect(lines?.[1]).toContain('"provider":"local"');
+  });
+
+  it("keeps each run's provider execution-local when a local run and a stalled remote attempt overlap", async () => {
+    const paths = await fixture();
+    /* ensureManagedKnownHost skips its ssh-keyscan round trip once the target's host is already
+       on file, so the remote attempt's first (and only, before it fails) ssh call is the home
+       probe below — the one point we gate. */
+    await mkdir(dirname(paths.knownHostsPath), { recursive: true });
+    await writeFile(paths.knownHostsPath, "pop-os ssh-ed25519 AAAA\n", { mode: 0o600 });
+
+    let releaseRemoteProbe: () => void = () => undefined;
+    const remoteProbeGate = new Promise<void>((resolve) => {
+      releaseRemoteProbe = resolve;
+    });
+    class GatedProcesses extends FakeProcesses {
+      async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+        if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-home-probe")) {
+          await remoteProbeGate;
+        }
+        return super.run(request);
+      }
+    }
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new GatedProcesses(),
+      now: () => "2026-07-31T12:34:56.000Z",
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    /* Started but deliberately not awaited yet: it blocks on the gate above, so the local run
+       below runs — and finishes, including its own run-finish log line — while this is still
+       pending, then release lets it resume and fail (no known home) without falling back. */
+    const remoteRun = dependencies.runProfile!(profile, ["ignored"], "remote");
+    await expect(dependencies.runProfile!(profile, [process.execPath, "-e", ""], "local")).resolves.toBe(0);
+    releaseRemoteProbe();
+    await expect(remoteRun).resolves.toBe(75);
+
+    const lines = (await dependencies.logsProfile?.("verify-full")) ?? [];
+    const finishes = lines.filter((line) => line.includes('"event":"run-finish"'));
+    expect(finishes).toHaveLength(2);
+    expect(finishes[0]).toContain('"provider":"local"');
+    expect(finishes[1]).toContain('"provider":"remote"');
   });
 
   it("refuses symlinked repair receipts and benchmark output directories", async () => {

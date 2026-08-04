@@ -113,6 +113,30 @@ describe("profile runtime composition", () => {
     expect(services.calls).not.toContain("local");
   });
 
+  it("announces an unavailable remote before falling back when the child never starts", async () => {
+    const services = new FakeServices();
+    services.notStartedReason = "child-start";
+
+    const code = await runProfile(createProfileRuntime(services), profile, ["./verify"]);
+
+    expect(code).toBe(17);
+    expect(services.calls).toEqual([
+      "validate",
+      "lock",
+      "probe",
+      "pause",
+      "workspace",
+      "flush",
+      "bootstrap",
+      "secrets",
+      "remote",
+      "unavailable:child-start",
+      "release",
+      "outage:child-start",
+      "local",
+    ]);
+  });
+
   it("neither notifies nor falls back when the workload command cannot be executed", async () => {
     const services = new FakeServices();
     services.notStartedReason = WORKLOAD_COMMAND_REASON;

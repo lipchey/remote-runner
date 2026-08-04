@@ -1,6 +1,6 @@
 import { isNotificationReason } from "../notifications/outage.js";
 import { prepareRemote, type PreparationRuntime } from "../run/prepare.js";
-import type { RemoteExecutionResult, RunProfileRuntime } from "../run/run-profile.js";
+import { WORKLOAD_COMMAND_REASON, type RemoteExecutionResult, type RunProfileRuntime } from "../run/run-profile.js";
 
 export interface ProfileExecutionServices extends PreparationRuntime {
   startRemote(
@@ -43,7 +43,10 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
           /* notification never blocks workload */
         }
       });
-      if (result.kind === "not-started") pendingFallbackReason = "child-start";
+      if (result.kind === "not-started" && result.reason !== WORKLOAD_COMMAND_REASON) {
+        pendingFallbackReason = "child-start";
+        services.reportUnavailable("child-start");
+      }
       return result;
     },
     async runLocal(command) {

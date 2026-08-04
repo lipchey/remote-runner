@@ -46,25 +46,25 @@ policy.
 
 ## Stable reason-code index
 
-| Reason                   | Read-only diagnosis                                                         |
-| ------------------------ | --------------------------------------------------------------------------- |
-| `dns`                    | `dscacheutil -q host -a name <remote>`                                      |
-| `host-key`               | `ssh-keygen -F <remote>`                                                    |
-| `authentication`         | `ssh -o BatchMode=yes <remote> true`                                        |
-| `transport`              | `ssh -o ConnectTimeout=5 <remote> true`                                     |
-| `remote-shell`           | `ssh <remote> printf remote-shell-ok`                                       |
-| `capacity`               | `ssh <remote> df -Pk <workspace>`                                           |
-| `bootstrap`              | `ssh <remote> test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm` |
-| `validation`             | `remote-runner validate <profile>`                                          |
-| `lock`                   | `ls -ld <lock-root>`                                                        |
-| `sync`                   | `mutagen sync list <session>`                                               |
-| `workspace`              | `ssh <remote> git -C <workspace> status --short --branch`                   |
-| `workspace-registration` | `ssh <remote> inspect exact Git worktree registration for <workspace>`      |
-| `secrets`                | `ssh <remote> find <workspace> -maxdepth 1 -name .env -print`               |
-| `controller`             | `launchctl print gui/<uid>/com.lipchey.remote-runner`                       |
-| `child-start`            | `tail -n 50 <runner-log>`                                                   |
-| `timeout`                | `ssh -o ConnectTimeout=2 <remote> true`                                     |
-| `unknown`                | `remote-runner status <profile>`                                            |
+| Reason                   | Read-only diagnosis                                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `dns`                    | `dscacheutil -q host -a name <remote>`                                                                           |
+| `host-key`               | `ssh-keygen -F <remote>`                                                                                         |
+| `authentication`         | `ssh -o BatchMode=yes <remote> true`                                                                             |
+| `transport`              | `ssh -o ConnectTimeout=5 <remote> true`                                                                          |
+| `remote-shell`           | `ssh <remote> printf remote-shell-ok`                                                                            |
+| `capacity`               | `ssh <remote> df -Pk <workspace>`                                                                                |
+| `bootstrap`              | `ssh <remote> test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm`                                      |
+| `validation`             | `remote-runner validate <profile>`                                                                               |
+| `lock`                   | `ls -ld <lock-root>`                                                                                             |
+| `sync`                   | `mutagen sync list <session>`                                                                                    |
+| `workspace`              | `ssh <remote> git -C <workspace> status --short --branch`                                                        |
+| `workspace-registration` | `ssh <remote> inspect exact Git worktree registration for <workspace>`                                           |
+| `secrets`                | `ssh <remote> if found=$(find <workspace> -maxdepth 1 -name .env -print); then [ -z "$found" ]; else exit 1; fi` |
+| `controller`             | `launchctl print gui/<uid>/com.lipchey.remote-runner`                                                            |
+| `child-start`            | `tail -n 50 <runner-log>`                                                                                        |
+| `timeout`                | `ssh -o ConnectTimeout=2 <remote> true`                                                                          |
+| `unknown`                | `remote-runner status <profile>`                                                                                 |
 
 A workload command that cannot be executed at all is not one of these reasons: the run exits `127`
 with `remote-runner launcher: child spawn failed`, without a local fallback or an outage
@@ -160,6 +160,15 @@ checks every declared repository-relative bootstrap artifact, then the profile's
 commands validate the synchronized workspace against its installed environment. A changed
 fingerprint, missing artifact, or failed ensure command runs the full declared setup once. The
 runner then checks every artifact again before rerunning all ensure commands.
+
+Gitlinks are fingerprinted from `git submodule status --recursive`, the checked-out commit of each
+submodule's working copy, because that is what Mutagen actually replicates to the remote — not the
+superproject's committed gitlink oid. This still cannot see uncommitted edits made _inside_ a
+submodule's own working tree: `git ls-files` does not descend into submodules, and
+`git submodule status` reports only the submodule's checked-out commit, not whether that checkout is
+dirty. A dirty submodule can therefore still produce a stale fingerprint cache-hit; if bootstrap
+looks stale after editing inside a submodule without committing there first, commit inside the
+submodule (or otherwise change a tracked, fingerprinted file) to force re-invalidation.
 
 A normal missing artifact is self-healed by that single setup attempt. A persistently missing
 artifact is reported as `dependency artifact <path> missing after setup`; an artifact inspection
