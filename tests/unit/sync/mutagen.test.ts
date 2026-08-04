@@ -267,6 +267,19 @@ describe("Mutagen one-way lifecycle", () => {
     expect(commandNames(processes)).toEqual(["daemon start", "sync list"]);
   });
 
+  it.each(["disconnected", "halted-on-root-deletion"])(
+    "recreates a %s session before pausing instead of forcing the run onto the local fallback",
+    async (status) => {
+      const processes = new FakeProcesses([{}, { stdout: session(status) }, {}, {}]);
+      const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
+
+      await lifecycle.pauseForGitReconcile(options);
+
+      expect(commandNames(processes)).toEqual(["daemon start", "sync list", "sync terminate", "sync create"]);
+      expect(processes.requests[3]?.args).toContain("--paused");
+    },
+  );
+
   it.each(["watching", "paused"])("recreates a %s session whose ignores drifted from the manifest", async (status) => {
     const listing = session(status, { ignores: [".git", "node_modules"] });
     const processes = new FakeProcesses([{}, { stdout: listing }, {}, {}]);
