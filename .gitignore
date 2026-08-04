@@ -3,6 +3,7 @@ node_modules/
 dist/
 coverage/
 .artifacts/
+.handoff/
 .remote-execute-state/
 .remote-runner-state/
 *.log
