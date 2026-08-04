@@ -22,6 +22,7 @@ export interface FingerprintInput {
 }
 
 const encoder = new TextEncoder();
+const FINGERPRINT_SCHEMA_VERSION = "2";
 const compareText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
 
 function safeRelative(value: string): boolean {
@@ -80,7 +81,11 @@ export async function dependencyFingerprint(runtime: FingerprintRuntime, input: 
     }
     seenGitlinks.add(gitlink.path);
   }
-  const parts: Uint8Array[] = [field(JSON.stringify(environmentRecord(input.environment)), "environment")];
+  const parts: Uint8Array[] = [
+    field("fingerprint schema", "record kind"),
+    field(FINGERPRINT_SCHEMA_VERSION, "fingerprint schema version"),
+    field(JSON.stringify(environmentRecord(input.environment)), "environment"),
+  ];
   for (const path of [...input.files].sort()) {
     if (seenGitlinks.has(path)) continue;
     const contents = await runtime.readFile(path);
