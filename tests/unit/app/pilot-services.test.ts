@@ -30,6 +30,13 @@ const retainedDataAiProfile = loadManifestText(
   ),
 ).profiles[0]!;
 
+const ensureProfile = loadManifestText(
+  validManifest.replace(
+    'setup: ["./scripts/ds-bootstrap.sh"]',
+    'setup: ["./scripts/ds-bootstrap.sh"], ensure: [["node", "scripts/pnpm-state.mjs"]]',
+  ),
+).profiles[0]!;
+
 describe("pilot service boundaries", () => {
   it("applies the manifest child environment to a local workload", async () => {
     const chunks: Uint8Array[] = [];
@@ -273,18 +280,20 @@ describe("pilot service boundaries", () => {
         return false;
       },
     } as NodeProcessRuntime;
-    const services = new NodeProfileServices(profile, {
+    const services = new NodeProfileServices(ensureProfile, {
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
       processes,
     });
-    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", profile, current) });
+    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
 
     await services.bootstrap();
 
     const setup = requests.find(({ args }) => JSON.stringify(args).includes("ds-bootstrap.sh"));
     expect(setup?.maxOutputBytes).toBe(16 * 1024 * 1024);
+    const ensure = requests.find(({ args }) => JSON.stringify(args).includes("pnpm-state.mjs"));
+    expect(ensure?.maxOutputBytes).toBe(16 * 1024 * 1024);
     const control = requests.find(({ args }) => JSON.stringify(args).includes("remote-runner-install-launcher"));
     expect(control?.maxOutputBytes).toBe(64 * 1024);
     expect(requests.some(({ args }) => JSON.stringify(args).includes("nodejs.org"))).toBe(false);

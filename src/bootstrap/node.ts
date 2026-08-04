@@ -62,8 +62,12 @@ function assertConfinedTemporary(root: string, temporary: string): void {
   }
 }
 
+/* The mapping has to be injective, or two package managers share one toolchain directory and the
+   reuse probe hands back a tree carrying the wrong one. `/` is the only character of a validated
+   specifier that cannot appear in a path component, and a scoped name always carries one, so no
+   valid specifier can spell the replacement itself. */
 function slug(packageManager: string): string {
-  return packageManager.replaceAll(/[^A-Za-z0-9.]/gu, "-");
+  return packageManager.replaceAll("/", "__");
 }
 
 function manifestDigest(manifest: string, archive: string): string {

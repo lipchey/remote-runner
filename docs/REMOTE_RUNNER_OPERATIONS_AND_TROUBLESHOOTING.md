@@ -69,8 +69,10 @@ policy.
 `lock` and `validation` never raise an outage notification: neither says the remote is unreachable.
 A `lock` means another run of the same workspace — usually a queued prewarm — is already holding it.
 The runner waits for it, printing `another run holds this workspace; waiting for it to finish`, and
-offers the attempt again before any fallback, so a concurrent prewarm does not turn into a duplicate
-local workload.
+offers the attempt again. A `lock` is the one preparation failure that never falls back to a local
+run: running the workload locally while another run of the same workspace is doing it is the
+duplicate the wait exists to prevent, so exhausted contention exits `75` instead. Diagnose the
+holder with the index command before rerunning.
 
 A workload command that cannot be executed at all is not one of these reasons: the run exits `127`
 with `remote-runner launcher: child spawn failed`, without a local fallback or an outage

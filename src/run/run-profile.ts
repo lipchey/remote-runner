@@ -6,6 +6,7 @@ export const INFRASTRUCTURE_EXIT_CODE = 75;
    locally, so it must not spend a local fallback run nor raise an outage notification. */
 export const WORKLOAD_COMMAND_REASON = "workload-command";
 const WORKLOAD_COMMAND_EXIT_CODE = 127;
+const LOCK_REASON = "lock";
 const USAGE_EXIT_CODE = 64;
 const MAX_PREPARATION_ATTEMPTS = 2;
 
@@ -68,10 +69,15 @@ export async function runProfile(
     if (prepared.ok || !prepared.retryable) break;
   }
   if (prepared === undefined || !prepared.ok) {
-    return mayFallback(mode, profile) ? runLocal(runtime, command) : INFRASTRUCTURE_EXIT_CODE;
+    /* A lock failure means another run of THIS workspace is already doing the work. Running it
+       again locally is precisely the duplicate the wait exists to prevent, so contention fails
+       closed instead of falling back. */
+    const contended = prepared?.ok === false && prepared.reason === LOCK_REASON;
+    return mayFallback(mode, profile) && !contended ? runLocal(runtime, command) : INFRASTRUCTURE_EXIT_CODE;
   }
 
   let childStarted = false;
+  let releaseDeferred = false;
   let remote: RemoteExecutionResult;
   try {
     remote = await runtime.startRemote(command, prepared.secrets, async () => {
@@ -81,8 +87,9 @@ export async function runProfile(
         await prepared.release();
       } catch {
         /* The workload is already running. A rejection here reaches the stream as a failure and
-           SIGKILLs it; an unreleased lock is instead reclaimed by the next run's dead-owner
-           takeover, so losing the release is strictly cheaper than losing the run. */
+           SIGKILLs it, so the release is deferred to after the workload instead — an early release
+           failure is usually another acquirer briefly holding the operation guard. */
+        releaseDeferred = true;
       }
     });
   } catch {
@@ -112,6 +119,14 @@ export async function runProfile(
       /* already failing closed */
     }
     return INFRASTRUCTURE_EXIT_CODE;
+  }
+  if (releaseDeferred) {
+    try {
+      await prepared.release();
+    } catch {
+      /* Nothing is running any more, so the workload's exit code stands; the lock is left for the
+         next acquirer's dead-owner takeover. */
+    }
   }
   return validExitCode(remote.exitCode) ? remote.exitCode : INFRASTRUCTURE_EXIT_CODE;
 }

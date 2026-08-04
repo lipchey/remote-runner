@@ -45,6 +45,16 @@ class FakeRuntime implements OutageRuntime {
 const context = { consumer: "ariadne", profile: "verify-full", remoteLabel: "pop-os" };
 
 describe("durable outage transitions", () => {
+  it("does not let a legacy local-reason outage swallow the next real one", async () => {
+    const runtime = new FakeRuntime();
+    runtime.state = { schemaVersion: 1, outageActive: true, activeReason: "lock", queue: [] };
+
+    await recordFallback(runtime, context, "transport");
+
+    expect(runtime.sent.map((event) => [event.kind, event.reason])).toEqual([["outage", "transport"]]);
+    expect(runtime.state).toEqual({ schemaVersion: 1, outageActive: true, activeReason: "transport", queue: [] });
+  });
+
   it("alerts once per active outage and recovers on the first later remote child marker", async () => {
     const runtime = new FakeRuntime();
     await recordFallback(runtime, context, "transport");

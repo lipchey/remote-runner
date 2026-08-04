@@ -75,7 +75,7 @@ describe("native Node bootstrap", () => {
     expect(result).toEqual({
       version: "26.5.0",
       arch: "x64",
-      root: "/tools/node-v26.5.0-linux-x64-pnpm-11.9.0",
+      root: "/tools/node-v26.5.0-linux-x64-pnpm@11.9.0",
       packageManager: "pnpm@11.9.0",
     });
     expect(runtime.calls.findIndex((call) => call.startsWith("sha256:"))).toBeLessThan(
@@ -98,8 +98,8 @@ describe("native Node bootstrap", () => {
       toolchainRoot: "/tools",
     });
 
-    expect(result.root).toBe("/tools/node-v26.5.0-linux-x64-pnpm-11.9.0");
-    expect(runtime.calls).toEqual(["installed:/tools/node-v26.5.0-linux-x64-pnpm-11.9.0/bin/node"]);
+    expect(result.root).toBe("/tools/node-v26.5.0-linux-x64-pnpm@11.9.0");
+    expect(runtime.calls).toEqual(["installed:/tools/node-v26.5.0-linux-x64-pnpm@11.9.0/bin/node"]);
 
     const bumped = new FakeRuntime();
     bumped.present = false;
@@ -110,10 +110,27 @@ describe("native Node bootstrap", () => {
       packageManager: "pnpm@11.10.0",
       toolchainRoot: "/tools",
     });
-    expect(reinstalled.root).toBe("/tools/node-v26.5.0-linux-x64-pnpm-11.10.0");
+    expect(reinstalled.root).toBe("/tools/node-v26.5.0-linux-x64-pnpm@11.10.0");
     expect(bumped.calls).toContain(
-      "promote:/tools/.tmp/token/extract/node-v26.5.0-linux-x64:/tools/node-v26.5.0-linux-x64-pnpm-11.10.0",
+      "promote:/tools/.tmp/token/extract/node-v26.5.0-linux-x64:/tools/node-v26.5.0-linux-x64-pnpm@11.10.0",
     );
+  });
+
+  it("keeps two scoped package managers on distinct toolchain directories", async () => {
+    const roots: string[] = [];
+    for (const packageManager of ["@foo/bar-baz@1.2.3", "@foo-bar/baz@1.2.3"]) {
+      const runtime = new FakeRuntime();
+      runtime.present = true;
+      const result = await installNode(runtime, {
+        version: "26.5.0",
+        machine: "x86_64",
+        packageManager,
+        toolchainRoot: "/tools",
+      });
+      roots.push(result.root);
+    }
+
+    expect(new Set(roots).size).toBe(2);
   });
 
   it("never extracts or promotes a checksum mismatch and still cleans temporary data", async () => {

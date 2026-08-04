@@ -100,7 +100,14 @@ function validateState(value: OutageState | undefined): OutageState {
   ) {
     throw new Error("outage state is corrupt");
   }
-  return { ...value, queue: [...value.queue] };
+  const queue = value.queue.filter((entry) => isOutageReason(entry.reason));
+  /* State written before local reasons stopped raising outages can still carry an ACTIVE `lock` or
+     `validation` outage. Left in place it swallows the next real outage (an active outage suppresses
+     the new event) and later emits a recovery for an outage that never happened. */
+  if (value.outageActive && !isOutageReason(value.activeReason ?? "")) {
+    return { schemaVersion: 1, outageActive: false, queue };
+  }
+  return { ...value, queue };
 }
 
 function event(
