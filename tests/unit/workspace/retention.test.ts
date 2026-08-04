@@ -120,7 +120,7 @@ describe("pruneRemoteWorkspaces", () => {
           { kind: "directory", identity: stale, activityMs: nowMs - 61 * minute },
         ];
       },
-      async withQuarantine(target, quarantine, existing, cleanup) {
+      async withQuarantine(target, quarantine, existing, _graceCutoffMs, cleanup) {
         calls.push(`quarantine:${target}:${quarantine}:${existing}`);
         await cleanup();
         calls.push(`remove-lock:${target}`);
@@ -167,6 +167,7 @@ describe("pruneRemoteWorkspaces", () => {
     const locked = identity(42);
     const failed = identity(43);
     const removed = identity(44);
+    const refreshed = identity(45);
     const calls: string[] = [];
     const runtime: WorkspaceRetentionRuntime = {
       async list() {
@@ -177,12 +178,14 @@ describe("pruneRemoteWorkspaces", () => {
           { kind: "directory", identity: locked, activityMs: nowMs - 61 * minute },
           { kind: "directory", identity: failed, activityMs: nowMs - 62 * minute },
           { kind: "directory", identity: removed, activityMs: nowMs - 63 * minute },
+          { kind: "directory", identity: refreshed, activityMs: nowMs - 64 * minute },
           { kind: "unsafe", identity: "symlink", activityMs: 0 },
         ];
       },
-      async withQuarantine(target, _quarantine, existing, cleanup) {
+      async withQuarantine(target, _quarantine, existing, _graceCutoffMs, cleanup) {
         calls.push(`quarantine:${target}:${existing}`);
         if (target === locked) return "locked";
+        if (target === refreshed) return "refreshed";
         if (target === failed) throw new Error("bounded candidate failure");
         await cleanup();
         calls.push(`remove-lock:${target}`);
@@ -218,13 +221,48 @@ describe("pruneRemoteWorkspaces", () => {
         `quarantine:${failed}:false`,
         `quarantine:${removed}:false`,
         `terminate:${removed}`,
+        `quarantine:${refreshed}:false`,
       ]),
     );
-    expect(result).toEqual({ retained: 1, graceProtected: 0, locked: 1, removed: 2, failed: 1, ignored: 1 });
+    expect(result).toEqual({ retained: 1, graceProtected: 1, locked: 1, removed: 2, failed: 1, ignored: 1 });
   });
 });
 
 describe("RemoteWorkspaceRetentionRuntime", () => {
+  it("rechecks fresh activity before resuming an existing quarantine", async () => {
+    const target = identity(49);
+    let command: readonly string[] | undefined;
+    let cleaned = false;
+    const port: WorkspaceRetentionCommandPort = {
+      async run() {
+        return { exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array() };
+      },
+      async withLock(args) {
+        command = args;
+        return "refreshed";
+      },
+    };
+    const runtime = new RemoteWorkspaceRetentionRuntime(
+      port,
+      {
+        profileRoot: "/profiles/verify-full",
+        setupStateRoot: "/state/verify-full",
+      },
+      async () => undefined,
+    );
+
+    await expect(
+      runtime.withQuarantine(target, `.gc-${target}-eeeeeeeeeeeeeeee`, true, nowMs - minute, async () => {
+        cleaned = true;
+      }),
+    ).resolves.toBe("refreshed");
+
+    const script = command?.[2] ?? "";
+    expect(script.indexOf('stat -c %Y -- "$activity"')).toBeGreaterThan(-1);
+    expect(script.indexOf('stat -c %Y -- "$activity"')).toBeLessThan(script.indexOf('if [ "$existing" = 1 ]'));
+    expect(cleaned).toBe(false);
+  });
+
   it("uses confined fixed-argv commands and parses only bounded NUL records", async () => {
     const current = identity(50);
     const remnant = identity(51);
@@ -266,7 +304,7 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
       },
       { kind: "unsafe", identity: "hostile", activityMs: 0 },
     ]);
-    await runtime.withQuarantine(current, `.gc-${current}-dddddddddddddddd`, false, async () => {
+    await runtime.withQuarantine(current, `.gc-${current}-dddddddddddddddd`, false, nowMs - minute, async () => {
       await runtime.terminateOwnedSync(current);
       await runtime.removeQuarantine(`.gc-${current}-dddddddddddddddd`);
       await runtime.removeActivity(current);
@@ -283,8 +321,12 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
         "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/.gc-" +
           current +
           "-dddddddddddddddd",
+        "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/.activity/" + current,
+        String(Math.floor((nowMs - minute) / 1000)),
       ]),
     );
+    expect(commands[1]?.[2]).toContain("flock -n 9");
+    expect(commands[1]?.[2]).toContain('stat -c %Y -- "$activity"');
     expect(commands.at(-1)).toEqual([
       "rm",
       "-rf",

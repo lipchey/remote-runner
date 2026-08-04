@@ -73,6 +73,12 @@ export const DIAGNOSTIC_PROBES = [
     command: ["ssh", "<remote>", "git -C <workspace> status --short --branch"],
   },
   {
+    id: "remote.workspace-registration",
+    reason: "workspace-registration",
+    readOnly: true,
+    command: ["ssh", "<remote>", "inspect exact Git worktree registration for <workspace>"],
+  },
+  {
     id: "secrets.persistence",
     reason: "secrets",
     readOnly: true,

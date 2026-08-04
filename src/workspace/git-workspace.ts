@@ -135,6 +135,7 @@ cd -- "$mirror"
 [ "$(pwd -P)" = "$mirror" ] || fail 'mirror inode changed before reconciliation'
 [ "$(git --git-dir=. rev-parse --is-bare-repository)" = true ] || fail 'mirror must be bare'
 candidate=$(confined_candidate)
+git --git-dir=. worktree prune --expire=now
 worktree_listing=$(git --git-dir=. worktree list --porcelain)
 if ! printf '%s\n' "$worktree_listing" | grep -Fqx -- "worktree $candidate"; then
   candidate_parent=$(confined "$(dirname -- "$candidate_input")")

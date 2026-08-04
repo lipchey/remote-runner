@@ -47,6 +47,13 @@ describe("doctor", () => {
     expect(DIAGNOSTIC_PROBES.every((probe) => probe.readOnly)).toBe(true);
     expect(new Set(DIAGNOSTIC_PROBES.map((probe) => probe.reason)).size).toBe(DIAGNOSTIC_PROBES.length);
     expect(DIAGNOSTIC_PROBES.every((probe) => probe.command.length > 0)).toBe(true);
+    expect(DIAGNOSTIC_PROBES).toContainEqual(
+      expect.objectContaining({
+        id: "remote.workspace-registration",
+        reason: "workspace-registration",
+        readOnly: true,
+      }),
+    );
   });
 
   it("converts probe exceptions into bounded failures", async () => {

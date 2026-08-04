@@ -80,7 +80,8 @@ Capacity is probed on the filesystem containing `generatedRoot`, not on the remo
 Retention reserves the current identity, keeps the newest identities up to `keep`, and protects any
 additional identity active within `graceMinutes`. Active workloads hold a profile identity lock;
 cleanup takes the same lock non-blockingly, quarantines one exact stale directory, terminates only
-its owned Mutagen session, and then removes the quarantine and runner metadata. Cleanup never
+its owned Mutagen session, and then removes the quarantine and runner metadata. Fresh activity is
+rechecked before both a new quarantine and resumed cleanup of an existing quarantine. Cleanup never
 follows symlinks and never changes the workload exit code. A cleanup failure emits a bounded warning
 and is retried after a later workload.
 
