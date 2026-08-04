@@ -11,7 +11,7 @@ export interface ProfileExecutionServices extends PreparationRuntime {
   runLocal(command: readonly string[]): Promise<number>;
   recordFallback(reason: string): Promise<void>;
   recordRemoteChildStarted(): Promise<void>;
-  reportUnavailable(reason: string): void;
+  reportUnavailable(reason: string, detail?: string): void;
 }
 
 function stableReason(reason: string): string {
@@ -27,7 +27,9 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
       else {
         const reason = stableReason(result.reason);
         pendingFallbackReason = reason;
-        services.reportUnavailable(reason);
+        /* The notification channel keeps the stable reason; only the operator's stderr gets the
+           detail, which is what makes a wedged sync diagnosable without reading the runner log. */
+        services.reportUnavailable(reason, result.detail);
       }
       return result;
     },

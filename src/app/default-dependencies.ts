@@ -20,7 +20,7 @@ import { createJsonlLogger } from "../runtime/log.js";
 import { inspectPrewarmRequest, publishPrewarmRequest } from "../prewarm/queue.js";
 import { runProfile } from "../run/run-profile.js";
 import { runSsh, type SshProcessRuntime } from "../ssh/client.js";
-import { mutagenSessionName } from "../sync/mutagen.js";
+import { inspectOwnedSession, MUTAGEN_LIST_ARGUMENTS, mutagenSessionName } from "../sync/mutagen.js";
 import { createProfileRuntime } from "./profile-runtime.js";
 import { NodeProfileServices } from "./pilot-services.js";
 
@@ -214,6 +214,27 @@ async function inspectOutage(path: string): Promise<"clear" | "active" | "pendin
   }
 }
 
+async function resolveRemoteWorkspace(
+  options: {
+    readonly knownHostsPath: string;
+    readonly processes: NodeProcessRuntime;
+  },
+  profile: Profile,
+  relativeWorkspace: string,
+): Promise<string | undefined> {
+  const result = await runSsh(
+    options.processes,
+    profile.remote.target,
+    ["sh", "-ceu", 'printf %s "$HOME/$1"', "remote-runner-home", relativeWorkspace],
+    profile.probes.connectTimeoutSeconds,
+    options.knownHostsPath,
+    CAPTURE_BYTES,
+  );
+  if (result.exitCode !== 0 || result.outputTruncated) return undefined;
+  const resolved = decoder.decode(result.stdout).trim();
+  return posix.isAbsolute(resolved) ? resolved : undefined;
+}
+
 async function inspectProbe(
   probe: DiagnosticProbe,
   profile: Profile,
@@ -226,7 +247,7 @@ async function inspectProbe(
     readonly managedSshPath: string;
     readonly processes: NodeProcessRuntime;
   },
-): Promise<{ readonly status: DiagnosticStatus }> {
+): Promise<{ readonly status: DiagnosticStatus; readonly detail?: string }> {
   if (probe.id === "profile.validation") return { status: "ok" };
   if (probe.id === "controller.health") {
     const state = await new NodeControllerRuntime(options.home, options.processes).inspect();
@@ -248,9 +269,32 @@ async function inspectProbe(
     command = "ls";
     args = ["-ld", join(options.home, ".local", "state", "remote-runner", "locks")];
   } else if (probe.id === "sync.session") {
-    command = options.mutagenCommand;
-    args = ["sync", "list", mutagenSessionName(profile.consumer, profile.id, identity)];
-    environment = mutagenSshEnvironment(options.managedSshPath);
+    /* Exit code 0 only proves a session with the owned name exists; the run additionally requires
+       matching endpoints, mode and a conflict-free connection, so the probe checks those too. */
+    const listing = await options.processes.run({
+      command: options.mutagenCommand,
+      args: [...MUTAGEN_LIST_ARGUMENTS],
+      environment: mutagenSshEnvironment(options.managedSshPath),
+      maxOutputBytes: CAPTURE_BYTES,
+    });
+    if (listing.exitCode !== 0) return { status: "fail", detail: "Mutagen session list failed" };
+    /* A truncated listing parses into a shorter set of sessions, which would read as "the owned
+       session is missing" — the one verdict this probe must never invent. */
+    if (listing.outputTruncated) return { status: "fail", detail: "Mutagen session list was truncated" };
+    /* The run compares the endpoint the remote `$HOME` resolves to, so a home-relative manifest root
+       is resolved here the same way; an unresolvable one leaves the endpoint unverified. */
+    const betaRoot = posix.isAbsolute(remotePaths.workspace)
+      ? remotePaths.workspace
+      : await resolveRemoteWorkspace(options, profile, remotePaths.workspace);
+    return inspectOwnedSession(listing.stdout, {
+      consumer: profile.consumer,
+      profile: profile.id,
+      identity,
+      canonicalAlphaRoot: options.sourceRoot,
+      betaTarget: profile.remote.target,
+      ...(betaRoot === undefined ? {} : { betaRoot }),
+      ignores: profile.sync.ignores,
+    });
   } else if (probe.id === "workload.child-start") {
     command = "tail";
     args = ["-n", "50", join(profileRoot(options.home, profile, identity), "runner.log")];
@@ -459,7 +503,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         const expectedSession = mutagenSessionName(profile.consumer, profile.id, identity);
         const sessionResult = await processes.run({
           command: mutagenCommand,
-          args: ["sync", "list", "--template", "{{ json . }}", expectedSession],
+          args: [...MUTAGEN_LIST_ARGUMENTS, expectedSession],
           environment: mutagenSshEnvironment(diagnosticSsh.directory),
           maxOutputBytes: CAPTURE_BYTES,
         });

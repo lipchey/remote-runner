@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,10 +6,13 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createNodeCliDependencies } from "../../../src/app/default-dependencies.js";
 import { inspectPrewarmRequest } from "../../../src/prewarm/queue.js";
+import { worktreeIdentity } from "../../../src/runtime/identity.js";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../../src/ssh/client.js";
+import { compileIgnores, mutagenSessionName } from "../../../src/sync/mutagen.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
 const temporaryRoots: string[] = [];
+const MANIFEST_COMPILED_IGNORES = compileIgnores(["node_modules", ".git"]);
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -39,11 +42,14 @@ function result(stdout = "", exitCode = 0): BoundedProcessResult {
 class FakeProcesses {
   readonly requests: BoundedProcessRequest[] = [];
   registrationExitCode = 0;
+  sessionListing = "[]";
 
   async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
     this.requests.push(request);
     if (request.command === "launchctl") return result("state = running\n");
     if (request.args[0] === "sync" && request.args[1] === "list") {
+      /* The probe lists every session; the status snapshot asks for one by name. */
+      if (request.args.length === 4) return result(`${this.sessionListing}\n`);
       return result(`${JSON.stringify([{ name: request.args.at(-1), paused: false, status: "watching" }])}\n`);
     }
     if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-status")) {
@@ -155,6 +161,60 @@ describe("concrete Node CLI dependencies", () => {
       next: "ssh <remote> inspect exact Git worktree registration for <workspace>",
     });
     expect(JSON.stringify(report)).not.toContain(generatedRoot);
+  });
+
+  it.each([
+    ["fails on a session the run would reject", { mode: "two-way-safe" }, "fail", "Mutagen session mode mismatch"],
+    [
+      "warns while the live session excludes the pre-drift set",
+      { ignore: { paths: [".git"] } },
+      "warn",
+      "Mutagen session ignores drifted; the next run recreates it",
+    ],
+  ])("%s, naming the mismatch", async (_case, patch, status, detail) => {
+    const generatedRoot = "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces";
+    const paths = await fixture(validManifest.replace('"~/.cache/remote-runner/workspaces"', `"${generatedRoot}"`));
+    const sourceRoot = await realpath(paths.sourceRoot);
+    const identity = worktreeIdentity(sourceRoot);
+    const processes = new FakeProcesses();
+    processes.sessionListing = JSON.stringify([
+      {
+        identifier: "sync_AbCdEf1234567890",
+        name: mutagenSessionName("ariadne", "verify-full", identity),
+        alpha: { protocol: "local", path: sourceRoot },
+        beta: {
+          protocol: "ssh",
+          user: "admin",
+          host: "pop-os",
+          path: `${generatedRoot}/ariadne/verify-full/${identity}`,
+        },
+        mode: "one-way-replica",
+        ignore: { paths: MANIFEST_COMPILED_IGNORES },
+        paused: false,
+        status: "watching",
+        conflicts: [],
+        excludedConflicts: 0,
+        ...patch,
+      },
+    ]);
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
+    });
+
+    const report = (await dependencies.doctorProfile?.("verify-full")) as {
+      checks: readonly { id: string; status: string; reason?: string; detail?: string }[];
+    };
+
+    expect(report.checks).toContainEqual({
+      id: "sync.session",
+      status,
+      reason: "sync",
+      detail,
+      next: "mutagen sync list <session>",
+    });
   });
 
   it("keeps repair actions inside one profile identity and requires its exact dry-run receipt", async () => {

@@ -4,6 +4,7 @@ import {
   MANDATORY_MUTAGEN_IGNORES,
   MutagenSyncLifecycle,
   compileIgnores,
+  inspectOwnedSession,
   mutagenSessionName,
   type MutagenProcessRuntime,
   type MutagenSessionOptions,
@@ -494,5 +495,84 @@ describe("Mutagen one-way lifecycle", () => {
 
     await expect(lifecycle.pauseForGitReconcile({ ...options, ...patch })).rejects.toThrow();
     expect(processes.requests).toEqual([]);
+  });
+});
+
+describe("owned session inspection", () => {
+  const expected = {
+    consumer: options.consumer,
+    profile: options.profile,
+    identity: options.identity,
+    canonicalAlphaRoot: options.canonicalAlphaRoot,
+    betaTarget: options.betaTarget,
+    betaRoot: options.betaRoot,
+    ignores: options.ignores,
+  };
+
+  it.each([
+    ["a healthy session", session("watching")],
+    ["a paused session", session("paused")],
+    ["no owned session", "[]"],
+    ["a foreign session under another name", session("watching", { name: "mutagen-other" })],
+    ["a live v0.18 paused session", liveV018PausedSession()],
+  ])("accepts %s", (_case, listing) => {
+    expect(inspectOwnedSession(bytes(listing), expected)).toEqual({ status: "ok" });
+  });
+
+  it.each([
+    ["alpha endpoint drift", session("watching", { alpha: "/Users/dev/other" }), "Mutagen session endpoint mismatch"],
+    [
+      "beta endpoint drift",
+      session("watching", { beta: "runner@other.test:/srv" }),
+      "Mutagen session endpoint mismatch",
+    ],
+    ["mode drift", session("watching", { mode: "two-way-safe" }), "Mutagen session mode mismatch"],
+    ["conflicts", session("watching", { conflicts: [{}] }), "Mutagen session has conflicts"],
+    ["excluded conflicts", session("watching", { excludedConflicts: 2 }), "Mutagen session has conflicts"],
+    [
+      "two sessions under the owned name",
+      `[${session("watching").slice(1, -1)},${session("paused").slice(1, -1)}]`,
+      "multiple Mutagen sessions have the owned name",
+    ],
+    ["a malformed listing", "{}", "Mutagen session list must return a JSON array"],
+  ])("fails on %s", (_case, listing, detail) => {
+    expect(inspectOwnedSession(bytes(listing), expected)).toEqual({ status: "fail", detail });
+  });
+
+  it("warns while the live session still excludes the pre-drift ignore set", () => {
+    expect(inspectOwnedSession(bytes(session("watching", { ignores: [".git"] })), expected)).toEqual({
+      status: "warn",
+      detail: "Mutagen session ignores drifted; the next run recreates it",
+    });
+  });
+
+  it.each([
+    ["reports the endpoint as unverified", session("watching"), "Mutagen beta endpoint unverified"],
+    [
+      "still reports drift it can see",
+      session("watching", { ignores: [".git"] }),
+      "Mutagen session ignores drifted; the next run recreates it",
+    ],
+  ])("with no resolvable remote root %s", (_case, listing, detail) => {
+    const { betaRoot: _betaRoot, ...unresolved } = expected;
+    expect(inspectOwnedSession(bytes(listing), unresolved)).toEqual({ status: "warn", detail });
+  });
+
+  it.each([
+    ["a disconnected session", session("disconnected")],
+    ["a halted session", session("halted-on-root-emptied")],
+  ])("warns on %s the next run recreates", (_case, listing) => {
+    expect(inspectOwnedSession(bytes(listing), expected)).toEqual({
+      status: "warn",
+      detail: "Mutagen session is disconnected; the next run recreates it",
+    });
+  });
+
+  it("never reports text the Mutagen listing supplied", () => {
+    const hostile = session("secret-canary-status");
+    expect(inspectOwnedSession(bytes(hostile), expected)).toEqual({
+      status: "fail",
+      detail: "Mutagen session inspection failed",
+    });
   });
 });

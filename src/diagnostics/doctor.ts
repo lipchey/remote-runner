@@ -11,7 +11,18 @@ export interface DiagnosticCheck {
   readonly id: string;
   readonly status: DiagnosticStatus;
   readonly reason?: string;
+  readonly detail?: string;
   readonly next: string;
+}
+
+const MAX_DETAIL_CHARS = 200;
+
+function sanitizedDetail(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const [first = ""] = value.split("\n");
+  const detail = first.replaceAll(/[\u0000-\u001f\u007f]/gu, " ").trim();
+  if (detail.length === 0) return undefined;
+  return detail.length > MAX_DETAIL_CHARS ? `${detail.slice(0, MAX_DETAIL_CHARS - 3)}...` : detail;
 }
 
 export interface DoctorReport {
@@ -21,6 +32,10 @@ export interface DoctorReport {
 export interface DoctorRuntime {
   inspect(probe: DiagnosticProbe): Promise<{
     readonly status: DiagnosticStatus;
+    /* Authored text only — an inspector must never pass through what a remote, a vendor binary or a
+       native error produced, because this one is serialized into the report the operator shares.
+       Sanitizing here bounds the shape, never the provenance. */
+    readonly detail?: string;
     readonly rawOutput?: string;
   }>;
 }
@@ -108,9 +123,11 @@ export async function doctor(runtime: DoctorRuntime): Promise<DoctorReport> {
   const checks: DiagnosticCheck[] = [];
   for (const probe of DIAGNOSTIC_PROBES) {
     let status: DiagnosticStatus;
+    let detail: string | undefined;
     try {
       const observation = await runtime.inspect(probe);
       status = isDiagnosticStatus(observation.status) ? observation.status : "fail";
+      detail = sanitizedDetail(observation.detail);
     } catch {
       status = "fail";
     }
@@ -118,6 +135,7 @@ export async function doctor(runtime: DoctorRuntime): Promise<DoctorReport> {
       id: probe.id,
       status,
       ...(status === "ok" ? {} : { reason: probe.reason }),
+      ...(status === "ok" || detail === undefined ? {} : { detail }),
       next: probe.command.join(" "),
     });
   }

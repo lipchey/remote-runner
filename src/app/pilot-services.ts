@@ -860,8 +860,10 @@ export class NodeProfileServices implements ProfileExecutionServices {
     await this.options.recordRemoteChildStarted?.();
   }
 
-  reportUnavailable(reason: string): void {
-    const line = new TextEncoder().encode(`remote-runner: remote unavailable reason=${reason}\n`);
+  reportUnavailable(reason: string, detail?: string): void {
+    const line = new TextEncoder().encode(
+      `remote-runner: remote unavailable reason=${reason}${detail === undefined ? "" : ` detail=${detail}`}\n`,
+    );
     (
       this.options.stderr ??
       ((chunk) => {

@@ -11,12 +11,16 @@ import {
 class FakeDoctorRuntime implements DoctorRuntime {
   readonly observed: string[] = [];
 
-  constructor(private readonly outcomes: Readonly<Record<string, "ok" | "warn" | "fail">> = {}) {}
+  constructor(
+    private readonly outcomes: Readonly<Record<string, "ok" | "warn" | "fail">> = {},
+    private readonly details: Readonly<Record<string, string>> = {},
+  ) {}
 
   async inspect(probe: (typeof DIAGNOSTIC_PROBES)[number]) {
     this.observed.push(probe.id);
     return {
       status: this.outcomes[probe.id] ?? "ok",
+      ...(this.details[probe.id] === undefined ? {} : { detail: this.details[probe.id] }),
       rawOutput: probe.reason === "transport" ? "postgres://user:secret-canary@db/test" : "",
     };
   }
@@ -36,6 +40,31 @@ describe("doctor", () => {
       }),
     );
     expect(JSON.stringify(report)).not.toContain("secret-canary");
+  });
+
+  it("carries a sanitized detail for a failing check only", async () => {
+    const runtime = new FakeDoctorRuntime(
+      { "sync.session": "fail", "ssh.transport": "fail" },
+      {
+        "sync.session": `Mutagen session endpoint mismatch\nsecond line`,
+        "runtime.lock": "lock is fine",
+        "ssh.transport": `${"z".repeat(400)}`,
+      },
+    );
+
+    const report = await doctor(runtime);
+    const checks = Object.fromEntries(report.checks.map((check) => [check.id, check]));
+
+    expect(checks["sync.session"]).toEqual({
+      id: "sync.session",
+      status: "fail",
+      reason: "sync",
+      detail: "Mutagen session endpoint mismatch",
+      next: "mutagen sync list <session>",
+    });
+    expect(checks["runtime.lock"]).not.toHaveProperty("detail");
+    expect(checks["ssh.transport"]?.detail).toHaveLength(200);
+    expect(checks["ssh.transport"]?.detail?.endsWith("...")).toBe(true);
   });
 
   it("runs every declared probe as a read-only argv command", async () => {

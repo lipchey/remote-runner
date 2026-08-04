@@ -86,9 +86,22 @@ after that independent comparison.
 
 ## Mutagen
 
-For `sync`, inspect `mutagen sync list <session>` and `remote-runner status <profile>`. A missing or
-paused owned session is repaired by the confined repair flow below; do not create an ad-hoc
-bidirectional session. Mutagen SSH is isolated from `~/.ssh/known_hosts`: managed `ssh`/`scp`
+For `sync`, inspect `mutagen sync list <session>` and `remote-runner status <profile>`. The
+`sync.session` check validates the owned session against the manifest — endpoints, synchronization
+mode, conflicts, connectivity — and names the mismatch in the check's `detail`; a run that stops at
+`sync` names the same failure after `reason=sync` on stderr, in its own wording. Both fields carry
+authored diagnostics only, never remote or provider text, and both are optional: treat their absence
+as normal. A `warn` on `sync.session` means the next run repairs the session itself — manifest ignore drift or
+a disconnected session — or that a home-relative `workspace.generatedRoot` left the beta endpoint
+unverified.
+
+A missing or paused owned session needs no repair — the next run creates or resumes it, and manifest
+ignore drift is repaired by recreating the session. The confined repair flow below acts only on
+paths under the profile identity root and never on a Mutagen session, so an endpoint or mode
+mismatch, or a conflicted session, is an operator decision: confirm which session is legitimate,
+then terminate the owned one with the installed
+`~/.local/share/remote-runner/bin/<mutagen>/mutagen sync terminate <session>`. Do not create an
+ad-hoc bidirectional session. Mutagen SSH is isolated from `~/.ssh/known_hosts`: managed `ssh`/`scp`
 wrappers live under `~/.local/share/remote-runner/ssh`, enforce strict checking, and use only
 `~/.local/state/remote-runner/known_hosts/managed`. The controller exports `MUTAGEN_SSH_PATH` before
 starting the daemon. Do not bypass these wrappers to accept a prompt interactively.
