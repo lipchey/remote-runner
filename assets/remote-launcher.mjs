@@ -28,6 +28,33 @@ function spawnExitCode(error) {
   return WORKLOAD_SPAWN_ERRORS.has(error?.code) ? WORKLOAD_SPAWN_EXIT_CODE : 70;
 }
 
+/* sshd is this launcher's direct parent and exits the moment the client goes away (a killed
+   local run, a laptop asleep past the ssh keepalives, a dropped link), leaving the launcher
+   orphaned. The workload never notices: it runs to the end against a channel nobody reads,
+   and every native tool that writes to the now-broken stdout is killed by SIGPIPE — so an
+   abandoned run burns the host for its full length and then reports itself RED (observed: a
+   gitleaks gate dying mid-write, 6 of 408 remote verify runs) instead of simply being gone.
+   `process.ppid` follows reparenting (verified on darwin and linux node 26: it reads 1 once the
+   parent exits), so watching the RELATIONSHIP is both live and exact — probing whether the
+   recorded pid is still occupied would instead be fooled by pid reuse, and would say nothing
+   about whose child we are. Recorded at module load: a disconnect during the frame read would
+   otherwise be recorded as the orphaning that already happened, and never fire.
+   Ceiling: this reaches the direct child only — a grandchild already spawned into its own
+   process group (the verify runner puts every check in one) runs to its own end, but nothing
+   further starts. */
+const LAUNCH_PARENT = process.ppid;
+const ORPHAN_POLL_MS = 1000;
+
+function killWhenOrphaned(child) {
+  const timer = setInterval(() => {
+    if (process.ppid === LAUNCH_PARENT) return;
+    clearInterval(timer);
+    child.kill("SIGKILL");
+  }, ORPHAN_POLL_MS);
+  /* Never let the watch itself hold the launcher open past the workload's own exit. */
+  timer.unref();
+}
+
 function controlArguments() {
   const args = process.argv.slice(2);
   const separator = args.indexOf("--");
@@ -157,6 +184,7 @@ async function launch() {
     );
     return;
   }
+  killWhenOrphaned(child);
   const [code, signal] = await exit;
   if (signal !== null) {
     process.kill(process.pid, signal);

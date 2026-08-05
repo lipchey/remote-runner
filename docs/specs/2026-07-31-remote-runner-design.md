@@ -223,6 +223,14 @@ reboot persistence, and Mutagen deploys its matching agent over SSH.
 Preparation may retry bounded idempotent operations. A workload is never retried after its
 child-start boundary.
 
+A workload also never outlives the SSH session carrying it. The launcher watches the process that
+started it and kills the workload once that parent is gone, so a run whose client disconnected stops
+instead of finishing against a channel nobody reads — an abandoned run otherwise burns the
+workstation for its full length and then reports itself failed, because native tools writing to the
+broken channel die of `SIGPIPE`. This reaches the workload process; work it has already placed in a
+process group of its own finishes there, and nothing further starts. It applies to `prewarm` as
+well, which shares this lifecycle.
+
 `prewarm <profile>` uses this same lifecycle in forced-remote mode and converts any failure into a
 visible successful hook result. This prepares synchronization and machine-local dependencies at
 worktree creation without making worktree creation depend on workstation availability.

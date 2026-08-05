@@ -153,7 +153,11 @@ confined candidate. For an older installed runner that predates this recovery, i
 reset the authoritative laptop worktree.
 
 Steady-state identity count is `keep`; short bursts may exceed it while grace-protected or active
-identities remain. A warning reading `workspace retention cleanup failed; workload exit preserved`
+identities remain. Read that steady state per source worktree, not per run: an identity is derived
+from the source worktree path, so a laptop running verify from many worktrees keeps one full
+workspace for each whose last run falls inside `graceMinutes`, and the resident count tracks that
+number rather than `keep`. Shrink it by retiring local worktrees — lowering `graceMinutes` only
+makes the next run of a still-active worktree rebuild the checkout and dependencies it deleted. A warning reading `workspace retention cleanup failed; workload exit preserved`
 means the workload verdict is authoritative and cleanup will retry on a later marker-seen run. Inspect
 the profile root, `.activity`, `.locks`, owned Mutagen session names, and `.gc-*` entries before any
 manual intervention.
