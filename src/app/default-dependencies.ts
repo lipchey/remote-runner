@@ -412,7 +412,11 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
           environment: mutagenSshEnvironment(managedSsh.directory),
           maxOutputBytes: CAPTURE_BYTES,
         });
-        if (stopped.exitCode !== 0 && stopped.exitCode !== 127) {
+        /* A Mutagen that is not installed has no daemon to stop, and the transport update it would
+           have picked up is equally moot. ENOENT specifically, not `!spawned`: EMFILE and ENOMEM
+           also fail the spawn, and there a live daemon keeps serving the ssh settings this update
+           just replaced — the exact damage the throw exists to prevent. */
+        if (stopped.spawnErrorCode !== "ENOENT" && stopped.exitCode !== 0) {
           throw new Error("unable to restart Mutagen after managed SSH transport update");
         }
       }

@@ -35,6 +35,7 @@ class FakeProcesses implements SshProcessRuntime {
       readonly stdout: Uint8Array;
       readonly stderr: Uint8Array;
       readonly outputTruncated: boolean;
+      readonly spawned: boolean;
     },
   ) {}
 
@@ -128,6 +129,7 @@ describe("strict SSH client", () => {
       stdout: bytes("1234"),
       stderr: bytes("abcd"),
       outputTruncated: false,
+      spawned: true,
     });
 
     const result = await runSsh(processes, "host", ["true"], 4, "/runner/known_hosts", 4);
@@ -149,6 +151,7 @@ describe("strict SSH client", () => {
       stdout: bytes("1234"),
       stderr: bytes(""),
       outputTruncated: true,
+      spawned: true,
     });
 
     await expect(runSsh(processes, "host", ["true"], 4, "/runner/known_hosts", 4)).rejects.toThrow("output limit");
@@ -164,6 +167,7 @@ describe("known_hosts enrollment", () => {
       stdout: bytes(`# comment\n${line}\n`),
       stderr: bytes(""),
       outputTruncated: false,
+      spawned: true,
     });
     const store = new FakeStore();
 
@@ -217,6 +221,7 @@ describe("known_hosts enrollment", () => {
       stdout: bytes(output),
       stderr: bytes(""),
       outputTruncated: false,
+      spawned: true,
     });
     const store = new FakeStore();
 
@@ -239,6 +244,7 @@ describe("known_hosts enrollment", () => {
       stdout: bytes(`host ssh-ed25519 ${Buffer.from(blob).toString("base64")}\n`),
       stderr: bytes(""),
       outputTruncated: true,
+      spawned: true,
     });
     const store = new FakeStore();
 
