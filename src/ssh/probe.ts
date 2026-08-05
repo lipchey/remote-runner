@@ -3,8 +3,17 @@ export type UnavailableReason =
 
 export type ProbeResult = { readonly ok: true } | { readonly ok: false; readonly reason: UnavailableReason };
 
-export function classifySshFailure(stderr: string, exitCode: number): UnavailableReason {
-  if (exitCode !== 255) return "remote-shell";
+/* Takes the whole result rather than the code so no call site can classify without first answering
+   "did the local ssh client even start?". A spawn failure (ENOENT, EMFILE, ENOMEM) never left the
+   workstation and carries a manufactured code; read as `remote-shell` it sends the operator to
+   `ssh <remote> true` for a fault the remote never saw. Reported as `transport`, matching what
+   `attempt` below already returns for a probe that threw locally. */
+export function classifySshFailure(
+  stderr: string,
+  result: { readonly exitCode: number; readonly spawned: boolean },
+): UnavailableReason {
+  if (!result.spawned) return "transport";
+  if (result.exitCode !== 255) return "remote-shell";
   if (/could not resolve hostname|name or service not known|nodename nor servname provided/iu.test(stderr)) {
     return "dns";
   }

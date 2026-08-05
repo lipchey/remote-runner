@@ -203,6 +203,7 @@ describe("pilot service boundaries", () => {
           stdout: new TextEncoder().encode(stdout),
           stderr: new Uint8Array(),
           outputTruncated: false,
+          spawned: true,
         };
       },
       async isAlive() {
@@ -235,6 +236,7 @@ describe("pilot service boundaries", () => {
           stdout: new Uint8Array(),
           stderr: new Uint8Array(),
           outputTruncated: false,
+          spawned: true,
         };
       },
       async isAlive() {
@@ -271,6 +273,7 @@ describe("pilot service boundaries", () => {
           stdout: new Uint8Array(),
           stderr: new Uint8Array(),
           outputTruncated: false,
+          spawned: true,
         };
       },
       async isAlive() {
@@ -300,6 +303,7 @@ describe("pilot service boundaries", () => {
           stdout: new TextEncoder().encode(argv.includes("uname") ? "x86_64\n" : ""),
           stderr: new Uint8Array(),
           outputTruncated: false,
+          spawned: true,
         };
       },
       async isAlive() {
@@ -325,36 +329,122 @@ describe("pilot service boundaries", () => {
     expect(requests.some(({ args }) => JSON.stringify(args).includes("nodejs.org"))).toBe(false);
   });
 
-  it("classifies a consumer setup script that exits non-zero away from a remote outage", async () => {
-    const current = worktreeIdentity(process.cwd());
-    const processes = {
-      async run(request: BoundedProcessRequest) {
-        const argv = JSON.stringify(request.args);
-        return {
-          exitCode: argv.includes("ds-bootstrap.sh") ? 3 : 0,
-          stdout: new TextEncoder().encode(argv.includes("uname") ? "x86_64\n" : ""),
-          stderr: new Uint8Array(),
-          outputTruncated: false,
-        };
-      },
-      async isAlive() {
-        return false;
-      },
-    } as NodeProcessRuntime;
-    const services = new NodeProfileServices(ensureProfile, {
-      home: "/Users/admin",
-      sourceRoot: process.cwd(),
-      launcherSource: new Uint8Array([1]),
-      processes,
-    });
-    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
+  /* A setup script that RAN and exited non-zero is the consumer's error: a local fallback would
+     reproduce it exactly, so it must not spend one nor claim the workstation is unreachable. */
+  it.each([3, 124])(
+    "classifies a consumer setup script that exits %i away from a remote outage",
+    async (setupExitCode) => {
+      const current = worktreeIdentity(process.cwd());
+      const outages: string[] = [];
+      const processes = {
+        async run(request: BoundedProcessRequest) {
+          const argv = JSON.stringify(request.args);
+          return {
+            exitCode: argv.includes("ds-bootstrap.sh") ? setupExitCode : 0,
+            stdout: new TextEncoder().encode(argv.includes("uname") ? "x86_64\n" : ""),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+            spawned: true,
+          };
+        },
+        async isAlive() {
+          return false;
+        },
+      } as NodeProcessRuntime;
+      const services = new NodeProfileServices(ensureProfile, {
+        home: "/Users/admin",
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array([1]),
+        processes,
+        recordFallback: async (reason) => {
+          outages.push(reason);
+        },
+      });
+      Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
 
-    await expect(services.bootstrap()).rejects.toMatchObject({
-      name: "PreparationError",
-      reason: "consumer-setup",
-      retryable: false,
-    });
-  });
+      await expect(services.bootstrap()).rejects.toMatchObject({
+        name: "PreparationError",
+        reason: "consumer-setup",
+        retryable: false,
+      });
+      expect(outages).toEqual([]);
+    },
+  );
+
+  /* 126/127 come from the remote shell, but the script they refuse to exec lives inside the synced
+     workspace: undelivered by Mutagen, or delivered without its exec bit, while the local checkout
+     still has it. Attributing that to the consumer withholds the fallback run that would have
+     worked — the same reason the artifact postcondition refuses to attribute its own absence. */
+  it.each([126, 127])(
+    "keeps a setup script the remote shell would not exec (exit %i) a bootstrap failure",
+    async (setupExitCode) => {
+      const current = worktreeIdentity(process.cwd());
+      const processes = {
+        async run(request: BoundedProcessRequest) {
+          const argv = JSON.stringify(request.args);
+          return {
+            exitCode: argv.includes("ds-bootstrap.sh") ? setupExitCode : 0,
+            stdout: new TextEncoder().encode(argv.includes("uname") ? "x86_64\n" : ""),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+            spawned: true,
+          };
+        },
+        async isAlive() {
+          return false;
+        },
+      } as NodeProcessRuntime;
+      const services = new NodeProfileServices(ensureProfile, {
+        home: "/Users/admin",
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array([1]),
+        processes,
+      });
+      Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
+
+      const caught = await services.bootstrap().catch((error: unknown) => error);
+
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toMatchObject({ reason: "consumer-setup" });
+    },
+  );
+
+  /* The same codes from an ssh client that never ran say nothing about the consumer's script:
+     read as theirs they withhold the fallback and silence the alert for an unreachable machine. */
+  it.each([1, 124])(
+    "keeps a setup command that never reached the remote (exit %i) a bootstrap failure",
+    async (setupExitCode) => {
+      const current = worktreeIdentity(process.cwd());
+      const processes = {
+        async run(request: BoundedProcessRequest) {
+          const argv = JSON.stringify(request.args);
+          const failing = argv.includes("ds-bootstrap.sh");
+          return {
+            exitCode: failing ? setupExitCode : 0,
+            stdout: new TextEncoder().encode(argv.includes("uname") ? "x86_64\n" : ""),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+            spawned: !failing,
+          };
+        },
+        async isAlive() {
+          return false;
+        },
+      } as NodeProcessRuntime;
+      const services = new NodeProfileServices(ensureProfile, {
+        home: "/Users/admin",
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array([1]),
+        processes,
+      });
+      Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
+
+      const caught = await services.bootstrap().catch((error: unknown) => error);
+
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toMatchObject({ reason: "consumer-setup" });
+    },
+  );
 
   it("keeps a busy lock off the outage channel while still telling the operator", async () => {
     const lines: string[] = [];
@@ -457,6 +547,7 @@ describe("pilot service boundaries", () => {
           stdout: new TextEncoder().encode(stdout),
           stderr: new Uint8Array(),
           outputTruncated: false,
+          spawned: true,
         };
       },
       async isAlive() {
@@ -530,6 +621,7 @@ describe("pilot service boundaries", () => {
           stdout: new TextEncoder().encode(sessionList ? listing : ""),
           stderr: new Uint8Array(),
           outputTruncated: false,
+          spawned: true,
         };
       },
       async isAlive() {
@@ -622,6 +714,7 @@ describe("pilot service boundaries", () => {
             stdout: new TextEncoder().encode(sessionList ? listing : ""),
             stderr: new Uint8Array(),
             outputTruncated: false,
+            spawned: true,
           };
         }
         /* Only the retention prune fails: the post-workload activity marker has to succeed, or the
@@ -632,6 +725,7 @@ describe("pilot service boundaries", () => {
           stdout: new Uint8Array(),
           stderr: new Uint8Array(),
           outputTruncated: false,
+          spawned: true,
         };
       },
       async isAlive() {
@@ -674,7 +768,13 @@ describe("pilot service boundaries", () => {
     const warnings: Uint8Array[] = [];
     const processes = {
       async run() {
-        return { exitCode: 1, stdout: new Uint8Array(), stderr: new Uint8Array(), outputTruncated: false };
+        return {
+          exitCode: 1,
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+          spawned: true,
+        };
       },
       async isAlive() {
         return false;
@@ -713,9 +813,17 @@ describe("pilot service boundaries", () => {
   it("refuses to present ssh's own 255 as the workload's exit once the child has started", async () => {
     const current = worktreeIdentity(process.cwd());
     const lines: string[] = [];
+    const outages: string[] = [];
+    const unavailable: string[] = [];
     const processes = {
       async run() {
-        return { exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array(), outputTruncated: false };
+        return {
+          exitCode: 0,
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+          spawned: true,
+        };
       },
       async isAlive() {
         return false;
@@ -727,6 +835,10 @@ describe("pilot service boundaries", () => {
       launcherSource: new Uint8Array([1]),
       processes,
       stderr: (chunk) => lines.push(new TextDecoder().decode(chunk)),
+      recordFallback: async (reason) => {
+        outages.push(reason);
+      },
+      onUnavailable: (reason) => unavailable.push(reason),
       streamProcess: async (request) => {
         await request.onMarker();
         return { exitCode: 255, signal: null, markerSeen: true, spawned: true };
@@ -740,8 +852,56 @@ describe("pilot service boundaries", () => {
 
     const result = await services.startRemote(["./scripts/verify"], {}, async () => undefined);
 
+    /* `completed` is what withholds the local fallback: the workload already ran remotely, so
+       runProfile must never be offered the chance to run it a second time here. */
     expect(result).toEqual({ kind: "completed", exitCode: 75 });
     expect(lines.join("")).toContain("connection dropped mid-run");
+    expect(outages).toEqual(["connection-lost"]);
+    expect(unavailable).toEqual(["connection-lost"]);
+  });
+
+  /* The notification is a side channel; the workload already ran, so nothing it reports may reach
+     the caller as a different verdict about that run. */
+  it("keeps the mid-run drop's exit code when the outage notification fails", async () => {
+    const current = worktreeIdentity(process.cwd());
+    const processes = {
+      async run() {
+        return {
+          exitCode: 0,
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+          spawned: true,
+        };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const services = new NodeProfileServices(retainedDataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array([1]),
+      processes,
+      stderr: () => undefined,
+      recordFallback: async () => {
+        throw new Error("notification state failed");
+      },
+      streamProcess: async (request) => {
+        await request.onMarker();
+        return { exitCode: 255, signal: null, markerSeen: true, spawned: true };
+      },
+    });
+    Object.assign(services, {
+      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current),
+      nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
+      uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
+    });
+
+    await expect(services.startRemote(["./scripts/verify"], {}, async () => undefined)).resolves.toEqual({
+      kind: "completed",
+      exitCode: 75,
+    });
   });
 
   it.each([
@@ -750,10 +910,17 @@ describe("pilot service boundaries", () => {
   ])("does not touch activity or run retention when the child marker is absent (exit %i)", async (exitCode, reason) => {
     const current = worktreeIdentity(process.cwd());
     let processCalls = 0;
+    const outages: string[] = [];
     const processes = {
       async run() {
         processCalls += 1;
-        return { exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array(), outputTruncated: false };
+        return {
+          exitCode: 0,
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+          spawned: true,
+        };
       },
       async isAlive() {
         return false;
@@ -765,6 +932,9 @@ describe("pilot service boundaries", () => {
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
       processes,
+      recordFallback: async (raised) => {
+        outages.push(raised);
+      },
       streamProcess: async () => ({ exitCode, signal: null, markerSeen: false, spawned: true }),
     });
     Object.assign(services, {
@@ -781,6 +951,10 @@ describe("pilot service boundaries", () => {
       ),
     ).toEqual({ kind: "not-started", reason });
     expect(processCalls).toBe(0);
+    /* A drop BEFORE the marker still belongs to the caller above: it decides between `child-start`
+       and `workload-command`, and only one of the two may alert. Raising here would double-report
+       the first and invent an outage for the second. */
+    expect(outages).toEqual([]);
   });
 
   it("fingerprints the submodule working-copy checkout in one bounded submodule status call", async () => {
@@ -800,6 +974,7 @@ describe("pilot service boundaries", () => {
             stdout: new TextEncoder().encode(`${lines.join("\n")}\n`),
             stderr: new Uint8Array(),
             outputTruncated: false,
+            spawned: true,
           };
         },
       },
@@ -830,6 +1005,7 @@ describe("pilot service boundaries", () => {
               stdout: new TextEncoder().encode(stdout),
               stderr: new Uint8Array(),
               outputTruncated: false,
+              spawned: true,
             };
           },
         },
@@ -850,6 +1026,7 @@ describe("pilot service boundaries", () => {
               stdout: new TextEncoder().encode(stdout),
               stderr: new Uint8Array(),
               outputTruncated: false,
+              spawned: true,
             };
           },
         },
@@ -883,6 +1060,7 @@ describe("pilot service boundaries", () => {
             ),
             stderr: new Uint8Array(),
             outputTruncated: false,
+            spawned: true,
           };
         },
       },
@@ -912,6 +1090,7 @@ describe("pilot service boundaries", () => {
       stdout,
       stderr: new Uint8Array(),
       outputTruncated,
+      spawned: true,
     });
     await expect(
       listLocalFingerprintFiles(

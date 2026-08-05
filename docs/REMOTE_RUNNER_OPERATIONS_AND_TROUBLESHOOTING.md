@@ -74,6 +74,7 @@ condition.
 | `secrets`                | `ssh <remote> if found=$(find <workspace> -maxdepth 1 -name .env -print); then [ -z "$found" ]; else exit 1; fi` |
 | `controller`             | `launchctl print gui/<uid>/com.lipchey.remote-runner`                                                            |
 | `child-start`            | `tail -n 50 <runner-log>`                                                                                        |
+| `connection-lost`        | `tail -n 50 <runner-log>`                                                                                        |
 | `timeout`                | `ssh -o ConnectTimeout=2 <remote> true`                                                                          |
 | `unknown`                | `remote-runner status <profile>`                                                                                 |
 
@@ -85,19 +86,35 @@ its exit code (`dependency setup ./scripts/ds-bootstrap.sh failed with exit code
 command in the consumer repository and fix it there — the remote is fine. The command's own output is
 not forwarded, only the exit code.
 
-Only exit codes `1`–`124` enter this class. `255` is ssh's own failure code; `127` and `128+N` are
-what the local process layer reports when the ssh client fails to spawn or is signal-killed; `125` is
-reserved for the remote workspace wrapper's own `cd` failure; `126`/`127` are ambiguous between a
-broken remote shell and a consumer script that is missing or not executable. All of them stay
-`bootstrap`, keep the outage notification and keep the fallback. A declared `bootstrap.artifact` that
-is still missing after setup is also `bootstrap`, not `consumer-setup`: the local checkout can have
-the file while the remote workspace or the sync is damaged.
+Two things have to hold before a failure enters this class. First, the ssh client must actually have
+run: a client that never started (`ENOENT`, `EMFILE`, `ENOMEM` under load) reports a code the local
+process layer invented for it, so it stays `bootstrap` whatever that code is. Second, the exit code
+must be `1`–`124` — the consumer command's own failure status. Everything else stays `bootstrap`.
+`125` is reserved for the remote workspace wrapper's own `cd` failure, `255` is ssh's own failure
+code, and `128+N` is the client signal-killed. `126`/`127` are excluded too, even though a remote
+shell does emit them for "not found" and "not executable": the setup scripts live inside the synced
+workspace and the ensure commands resolve through toolchain roots under it, so those codes describe
+a sync Mutagen never delivered, a lost exec bit, or a toolchain a retention prune erased — while the
+local checkout still holds the file. Blaming the consumer there would withhold the fallback run that
+would have succeeded. A declared `bootstrap.artifact` that is still missing after setup is
+`bootstrap` for the same reason.
+
+All of those keep the outage notification and keep the fallback on a `fallback: local` profile run
+in `auto` mode. On a profile declaring `fallback: fail`, or a run pinned to `mode: remote`, there is
+no local run — and the outage notification is currently raised on the fallback path, so those runs
+exit `75` with the `run-unavailable` record in the runner log but no Telegram outage. Read the log
+record as the authoritative signal there. The one exception is `connection-lost` below, which is
+raised without any fallback behind it and therefore alerts on every profile.
 
 For the same reason, `255` from the ssh client AFTER the workload started is reported as exit `75`
 with `remote-runner: ssh connection dropped mid-run; the workload result is unknown`, never as the
-workload's own exit code. Rerun it: the workload may have completed, failed, or been killed
-mid-flight, and the run cannot tell which. The ceiling is that a workload genuinely exiting `255` is
-read the same way, because the stream protocol carries no exit marker of its own.
+workload's own exit code, and it raises a `connection-lost` outage — the machine went away, exactly
+as a drop one minute earlier would have. Rerun it, but read the workload as unknown rather than
+failed: it may have completed, failed, or been killed mid-flight, and the run cannot tell which.
+There is deliberately no local fallback here, unlike `child-start`: the workload already started on
+the remote, so its side effects may have landed and a local rerun would repeat them. The ceiling is
+that a workload genuinely exiting `255` is read the same way, because the stream protocol carries no
+exit marker of its own.
 
 A `lock` means another run of the same workspace — usually a queued prewarm — is already holding it.
 The runner waits for it, printing `another run holds this workspace; waiting for it to finish`, and
@@ -273,7 +290,9 @@ profiles can intentionally take a long time.
 Confirm `/Users/admin/.claude/.telegram-ask.conf` is a regular file owned by the current user with mode
 `0600`; do not print it. `remote-runner doctor <profile>` and the notification queue status are safe to
 share. An outage is sent once, repeated local fallbacks are deduplicated, and recovery is sent only
-after the remote child-start marker.
+after the remote child-start marker. A `connection-lost` outage is the one that arrives without a
+local fallback behind it: the marker had already been seen, so the recovery for the previous outage
+was sent and this is a new one.
 
 ## Workstation reboot
 

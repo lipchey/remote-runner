@@ -51,6 +51,7 @@ const REASONS = new Set([
   "secrets",
   "controller",
   "child-start",
+  "connection-lost",
   "timeout",
   "unknown",
 ]);

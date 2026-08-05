@@ -98,7 +98,7 @@ class FakeProcesses {
 }
 
 function result(exitCode = 0, stdout = "", stderr = ""): BoundedProcessResult {
-  return { exitCode, stdout: bytes(stdout), stderr: bytes(stderr), outputTruncated: false };
+  return { exitCode, stdout: bytes(stdout), stderr: bytes(stderr), outputTruncated: false, spawned: true };
 }
 
 async function fixture(

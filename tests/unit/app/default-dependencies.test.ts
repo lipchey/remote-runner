@@ -38,6 +38,7 @@ function result(stdout = "", exitCode = 0): BoundedProcessResult {
     stdout: new TextEncoder().encode(stdout),
     stderr: new Uint8Array(),
     outputTruncated: false,
+    spawned: true,
   };
 }
 
@@ -557,6 +558,49 @@ describe("concrete Node CLI dependencies", () => {
     expect(lines?.[1]).toContain('"event":"run-finish"');
     expect(lines?.[1]).toContain('"provider":"local"');
   });
+
+  /* A machine with no Mutagen (ENOENT) has no daemon to restart, and the transport update it would
+     have picked up is moot. Everything else leaves the run talking to ssh settings it has already
+     replaced: a daemon that IS there and refuses to stop, and equally an EMFILE/ENOMEM spawn
+     failure — the fd or memory pressure stops the `stop`, not Mutagen's absence, and the live
+     daemon keeps serving the old transport. `spawned` alone cannot tell those two apart. */
+  it.each([
+    ["ENOENT", "resolves"],
+    ["EMFILE", "throws"],
+    [undefined, "throws"],
+  ] as const)(
+    "with a Mutagen daemon-stop failure at spawnErrorCode=%s, the run %s",
+    async (spawnErrorCode, _outcome) => {
+      const paths = await fixture();
+      class StopFailingProcesses extends FakeProcesses {
+        async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+          if (request.args[0] === "daemon" && request.args[1] === "stop") {
+            return {
+              exitCode: 1,
+              stdout: new Uint8Array(),
+              stderr: new Uint8Array(),
+              outputTruncated: false,
+              spawned: spawnErrorCode === undefined,
+              ...(spawnErrorCode === undefined ? {} : { spawnErrorCode }),
+            };
+          }
+          return super.run(request);
+        }
+      }
+      const dependencies = await createNodeCliDependencies({
+        ...paths,
+        launcherSource: new Uint8Array([1]),
+        managedSsh: { changed: true, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+        processes: new StopFailingProcesses(),
+        now: () => "2026-07-31T12:34:56.000Z",
+      });
+      const profile = (await dependencies.loadManifest()).profiles[0]!;
+      const run = dependencies.runProfile!(profile, [process.execPath, "-e", ""], "local");
+
+      if (spawnErrorCode === "ENOENT") await expect(run).resolves.toBe(0);
+      else await expect(run).rejects.toThrow("unable to restart Mutagen");
+    },
+  );
 
   it("keeps each run's provider execution-local when a local run and a stalled remote attempt overlap", async () => {
     /* ensureManagedKnownHost skips its ssh-keyscan round trip once the target is on file under
