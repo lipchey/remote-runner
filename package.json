@@ -14,17 +14,20 @@
     "build": "tsc -p tsconfig.json",
     "format": "prettier . --write --ignore-unknown",
     "format:check": "prettier . --check --ignore-unknown",
+    "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "verify": "pnpm format:check && pnpm typecheck && pnpm test && pnpm build"
+    "verify": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test && pnpm build"
   },
   "dependencies": {
     "yaml": "2.8.1"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",
+    "eslint": "^10.8.0",
     "prettier": "3.9.5",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.66.0",
     "vitest": "^3.2.7"
   }
 }
