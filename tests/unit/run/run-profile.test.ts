@@ -28,6 +28,9 @@ class FakeRuntime implements RunProfileRuntime {
     this.calls.push(`local:${command.join("|")}`);
     return this.localExit;
   }
+  async failClosed() {
+    this.calls.push("fail-closed");
+  }
   async startRemote(
     command: readonly string[],
     secrets: Readonly<Record<string, string>>,
@@ -89,7 +92,9 @@ describe("workspace lock contention", () => {
     await expect(runProfile(runtime, { mode: "auto", fallback: "local" }, ["true"])).resolves.toBe(
       INFRASTRUCTURE_EXIT_CODE,
     );
-    expect(runtime.calls).toEqual(["prepare", "prepare"]);
+    /* The give-up hook still runs: contention is filtered out of the outage channel by reason, at
+       the notification boundary, not by skipping the announcement here. */
+    expect(runtime.calls).toEqual(["prepare", "prepare", "fail-closed"]);
   });
 });
 describe("consumer setup failure", () => {
@@ -100,7 +105,7 @@ describe("consumer setup failure", () => {
     await expect(runProfile(runtime, { mode: "auto", fallback: "local" }, ["./verify"])).resolves.toBe(
       INFRASTRUCTURE_EXIT_CODE,
     );
-    expect(runtime.calls).toEqual(["prepare"]);
+    expect(runtime.calls).toEqual(["prepare", "fail-closed"]);
   });
 });
 const profile = { mode: "auto" as const, fallback: "local" as const };
@@ -165,11 +170,52 @@ describe("run profile selection", () => {
   it.each([
     ["remote", "local"],
     ["auto", "fail"],
-  ] as const)("does not fall back for mode=%s fallback=%s", async (mode, fallback) => {
+  ] as const)("announces the outage without a local run for mode=%s fallback=%s", async (mode, fallback) => {
     const runtime = new FakeRuntime();
     runtime.preparations = [failed("transport")];
     expect(await runProfile(runtime, { mode, fallback }, ["./verify"])).toBe(INFRASTRUCTURE_EXIT_CODE);
-    expect(runtime.calls).toEqual(["prepare"]);
+    expect(runtime.calls).toEqual(["prepare", "fail-closed"]);
+  });
+
+  it("still exits 75 when the give-up announcement cannot be delivered", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [failed("transport")];
+    let attempted = false;
+    runtime.failClosed = () => {
+      attempted = true;
+      return Promise.reject(new Error("telegram unreachable"));
+    };
+    expect(await runProfile(runtime, { mode: "remote", fallback: "local" }, ["./verify"])).toBe(
+      INFRASTRUCTURE_EXIT_CODE,
+    );
+    /* 75 is the exit code of this path anyway, so without this the test is green even when the
+       announcement is never attempted and the injected rejection never happens. */
+    expect(attempted).toBe(true);
+  });
+
+  it("announces the outage without a local run after a not-started remote on a fail-closed profile", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [prepared(runtime)];
+    runtime.remoteKind = "not-started";
+    expect(await runProfile(runtime, { mode: "auto", fallback: "fail" }, ["./verify"])).toBe(INFRASTRUCTURE_EXIT_CODE);
+    expect(runtime.calls).toEqual(["prepare", "remote:./verify", "release", "fail-closed"]);
+  });
+
+  it("announces the outage when the lock release fails on top of a remote that never started", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [{ ok: true, secrets: {}, release: () => Promise.reject(new Error("lock removal failed")) }];
+    runtime.remoteKind = "not-started";
+    expect(await runProfile(runtime, { mode: "auto", fallback: "fail" }, ["./verify"])).toBe(INFRASTRUCTURE_EXIT_CODE);
+    expect(runtime.calls).toContain("fail-closed");
+  });
+
+  it("announces the outage when preparation itself throws", async () => {
+    const runtime = new FakeRuntime();
+    runtime.prepareRemote = () => Promise.reject(new Error("reporting the failure failed"));
+    expect(await runProfile(runtime, { mode: "remote", fallback: "fail" }, ["./verify"])).toBe(
+      INFRASTRUCTURE_EXIT_CODE,
+    );
+    expect(runtime.calls).toEqual(["fail-closed"]);
   });
 
   it("does not retry a non-retryable preparation failure", async () => {

@@ -185,12 +185,18 @@ The first notifier uses Telegram `sendMessage` with `~/.claude/.telegram-ask.con
 must belong to the current user, have no group/other permissions, and contain a token plus numeric
 chat ID. Values remain local.
 
-The first automatic fallback in an outage sends one alert. Repeated fallbacks remain loud in the
-terminal without spamming. Failed delivery is retried later. The first remote child after an outage
-sends one recovery message regardless of its eventual workload verdict.
+A run that gives up on a reported preparation or child-start failure sends one alert, whether or not
+it has a local fallback to take — the alert belongs to the reason, not to the fallback. Reasons that
+name the caller rather than the remote (`lock`, `validation`, `consumer-setup`) send none, and
+neither does a failure a later preparation attempt survives. A give-up with no reported reason
+behind it — a remote that completes without ever starting the child — exits `75` silently, as it
+always has. Repeats while an outage is open remain loud in the terminal without spamming. Failed
+delivery is retried later. The first remote child after an outage sends one recovery message
+regardless of its eventual workload verdict.
 
 Messages contain only consumer/profile labels, remote label, stable reason, timestamp, and
-fallback/recovery state. Notification failure never blocks fallback but is visible in stderr.
+outage/recovery state; they never claim a local run. Notification failure never blocks the run but
+is visible in stderr.
 
 Versioned state lives under `~/.local/state/remote-runner/` with restrictive permissions and
 atomic writes. Structured logs are redacted, bounded, and rotated. Corrupt records are retained for
@@ -275,7 +281,8 @@ Live acceptance proves:
 5. one setup per changed fingerprint, and setup-and-retry after a failed ensure;
 6. exact output and verdict propagation;
 7. no local retry after remote workload failure;
-8. unavailable workstation means one alert plus declared fallback;
+8. unavailable workstation means one alert plus the declared fallback, including when that fallback
+   is none;
 9. repeated outage does not spam;
 10. restored remote child sends one recovery alert;
 11. workstation reboot restores access and self-healed execution;

@@ -60,6 +60,14 @@ export function isNotificationReason(value: string): boolean {
   return REASONS.has(value);
 }
 
+/* The notification channel and durable state carry only closed-set reasons, so a caller crossing
+   into them maps here first and an unrecognised value degrades to a known code instead of being
+   persisted verbatim. The stderr and runner-log lines are not bound by this — they keep the raw
+   reason on purpose, because a wrong reason there is a diagnostic, not a stored fact. */
+export function stableReason(value: string): string {
+  return isNotificationReason(value) ? value : "unknown";
+}
+
 /* A busy lock is another local run holding this workspace, a validation failure is the operator's
    own manifest, and a consumer-setup failure is their own setup script exiting non-zero — none of
    them says the remote is down, so none may raise an outage. */

@@ -35,7 +35,7 @@ import { PreparationError } from "../run/prepare.js";
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
 import { INFRASTRUCTURE_EXIT_CODE, WORKLOAD_COMMAND_REASON } from "../run/run-profile.js";
 import type { RemoteExecutionResult } from "../run/run-profile.js";
-import { isNotificationReason, isOutageReason } from "../notifications/outage.js";
+import { isOutageReason, stableReason } from "../notifications/outage.js";
 import { encodeSecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
 import { classifySshFailure } from "../ssh/probe.js";
@@ -961,7 +961,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
       this.write("remote-runner: ssh connection dropped mid-run; the workload result is unknown\n");
       this.reportUnavailable(CONNECTION_LOST_REASON);
       try {
-        await this.raiseOutage(CONNECTION_LOST_REASON);
+        await this.recordOutage(CONNECTION_LOST_REASON);
       } catch {
         /* The workload has already run; a notification that cannot be delivered may not change what
            the caller is told about it. */
@@ -1001,21 +1001,22 @@ export class NodeProfileServices implements ProfileExecutionServices {
   async recordFallback(reason: string): Promise<void> {
     /* reason crosses into a log line and a persistence callback, so it is mapped to the closed
        notification-reason set here, at the boundary, rather than trusted from the caller. */
-    const stable = isNotificationReason(reason) ? reason : "unknown";
-    this.write(`remote-runner: running locally (fallback reason=${stable})\n`);
-    await this.raiseOutage(stable);
+    this.write(`remote-runner: running locally (fallback reason=${stableReason(reason)})\n`);
+    await this.recordOutage(reason);
   }
 
-  /* Separate from recordFallback because an outage is not always a fallback: a connection lost
-     after the workload started raises one without any local run to announce.
+  /* Separate from recordFallback because an outage is not always a fallback: a run on a
+     `fallback: fail` profile and a connection lost after the workload started both raise one with
+     no local run to announce.
      Known and accepted ceiling: if the earlier `recordRemoteChildStarted` threw, profile-runtime
      swallowed it and the notification state still has an outage open under the PREVIOUS reason — so
      this call dedupes into silence, and the next healthy run sends a recovery naming that stale
      reason. Narrow (the state write itself has to fail) and noticed, not overlooked. */
-  private async raiseOutage(reason: string): Promise<void> {
+  async recordOutage(reason: string): Promise<void> {
     /* The operator still sees the stderr line; only the outage channel is spared reasons that say
        nothing about the remote being reachable. */
-    if (isOutageReason(reason)) await this.options.recordFallback?.(reason);
+    const stable = stableReason(reason);
+    if (isOutageReason(stable)) await this.options.recordFallback?.(stable);
   }
 
   async recordRemoteChildStarted(): Promise<void> {

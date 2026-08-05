@@ -91,7 +91,9 @@ function eventMessage(event: NotificationEvent): string {
   if (!Number.isFinite(timestamp.valueOf()) || timestamp.toISOString() !== event.timestamp) {
     throw new Error("notification timestamp must be canonical ISO-8601");
   }
-  const heading = event.kind === "outage" ? "Remote unavailable — local fallback" : "Remote recovered — child started";
+  /* The heading may not promise a local fallback: the outage is raised before the run decides
+     whether to take one, and `fallback: fail` profiles and a mid-run connection loss never do. */
+  const heading = event.kind === "outage" ? "Remote unavailable" : "Remote recovered — child started";
   return [
     heading,
     `consumer=${event.consumer}`,

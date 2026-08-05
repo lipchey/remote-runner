@@ -25,6 +25,10 @@ export interface RunProfileRuntime {
     onChildStarted: () => Promise<void>,
   ): Promise<RemoteExecutionResult>;
   runLocal(command: readonly string[]): Promise<number>;
+  /* Announces the outage a fallback run would have announced. Without it the notification would
+     ride on runLocal alone, so a profile declaring `fallback: fail` — or any run pinned to
+     `mode: remote` — would exit 75 with the remote down and no alert anywhere. */
+  failClosed(): Promise<void>;
 }
 
 function validExitCode(code: number): boolean {
@@ -49,6 +53,15 @@ async function runLocal(runtime: RunProfileRuntime, command: readonly string[]):
   }
 }
 
+async function failClosed(runtime: RunProfileRuntime): Promise<number> {
+  try {
+    await runtime.failClosed();
+  } catch {
+    /* the run is already failing; an undeliverable alert may not change what the caller is told */
+  }
+  return INFRASTRUCTURE_EXIT_CODE;
+}
+
 function mayFallback(mode: RunMode, profile: Pick<Profile, "fallback">): boolean {
   return mode === "auto" && profile.fallback === "local";
 }
@@ -68,17 +81,19 @@ export async function runProfile(
     try {
       prepared = await runtime.prepareRemote();
     } catch {
-      return INFRASTRUCTURE_EXIT_CODE;
+      return failClosed(runtime);
     }
     if (prepared.ok || !prepared.retryable) break;
   }
   if (prepared === undefined || !prepared.ok) {
     /* A lock failure means another run of THIS workspace is already doing the work. Running it
        again locally is precisely the duplicate the wait exists to prevent, so contention fails
-       closed instead of falling back. */
+       closed instead of falling back. These reasons are also kept off the outage channel, but by
+       `LOCAL_REASONS` in notifications/outage.ts — this list decides the local run only, so a
+       reason added here must be added there too or it starts paging the operator. */
     const localIsPointless =
       prepared?.ok === false && (prepared.reason === LOCK_REASON || prepared.reason === CONSUMER_SETUP_REASON);
-    return mayFallback(mode, profile) && !localIsPointless ? runLocal(runtime, command) : INFRASTRUCTURE_EXIT_CODE;
+    return mayFallback(mode, profile) && !localIsPointless ? runLocal(runtime, command) : failClosed(runtime);
   }
 
   let childStarted = false;
@@ -110,11 +125,13 @@ export async function runProfile(
     try {
       await prepared.release();
     } catch {
-      return INFRASTRUCTURE_EXIT_CODE;
+      /* The child never started and the reason is already pending, so a release that fails on top
+         of it must not swallow the alert — that is the same silence on a different path. */
+      return failClosed(runtime);
     }
     if (childStarted) return INFRASTRUCTURE_EXIT_CODE;
     if (remote.reason === WORKLOAD_COMMAND_REASON) return WORKLOAD_COMMAND_EXIT_CODE;
-    return mayFallback(mode, profile) ? runLocal(runtime, command) : INFRASTRUCTURE_EXIT_CODE;
+    return mayFallback(mode, profile) ? runLocal(runtime, command) : failClosed(runtime);
   }
 
   if (!childStarted) {
