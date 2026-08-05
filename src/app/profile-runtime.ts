@@ -1,4 +1,4 @@
-import { isNotificationReason } from "../notifications/outage.js";
+import { stableReason } from "../notifications/outage.js";
 import { prepareRemote, type PreparationRuntime } from "../run/prepare.js";
 import { WORKLOAD_COMMAND_REASON, type RemoteExecutionResult, type RunProfileRuntime } from "../run/run-profile.js";
 
@@ -10,12 +10,21 @@ export interface ProfileExecutionServices extends PreparationRuntime {
   ): Promise<RemoteExecutionResult>;
   runLocal(command: readonly string[]): Promise<number>;
   recordFallback(reason: string): Promise<void>;
+  recordOutage(reason: string): Promise<void>;
   recordRemoteChildStarted(): Promise<void>;
   reportUnavailable(reason: string, detail?: string): void;
 }
 
-function stableReason(reason: string): string {
-  return isNotificationReason(reason) ? reason : "unknown";
+/* The stderr write and the runner-log callback behind reportUnavailable can both fail (a closed
+   pipe, an unwritable log), and this runs between storing the pending reason and returning the
+   preparation result: an escaping throw would make runProfile read a diagnosed failure as an
+   undiagnosed one, losing both the retry and the alert the report was announcing. */
+function report(services: ProfileExecutionServices, reason: string, detail?: string): void {
+  try {
+    services.reportUnavailable(reason, detail);
+  } catch {
+    /* reporting never decides the run */
+  }
 }
 
 export function createProfileRuntime(services: ProfileExecutionServices): RunProfileRuntime {
@@ -42,7 +51,7 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
           reportedDetail = result.detail;
           /* The notification channel keeps the stable reason; the detail reaches only the operator's
              stderr and the runner log. */
-          services.reportUnavailable(reason, result.detail);
+          report(services, reason, result.detail);
         }
       }
       return result;
@@ -59,7 +68,7 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
       });
       if (result.kind === "not-started" && result.reason !== WORKLOAD_COMMAND_REASON) {
         pendingFallbackReason = "child-start";
-        services.reportUnavailable("child-start");
+        report(services, "child-start");
       }
       return result;
     },
@@ -74,6 +83,15 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
         }
       }
       return services.runLocal(command);
+    },
+    /* The outage is announced here rather than from prepareRemote so that a retryable failure the
+       second attempt survives stays silent: the run reached the remote, so nothing was down for the
+       operator to hear about. This is the same consumption point as runLocal, for the profile that
+       has no local run to consume it. */
+    async failClosed() {
+      const reason = pendingFallbackReason;
+      pendingFallbackReason = undefined;
+      if (reason !== undefined) await services.recordOutage(reason);
     },
   };
 }

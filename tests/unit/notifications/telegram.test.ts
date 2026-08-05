@@ -78,6 +78,9 @@ describe("Telegram transport", () => {
     expect(request.url.href).toContain(config.botToken);
     const body = new TextDecoder().decode(request.body);
     expect(body).toContain("Remote unavailable");
+    /* The outage is raised before the run decides whether to fall back, and `fallback: fail`
+       profiles never do — so the heading may not promise the reader a local run. */
+    expect(body).not.toContain("local fallback");
     expect(body).not.toContain(config.botToken);
     expect(body).not.toContain("secret-canary");
   });

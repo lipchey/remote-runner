@@ -59,7 +59,12 @@ class FakeServices implements ProfileExecutionServices {
     this.calls.push("local");
     return 17;
   }
+  /* Distinct labels: the two differ in production — recordFallback additionally prints
+     `running locally`, so a swap would announce a local run the fail-closed profile never makes. */
   async recordFallback(reason: string) {
+    this.calls.push(`fallback:${reason}`);
+  }
+  async recordOutage(reason: string) {
     this.calls.push(`outage:${reason}`);
   }
   async recordRemoteChildStarted() {
@@ -91,7 +96,7 @@ describe("profile runtime composition", () => {
       "probe",
       "release",
       "unavailable:transport",
-      "outage:transport",
+      "fallback:transport",
       "local",
     ]);
     /* The outage stays a stable reason while the operator gets the underlying failure. */
@@ -140,7 +145,7 @@ describe("profile runtime composition", () => {
       "remote",
       "unavailable:child-start",
       "release",
-      "outage:child-start",
+      "fallback:child-start",
       "local",
     ]);
   });
@@ -225,16 +230,85 @@ describe("profile runtime composition", () => {
     expect(services.reportedDetail).toBe("dependency setup ./scripts/ds-bootstrap.sh failed with exit code 3");
   });
 
-  it("neither notifies nor falls back when the consumer's own setup command fails", async () => {
+  /* The reason reaches the outage boundary and is refused there, by the one predicate that owns
+     which reasons mean the remote is down — this layer only decides that there is no local run. */
+  it("does not fall back when the consumer's own setup command fails", async () => {
     const services = new FakeServices();
     services.probeFailures = [new PreparationError("consumer-setup", false)];
 
     const code = await runProfile(createProfileRuntime(services), profile, ["./verify"]);
 
     expect(code).toBe(INFRASTRUCTURE_EXIT_CODE);
-    expect(services.calls).toEqual(["validate", "lock", "probe", "release", "unavailable:consumer-setup"]);
+    expect(services.calls).toEqual([
+      "validate",
+      "lock",
+      "probe",
+      "release",
+      "unavailable:consumer-setup",
+      "outage:consumer-setup",
+    ]);
     expect(services.calls).not.toContain("local");
+  });
+
+  it.each([
+    ["remote", "local"],
+    ["auto", "fail"],
+  ] as const)("records the outage with no local run to announce it (mode=%s fallback=%s)", async (mode, fallback) => {
+    const services = new FakeServices();
+    services.failProbe = true;
+
+    const code = await runProfile(createProfileRuntime(services), { mode, fallback }, ["./verify"]);
+
+    expect(code).toBe(INFRASTRUCTURE_EXIT_CODE);
+    expect(services.calls).toEqual([
+      "validate",
+      "lock",
+      "probe",
+      "release",
+      "unavailable:transport",
+      "outage:transport",
+    ]);
+    expect(services.calls).not.toContain("local");
+  });
+
+  it("records the outage once when the remote child never starts on a fail-closed profile", async () => {
+    const services = new FakeServices();
+    services.notStartedReason = "spawn";
+
+    const code = await runProfile(createProfileRuntime(services), { mode: "auto", fallback: "fail" }, ["./verify"]);
+
+    expect(code).toBe(INFRASTRUCTURE_EXIT_CODE);
+    expect(services.calls.filter((call) => call.startsWith("outage:"))).toEqual(["outage:child-start"]);
+    expect(services.calls).not.toContain("local");
+  });
+
+  /* A failure the second attempt survives means the run reached the remote, so there is no outage to
+     announce — the give-up hook is the consumption point precisely so the retry can clear it. */
+  it("stays silent on the outage channel when a retryable failure is survived", async () => {
+    const services = new FakeServices();
+    services.probeFailures = [new PreparationError("transport", true)];
+
+    const code = await runProfile(createProfileRuntime(services), { mode: "remote", fallback: "fail" }, ["./verify"]);
+
+    expect(code).toBe(0);
+    expect(services.calls).toContain("unavailable:transport");
     expect(services.calls.some((call) => call.startsWith("outage:"))).toBe(false);
+  });
+
+  /* Reporting sits between storing the pending reason and returning the preparation result, so an
+     escaping throw would turn a diagnosed failure into an undiagnosed one: the run would lose its
+     fallback and announce the give-up outage instead of the fallback it should have taken. */
+  it("keeps the diagnosed verdict when reporting the failure throws", async () => {
+    const services = new FakeServices();
+    services.failProbe = true;
+    services.reportUnavailable = () => {
+      throw new Error("stderr is closed");
+    };
+
+    const code = await runProfile(createProfileRuntime(services), profile, ["./verify"]);
+
+    expect(code).toBe(17);
+    expect(services.calls).toContain("fallback:transport");
   });
 
   it("does not notify or prepare when the caller selects local mode", async () => {

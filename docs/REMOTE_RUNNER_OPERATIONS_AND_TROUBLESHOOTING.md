@@ -101,10 +101,12 @@ would have succeeded. A declared `bootstrap.artifact` that is still missing afte
 
 All of those keep the outage notification and keep the fallback on a `fallback: local` profile run
 in `auto` mode. On a profile declaring `fallback: fail`, or a run pinned to `mode: remote`, there is
-no local run — and the outage notification is currently raised on the fallback path, so those runs
-exit `75` with the `run-unavailable` record in the runner log but no Telegram outage. Read the log
-record as the authoritative signal there. The one exception is `connection-lost` below, which is
-raised without any fallback behind it and therefore alerts on every profile.
+no local run, and the notification is raised at the point the run gives up rather than by the
+fallback: those runs alert too, then exit `75` with the same `run-unavailable` record in the runner
+log. A failure the second preparation attempt survives is not an outage on any profile — the run
+reached the remote, so only the stderr line and the log record mention it. The alert follows the
+reported reason, so the reasons listed above as the caller's own error stay off the channel, and a
+give-up with no reported reason behind it exits `75` silently.
 
 For the same reason, `255` from the ssh client AFTER the workload started is reported as exit `75`
 with `remote-runner: ssh connection dropped mid-run; the workload result is unknown`, never as the
@@ -139,7 +141,8 @@ is one argv entry, so wrap it: `run <profile> -- sh -c 'a && b'`.
 For `dns`, `transport`, `authentication`, `remote-shell`, or `timeout`, run the exact index command
 first. Then inspect `tailscale status` locally and `ssh <remote> systemctl is-enabled ssh tailscaled`
 read-only. Do not disable host-key checking. If the host remains unavailable, `auto` mode falls back
-locally and the durable Telegram outage notification must remain active until a remote child starts.
+locally while a fail-closed profile exits `75`; either way the durable Telegram outage notification
+must remain active until a remote child starts.
 
 ## Host key
 
@@ -289,10 +292,12 @@ profiles can intentionally take a long time.
 
 Confirm `/Users/admin/.claude/.telegram-ask.conf` is a regular file owned by the current user with mode
 `0600`; do not print it. `remote-runner doctor <profile>` and the notification queue status are safe to
-share. An outage is sent once, repeated local fallbacks are deduplicated, and recovery is sent only
-after the remote child-start marker. A `connection-lost` outage is the one that arrives without a
-local fallback behind it: the marker had already been seen, so the recovery for the previous outage
-was sent and this is a new one.
+share. An outage is sent once, repeats while one is already open are deduplicated, and recovery is
+sent only after the remote child-start marker. The message never promises a local run: the fallback
+branch and the fail-closed branch raise the same outage, so the text cannot name either. A
+`connection-lost`
+outage is the one that arrives after the marker had already been seen, so the recovery for the
+previous outage was sent and this is a new one.
 
 ## Workstation reboot
 

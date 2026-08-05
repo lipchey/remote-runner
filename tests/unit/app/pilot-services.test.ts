@@ -465,6 +465,30 @@ describe("pilot service boundaries", () => {
     expect(recorded).toBeUndefined();
   });
 
+  /* The fail-closed give-up path announces every reason it collected, so this predicate is the only
+     thing keeping the consumer's own broken setup script off the outage channel. */
+  it("refuses a local reason on the outage channel without claiming a local run", async () => {
+    const lines: string[] = [];
+    const recorded: string[] = [];
+    const services = new NodeProfileServices(profile, {
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      stderr: (chunk) => lines.push(new TextDecoder().decode(chunk)),
+      recordFallback: async (reason) => {
+        recorded.push(reason);
+      },
+    });
+
+    await services.recordOutage("consumer-setup");
+    await services.recordOutage("transport");
+
+    expect(lines).toEqual([]);
+    /* Collected, not overwritten: a single last-value variable stays green when the refused reason
+       is emitted first and the accepted one lands on top of it. */
+    expect(recorded).toEqual(["transport"]);
+  });
+
   it("builds fixed child argv without putting secret values into it", () => {
     const args = remoteChildArguments(
       "/remote/node/bin/node",
