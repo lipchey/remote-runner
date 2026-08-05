@@ -31,7 +31,11 @@ pnpm verify
 ```
 
 `format` rewrites maintained files to the repository style, while `format:check` is read-only.
-`verify` is the required full local gate and runs formatting, typecheck, unit tests, and build.
+`verify` is the required full local gate and runs formatting, typecheck, tests, and build. The
+`tests/integration/` tier executes the workspace transaction scripts against real Git, a bare
+mirror, linked worktrees, and submodules by routing SSH back through local PATH shims. The shims
+provide only the remote-command and non-Linux GNU utility behavior those scripts require; they do
+not simulate transport failures or mutual exclusion.
 
 The repository-wide formatting baseline is isolated in `.git-blame-ignore-revs`. To omit it from
 local blame output, configure this clone once:

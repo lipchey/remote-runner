@@ -59,7 +59,10 @@ if [ ! -e "$mirror" ]; then mkdir -m 700 -- "$mirror"; mirror_created=yes; fi
 cd -- "$mirror"
 [ "$(pwd -P)" = "$mirror" ] || fail 'mirror inode changed before init'
 if [ "$mirror_created" = yes ]; then
-  git init --bare --object-format="$object_format" -- .
+  # This script's stdout is the three-record protocol below, and git init announces the created
+  # repository on stdout — leaving it there makes the very first prepare of a fresh mirror fail
+  # the canonical-record parse. Stderr keeps the announcement where the operator can still see it.
+  git init --bare --object-format="$object_format" -- . >&2
 fi
 [ "$(git rev-parse --show-object-format)" = "$object_format" ] || fail 'mirror object format mismatch'
 [ "$(git rev-parse --is-bare-repository)" = true ] || fail 'mirror must be bare'
