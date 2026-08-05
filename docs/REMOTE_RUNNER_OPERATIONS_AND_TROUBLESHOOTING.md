@@ -247,7 +247,7 @@ the capacity floor silently.
 
 For `bootstrap`, `remote-runner doctor <profile>` checks executable Node and pnpm under the
 runner-owned remote toolchain root rather than the login shell `PATH`. A normal remote run installs
-the pinned native Node, exact pnpm, uv, gitleaks, and project dependencies under owned runner paths.
+the pinned native Node, exact pnpm, uv, and project dependencies under owned runner paths.
 Never sync `node_modules`, `.pnpm-store`, `.nx`, build output, or coverage from the laptop.
 
 The toolchain is downloaded once, not once per run: a promoted directory names the exact pinned

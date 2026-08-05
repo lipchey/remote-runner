@@ -103,12 +103,7 @@ function safeRelative(value: string): boolean {
 }
 
 function sameEnvironment(left: EnvironmentIdentity, right: EnvironmentIdentity): boolean {
-  return (
-    left.node === right.node &&
-    left.packageManager === right.packageManager &&
-    left.uv === right.uv &&
-    left.gitleaks === right.gitleaks
-  );
+  return left.node === right.node && left.packageManager === right.packageManager && left.uv === right.uv;
 }
 
 export function packageManagerFromPackageJson(contents: Uint8Array): string {

@@ -263,7 +263,6 @@ const UV_SHA256 = {
   x86_64: "04bc7d180d6138bf6dc08387acf507a823f397a98fea55da36b0ccc7fbce3b68",
   aarch64: "8c11d90f5f66d232930cf8ae3a085c39877690d409e10878234802b028b20e2a",
 } as const;
-const GITLEAKS_VERSION = "8.30.1";
 const CHILD_MARKER = new TextEncoder().encode("RR_CHILD_STARTED\n");
 /* Mirrors assets/remote-launcher.mjs: the launcher exits with this before the marker when the
    workload command itself cannot be executed. Only the launcher emits it pre-marker, so a broken
@@ -793,7 +792,6 @@ export class NodeProfileServices implements ProfileExecutionServices {
       node: node.version,
       packageManager,
       uv: UV_VERSION,
-      gitleaks: `${GITLEAKS_VERSION}-linux-${machine}`,
     };
     const discoveredFingerprintFiles = await listLocalFingerprintFiles(
       this.processes,

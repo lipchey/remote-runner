@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { open, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { errorCode } from "../runtime/errno.js";
 import type { ProcessRequest, ProcessResult } from "../runtime/contracts.js";
 
 const MAX_CONNECT_TIMEOUT_SECONDS = 300;
@@ -244,12 +245,6 @@ const nodeKnownHostsFiles: KnownHostsFileSystem = {
     await rm(path);
   },
 };
-
-function errorCode(error: unknown): string | undefined {
-  return typeof error === "object" && error !== null && "code" in error
-    ? String((error as { readonly code?: unknown }).code)
-    : undefined;
-}
 
 export class NodeKnownHostsStore implements KnownHostsStore {
   constructor(

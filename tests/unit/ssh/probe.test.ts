@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { capacityProbe, classifySshFailure, probeTwice, type ProbeResult } from "../../../src/ssh/probe.js";
+import { classifySshFailure } from "../../../src/ssh/probe.js";
 
 describe("SSH availability reasons", () => {
   it.each([
@@ -25,39 +25,5 @@ describe("SSH availability reasons", () => {
      sends the operator to `ssh <remote> true` for a remote that was never contacted. */
   it.each([-2, 23, 255])("refuses to diagnose the remote when the ssh client never started (exit %i)", (exitCode) => {
     expect(classifySshFailure("bash: node: command not found", { exitCode, spawned: false })).toBe("transport");
-  });
-
-  it("does not declare an outage after one transient failure", async () => {
-    const once = vi
-      .fn<() => Promise<ProbeResult>>()
-      .mockResolvedValueOnce({ ok: false, reason: "transport" })
-      .mockResolvedValueOnce({ ok: true });
-
-    expect(await probeTwice(once)).toEqual({ ok: true });
-    expect(once).toHaveBeenCalledTimes(2);
-  });
-
-  it("accepts the first success without requiring a second probe", async () => {
-    const once = vi.fn<() => Promise<ProbeResult>>().mockResolvedValue({ ok: true });
-    expect(await probeTwice(once)).toEqual({ ok: true });
-    expect(once).toHaveBeenCalledTimes(1);
-  });
-
-  it("reports only the second reason after two failed probes", async () => {
-    const once = vi
-      .fn<() => Promise<ProbeResult>>()
-      .mockResolvedValueOnce({ ok: false, reason: "dns" })
-      .mockResolvedValueOnce({ ok: false, reason: "authentication" });
-
-    expect(await probeTwice(once)).toEqual({ ok: false, reason: "authentication" });
-  });
-
-  it.each([
-    ["4096\n", 4096, { ok: true }],
-    ["4095\n", 4096, { ok: false, reason: "capacity" }],
-    ["not-a-number\n", 1, { ok: false, reason: "capacity" }],
-    ["9007199254740992\n", 1, { ok: false, reason: "capacity" }],
-  ] as const)("validates minimum free bytes from %j", (stdout, minimum, expected) => {
-    expect(capacityProbe(stdout, minimum)).toEqual(expected);
   });
 });

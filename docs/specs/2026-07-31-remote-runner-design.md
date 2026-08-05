@@ -148,7 +148,7 @@ below `~/.local/share/remote-runner/toolchains/`.
 The Node provider downloads the laptop’s exact Node version for the remote architecture from the
 official distribution, verifies its published SHA-256 manifest, extracts into a temporary
 directory, and promotes atomically. It installs the package-manager version declared by the
-consumer. Other providers cover pinned uv and gitleaks versions.
+consumer. Another provider covers the pinned uv version.
 
 Failures leave the last healthy environment active. Dependency fingerprints include the effective
 environment identity, exact files, every tracked or non-ignored untracked file matched by safe
