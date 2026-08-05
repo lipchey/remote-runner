@@ -138,6 +138,9 @@ describe("pruneRemoteWorkspaces", () => {
       async removeSetupState(target) {
         calls.push(`remove-setup:${target}`);
       },
+      async removePrivateRef(target) {
+        calls.push(`remove-ref:${target}`);
+      },
     };
 
     const result = await pruneRemoteWorkspaces(
@@ -153,6 +156,7 @@ describe("pruneRemoteWorkspaces", () => {
       "list",
       `quarantine:${stale}:${quarantine}:false`,
       `terminate:${stale}`,
+      `remove-ref:${stale}`,
       `remove-quarantine:${quarantine}`,
       `remove-activity:${stale}`,
       `remove-setup:${stale}`,
@@ -203,6 +207,9 @@ describe("pruneRemoteWorkspaces", () => {
       async removeSetupState(target) {
         calls.push(`remove-setup:${target}`);
       },
+      async removePrivateRef(target) {
+        calls.push(`remove-ref:${target}`);
+      },
     };
 
     const result = await pruneRemoteWorkspaces(
@@ -247,6 +254,8 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
       {
         profileRoot: "/profiles/verify-full",
         setupStateRoot: "/state/verify-full",
+        mirror: "/profiles/.mirror.git",
+        privateRefPrefix: "refs/remote-runner/ariadne/verify-full",
       },
       async () => undefined,
     );
@@ -288,6 +297,8 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
       {
         profileRoot: "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full",
         setupStateRoot: "/home/admin/.local/state/remote-runner/profiles/ariadne/verify-full",
+        mirror: "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/.mirror.git",
+        privateRefPrefix: "refs/remote-runner/ariadne/verify-full",
       },
       async (target) => {
         terminated.push(target);
@@ -306,6 +317,7 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
     ]);
     await runtime.withQuarantine(current, `.gc-${current}-dddddddddddddddd`, false, nowMs - minute, async () => {
       await runtime.terminateOwnedSync(current);
+      await runtime.removePrivateRef(current);
       await runtime.removeQuarantine(`.gc-${current}-dddddddddddddddd`);
       await runtime.removeActivity(current);
       await runtime.removeSetupState(current);
@@ -333,5 +345,46 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
       "--",
       "/home/admin/.local/state/remote-runner/profiles/ariadne/verify-full/" + current,
     ]);
+    expect(commands.find((command) => command[3] === "remote-runner-private-ref")).toEqual([
+      "sh",
+      "-ceu",
+      'test -d "$1" || exit 0; exec git -c core.hooksPath=/dev/null --git-dir="$1" update-ref -d "$2"',
+      "remote-runner-private-ref",
+      "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/.mirror.git",
+      `refs/remote-runner/ariadne/verify-full/${current}`,
+    ]);
+  });
+
+  it("rejects a private ref prefix that is not exactly consumer and profile", async () => {
+    const port: WorkspaceRetentionCommandPort = {
+      async run() {
+        return { exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array() };
+      },
+      async withLock() {
+        return "removed";
+      },
+    };
+    const paths = {
+      profileRoot: "/profiles/verify-full",
+      setupStateRoot: "/state/verify-full",
+      mirror: "/profiles/.mirror.git",
+    };
+
+    expect(
+      () =>
+        new RemoteWorkspaceRetentionRuntime(
+          port,
+          { ...paths, privateRefPrefix: "refs/remote-runner/ariadne" },
+          async () => undefined,
+        ),
+    ).toThrow(/private ref prefix/u);
+    expect(
+      () =>
+        new RemoteWorkspaceRetentionRuntime(
+          port,
+          { ...paths, privateRefPrefix: "refs/remote-runner/ariadne/verify-full/../../heads" },
+          async () => undefined,
+        ),
+    ).toThrow(/private ref prefix/u);
   });
 });

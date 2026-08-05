@@ -122,6 +122,9 @@ exec 9>"$lock"
 flock -x 9
 # Threat boundary: same-UID processes that ignore the consumer lock are not defended.
 # Root/mirror/workspace ownership and 0700 modes exclude other users.
+# The lock must stay held past the submodule block: submodule sync and update --init write
+# submodule.<name>.url into the MIRROR config, which every worktree shares, and config.lock has
+# no retry — releasing early makes two identities reconciling at once fail on the loser.
 [ ! -L "$root_input" ] || fail 'root must not be a symlink'
 [ "$(realpath -- "$root_input")" = "$root" ] || fail 'root changed after lock'
 [ "$(stat -c %u -- "$root")" = "$(id -u)" ] || fail 'root must be owned by the runner user'

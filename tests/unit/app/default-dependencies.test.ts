@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createNodeCliDependencies } from "../../../src/app/default-dependencies.js";
+import { createNodeCliDependencies, type NodeCliDependencies } from "../../../src/app/default-dependencies.js";
 import { inspectPrewarmRequest } from "../../../src/prewarm/queue.js";
 import { worktreeIdentity } from "../../../src/runtime/identity.js";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../../src/ssh/client.js";
@@ -38,6 +38,23 @@ function result(stdout = "", exitCode = 0): BoundedProcessResult {
     stderr: new Uint8Array(),
     outputTruncated: false,
   };
+}
+
+interface RunRecord {
+  readonly event: string;
+  readonly runId: string;
+  readonly pid: number;
+  readonly profile?: string;
+  readonly mode?: string;
+  readonly status?: number;
+  readonly provider?: string;
+  readonly reason?: string;
+  readonly error?: string;
+  readonly durationMs?: number;
+}
+
+async function runRecords(dependencies: NodeCliDependencies): Promise<RunRecord[]> {
+  return ((await dependencies.logsProfile?.("verify-full")) ?? []).map((line) => JSON.parse(line) as RunRecord);
 }
 
 class FakeProcesses {
@@ -127,7 +144,7 @@ describe("concrete Node CLI dependencies", () => {
     await expect(dependencies.statusProfile?.("verify-full")).resolves.toMatch(
       /^verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear$/u,
     );
-    const report = (await dependencies.doctorProfile?.("verify-full")) as { checks: readonly unknown[] };
+    const report = (await dependencies.doctorProfile?.("verify-full"))![0]!.report;
     expect(report.checks).toHaveLength(17);
     expect(await dependencies.logsProfile?.("verify-full")).toEqual(["older", "current"]);
     expect(processes.requests.every((request) => request.command !== "sh" && request.command !== "bash")).toBe(true);
@@ -146,9 +163,7 @@ describe("concrete Node CLI dependencies", () => {
     });
 
     await dependencies.statusProfile?.("verify-full");
-    const report = (await dependencies.doctorProfile?.("verify-full")) as {
-      checks: readonly { id: string; status: string; reason?: string }[];
-    };
+    const report = (await dependencies.doctorProfile?.("verify-full"))![0]!.report;
     const serializedRequests = JSON.stringify(processes.requests);
 
     expect(serializedRequests).toContain(`${generatedRoot}/ariadne/verify-full/`);
@@ -209,9 +224,7 @@ describe("concrete Node CLI dependencies", () => {
       processes,
     });
 
-    const report = (await dependencies.doctorProfile?.("verify-full")) as {
-      checks: readonly { id: string; status: string; reason?: string; detail?: string }[];
-    };
+    const report = (await dependencies.doctorProfile?.("verify-full"))![0]!.report;
 
     expect(report.checks).toContainEqual({
       id: "sync.session",
@@ -236,9 +249,7 @@ describe("concrete Node CLI dependencies", () => {
       processes,
     });
 
-    const report = (await dependencies.doctorProfile?.("verify-full")) as {
-      checks: readonly { id: string; status: string }[];
-    };
+    const report = (await dependencies.doctorProfile?.("verify-full"))![0]!.report;
 
     expect(report.checks).toContainEqual(
       status === "ok"
@@ -342,6 +353,97 @@ describe("concrete Node CLI dependencies", () => {
     expect(lines?.[1]).toContain('"event":"run-finish"');
     expect(lines?.[1]).toContain('"provider":"remote"');
     expect(lines?.join("\n")).not.toContain("ignored-secret-like-argument");
+  });
+
+  it("correlates one run's records with a run id, the writer pid, and a measured duration", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+      now: () => "2026-07-31T12:34:56.000Z",
+      executeProfile: async () => 23,
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).resolves.toBe(23);
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).resolves.toBe(23);
+
+    const records = await runRecords(dependencies);
+    expect(records.map(({ event }) => event)).toEqual(["run-start", "run-finish", "run-start", "run-finish"]);
+    expect(records[0]!.runId).toMatch(/^[0-9a-f]{16}$/u);
+    expect(records[1]!.runId).toBe(records[0]!.runId);
+    expect(records[2]!.runId).not.toBe(records[0]!.runId);
+    expect(records.map(({ pid }) => pid)).toEqual([process.pid, process.pid, process.pid, process.pid]);
+    expect(records[0]!.durationMs).toBeUndefined();
+    for (const finished of [records[1]!, records[3]!]) {
+      expect(Number.isInteger(finished.durationMs)).toBe(true);
+      expect(finished.durationMs).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("stamps a failed run's error record with the same correlation fields and its duration", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+      now: () => "2026-07-31T12:34:56.000Z",
+      createRunId: () => "00112233445566aa",
+      executeProfile: async () => {
+        throw new Error("resource setup failed");
+      },
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).rejects.toThrow("resource setup failed");
+
+    const records = await runRecords(dependencies);
+    expect(records.map(({ event }) => event)).toEqual(["run-start", "run-error"]);
+    expect(records[1]).toMatchObject({ runId: "00112233445566aa", pid: process.pid, error: "Error" });
+    expect(Number.isInteger(records[1]!.durationMs)).toBe(true);
+  });
+
+  it("records the preparation reason that left the remote unavailable", async () => {
+    const hostKey = new TextEncoder().encode("pop-os-host-key");
+    const paths = await fixture(
+      validManifest.replace(
+        'hostKeySha256: "SHA256:trusted"',
+        `hostKeySha256: "SHA256:${createHash("sha256").update(hostKey).digest("base64").replace(/=+$/u, "")}"`,
+      ),
+    );
+    await mkdir(dirname(paths.knownHostsPath), { recursive: true });
+    await writeFile(paths.knownHostsPath, `pop-os ssh-ed25519 ${Buffer.from(hostKey).toString("base64")}\n`, {
+      mode: 0o600,
+    });
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+      now: () => "2026-07-31T12:34:56.000Z",
+      createRunId: () => "00112233445566bb",
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).resolves.toBe(75);
+
+    const records = await runRecords(dependencies);
+    const unavailable = records.filter(({ event }) => event === "run-unavailable");
+    expect(records[0]!.event).toBe("run-start");
+    expect(unavailable.length).toBeGreaterThanOrEqual(1);
+    expect(unavailable[0]).toMatchObject({
+      runId: "00112233445566bb",
+      pid: process.pid,
+      profile: "verify-full",
+      mode: "remote",
+    });
+    expect(unavailable[0]!.reason).toBe("remote-shell");
+    /* Exact keys: a fabricated or dropped `detail` field is the failure this record shape hides. */
+    expect(Object.keys(unavailable[0]!)).toEqual(["at", "event", "runId", "pid", "profile", "mode", "reason"]);
+    expect(records.at(-1)).toMatchObject({ event: "run-finish", status: 75, provider: "remote" });
   });
 
   it("marks a genuinely local run-finish record with provider local", async () => {

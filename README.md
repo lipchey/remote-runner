@@ -57,7 +57,9 @@ explicit diagnostic override. `prewarm` validates the profile, coalesces an equi
 the controller-owned durable queue, and returns after that handoff; synchronization, setup, and the
 remote workload continue in the background. A handoff failure remains fail-soft so a worktree
 creation hook never fails, and the first ordinary `run` retries everything. `status` reports
-`prewarm=idle|queued|running|unknown`; `logs` records the eventual lifecycle verdict.
+`prewarm=idle|queued|running|unknown`; `logs` records the eventual lifecycle verdict. `doctor`
+exits 0 when no check failed, 1 when at least one check is `fail`, 70 on a runtime error, and 2 on
+a usage error; a `warn` check keeps the exit code 0.
 
 For allowlisted development secrets, a profile may declare `dotenv: .env`. The runner reads only
 the named keys locally, never synchronizes the file, and sends values through framed SSH input. An

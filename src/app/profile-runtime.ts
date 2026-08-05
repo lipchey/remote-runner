@@ -27,8 +27,8 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
       else {
         const reason = stableReason(result.reason);
         pendingFallbackReason = reason;
-        /* The notification channel keeps the stable reason; only the operator's stderr gets the
-           detail, which is what makes a wedged sync diagnosable without reading the runner log. */
+        /* The notification channel keeps the stable reason; the detail reaches only the operator's
+           stderr and the runner log, which is what makes a wedged sync diagnosable. */
         services.reportUnavailable(reason, result.detail);
       }
       return result;

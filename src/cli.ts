@@ -3,6 +3,7 @@ import process from "node:process";
 
 import { loadManifestText } from "./config/load-manifest.js";
 import type { Profile, RunMode } from "./config/types.js";
+import type { DoctorProfileReport } from "./diagnostics/doctor.js";
 
 export interface CliIo {
   stdout(line: string): void;
@@ -16,7 +17,7 @@ export interface CliDependencies {
   runProfile?(profile: Profile, command: readonly string[], mode?: RunMode): Promise<number>;
   enqueuePrewarm?(profile: Profile, manifestPath: string): Promise<"published" | "coalesced">;
   statusProfile?(profile?: string): Promise<string>;
-  doctorProfile?(profile?: string): Promise<unknown>;
+  doctorProfile?(profile?: string): Promise<readonly DoctorProfileReport[]>;
   logsProfile?(profile?: string): Promise<readonly string[]>;
   repairProfile?(profile: string, apply: boolean): Promise<unknown>;
   benchmarkProfile?(profile: Profile): Promise<unknown>;
@@ -132,8 +133,11 @@ async function runReadOnlyDiagnostic(
       return 0;
     }
     if (command === "doctor" && dependencies.doctorProfile !== undefined) {
-      io.stdout(JSON.stringify(await dependencies.doctorProfile(profile)));
-      return 0;
+      const reports = await dependencies.doctorProfile(profile);
+      /* The serialized shape stays the operator-facing contract — one report for a named profile,
+         the wrapper for every profile — so only the exit code carries the new signal. */
+      io.stdout(JSON.stringify(profile === undefined ? { profiles: reports } : reports[0]!.report));
+      return reports.some(({ report }) => report.checks.some((check) => check.status === "fail")) ? 1 : 0;
     }
     if (command === "logs" && dependencies.logsProfile !== undefined) {
       for (const line of await dependencies.logsProfile(profile)) io.stdout(line);

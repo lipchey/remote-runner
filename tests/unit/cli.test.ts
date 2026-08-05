@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { runCli } from "../../src/cli.js";
+import { runCli, type CliDependencies } from "../../src/cli.js";
+import type { DiagnosticStatus } from "../../src/diagnostics/doctor.js";
 import { validManifest } from "./config/manifest-fixture.js";
 
 describe("runCli", () => {
@@ -266,7 +267,7 @@ describe("runCli", () => {
     const stdout: string[] = [];
     const calls: string[] = [];
     const io = { stdout: (line: string) => stdout.push(line), stderr: () => undefined };
-    const dependencies = {
+    const dependencies: CliDependencies = {
       readFile: async () => validManifest,
       statusProfile: async (profile?: string) => {
         calls.push(`status:${profile ?? "all"}`);
@@ -274,7 +275,14 @@ describe("runCli", () => {
       },
       doctorProfile: async (profile?: string) => {
         calls.push(`doctor:${profile ?? "all"}`);
-        return { checks: [{ id: "ssh.transport", status: "ok", next: "remote-runner doctor" }] };
+        return [
+          {
+            profile: "verify-full",
+            report: {
+              checks: [{ id: "ssh.transport", status: "ok", next: "remote-runner doctor" }],
+            },
+          },
+        ];
       },
       logsProfile: async (profile?: string) => {
         calls.push(`logs:${profile ?? "all"}`);
@@ -288,9 +296,39 @@ describe("runCli", () => {
     expect(calls).toEqual(["status:verify-full", "doctor:all", "logs:verify-full"]);
     expect(stdout).toEqual([
       "verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear",
-      '{"checks":[{"id":"ssh.transport","status":"ok","next":"remote-runner doctor"}]}',
+      '{"profiles":[{"profile":"verify-full","report":{"checks":[{"id":"ssh.transport","status":"ok","next":"remote-runner doctor"}]}}]}',
       "line-1",
       "line-2",
+    ]);
+  });
+
+  it("exits non-zero for doctor only on a failing check, printing the same report either way", async () => {
+    const stdout: string[] = [];
+    const io = { stdout: (line: string) => stdout.push(line), stderr: () => undefined };
+    const dependencies = (status: DiagnosticStatus): CliDependencies => ({
+      readFile: async () => validManifest,
+      doctorProfile: async () => [
+        {
+          profile: "verify-full",
+          report: {
+            checks: [
+              { id: "ssh.transport", status: "ok", next: "ssh <remote> true" },
+              { id: "remote.capacity", status, reason: "capacity", next: "ssh <remote> df -Pk <workspace>" },
+            ],
+          },
+        },
+      ],
+    });
+    const checks = (status: DiagnosticStatus): string =>
+      `[{"id":"ssh.transport","status":"ok","next":"ssh <remote> true"},{"id":"remote.capacity","status":"${status}","reason":"capacity","next":"ssh <remote> df -Pk <workspace>"}]`;
+
+    expect(await runCli(["doctor", "verify-full"], io, dependencies("warn"))).toBe(0);
+    expect(await runCli(["doctor", "verify-full"], io, dependencies("fail"))).toBe(1);
+    expect(await runCli(["doctor"], io, dependencies("fail"))).toBe(1);
+    expect(stdout).toEqual([
+      `{"checks":${checks("warn")}}`,
+      `{"checks":${checks("fail")}}`,
+      `{"profiles":[{"profile":"verify-full","report":{"checks":${checks("fail")}}}]}`,
     ]);
   });
 
