@@ -33,6 +33,11 @@ import { NodeProfileServices } from "./pilot-services.js";
 
 const CAPTURE_BYTES = 64 * 1024;
 const LEGACY_GENERATED_ROOT = "~/.cache/remote-runner/workspaces";
+/* Chosen clear of every other exit code that can reach this decision: 74 is the registration
+   probe's own "worktree is still registered" signal, 75-78 belong to workspace retention, 255 is
+   ssh reporting its own failure, and 0-2 are what the probed commands themselves return. */
+const WORKSPACE_ABSENT_EXIT = 79;
+const WORKSPACE_SCOPED_PROBES = new Set(["remote.workspace", "secrets.persistence"]);
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
 export interface NodeCliDependencyOptions {
@@ -326,7 +331,7 @@ async function inspectProbe(
             ? [
                 "sh",
                 "-ceu",
-                'path=$1; case "$path" in /*) ;; *) path=$HOME/$path;; esac; exec git -C "$path" status --short --branch',
+                `path=$1; case "$path" in /*) ;; *) path=$HOME/$path;; esac; [ -e "$path" ] || exit ${String(WORKSPACE_ABSENT_EXIT)}; exec git -C "$path" status --short --branch`,
                 "remote-runner-workspace",
                 remotePaths.workspace,
               ]
@@ -343,7 +348,7 @@ async function inspectProbe(
                 ? [
                     "sh",
                     "-ceu",
-                    'path=$1; case "$path" in /*) ;; *) path=$HOME/$path;; esac; if found=$(find "$path" -maxdepth 1 -name .env -print); then [ -z "$found" ]; else exit 1; fi',
+                    `path=$1; case "$path" in /*) ;; *) path=$HOME/$path;; esac; [ -e "$path" ] || exit ${String(WORKSPACE_ABSENT_EXIT)}; if found=$(find "$path" -maxdepth 1 -name .env -print); then [ -z "$found" ]; else exit 1; fi`,
                     "remote-runner-secrets",
                     remotePaths.workspace,
                   ]
@@ -358,6 +363,16 @@ async function inspectProbe(
       options.knownHostsPath,
       CAPTURE_BYTES,
     );
+    /* A workspace is a cache, so its absence is the normal state of a source checkout that has never
+       run remotely — and then neither its Git state nor a secret inside it is knowable. Both probes
+       used to fold that into `fail`, which for `secrets.persistence` printed reason `secrets`: an
+       operator (and the author of this comment) reads that as "a plaintext .env is sitting on the
+       remote" and starts hunting a leak that a missing directory cannot hold. The guard tests for
+       existence, not for a directory: a non-directory sitting at the workspace path is a broken
+       workspace, and `remote.workspace` must keep failing on it rather than call it unprovisioned. */
+    if (result.exitCode === WORKSPACE_ABSENT_EXIT && WORKSPACE_SCOPED_PROBES.has(probe.id)) {
+      return { status: "warn", detail: "remote workspace is not provisioned" };
+    }
     return { status: result.exitCode === 0 ? "ok" : "fail" };
   }
   const result = await options.processes.run({

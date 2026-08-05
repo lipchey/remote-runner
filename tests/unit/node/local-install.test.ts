@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { installLocalApplication, type LocalLaunchRuntime } from "../../../src/node/local-install.js";
+import { installLocalApplication, SETTLE_POLLS, type LocalLaunchRuntime } from "../../../src/node/local-install.js";
 import { parseInstallReceipt } from "../../../src/node/install-receipt.js";
 
 const roots: string[] = [];
@@ -18,18 +18,29 @@ class FakeLaunch implements LocalLaunchRuntime {
   loaded = false;
   running = false;
   bootstrapFailures = 0;
+  /* Real launchd keeps the label in the domain for seconds after `bootout` returns, and refuses
+     every bootstrap until it is gone; a fake that unloads synchronously cannot see that at all. */
+  settlePollsAfterBootout = 0;
+  private settling = 0;
   statusFailure?: string;
   async status() {
     if (this.statusFailure !== undefined) throw new Error(this.statusFailure);
+    if (this.settling > 0) {
+      this.settling -= 1;
+      if (this.settling === 0) this.loaded = false;
+      return { loaded: true, running: false };
+    }
     return { loaded: this.loaded, running: this.running };
   }
   async bootout() {
     this.actions.push("bootout");
-    this.loaded = false;
+    this.settling = this.settlePollsAfterBootout;
+    this.loaded = this.settling > 0;
     this.running = false;
   }
   async bootstrap(_plist: string) {
     this.actions.push("bootstrap");
+    if (this.loaded) throw new Error("Bootstrap failed: 5: Input/output error");
     if (this.bootstrapFailures > 0) {
       this.bootstrapFailures -= 1;
       throw new Error("launchd is still settling");
@@ -157,5 +168,72 @@ describe("self-contained local macOS install", () => {
       }),
     ).resolves.toBeDefined();
     expect(launch.actions).toEqual(["bootout", "bootstrap", "bootstrap"]);
+  });
+
+  it("bootstraps the upgraded agent only after launchd releases the label", async () => {
+    const sourceRoot = await sourceFixture();
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-install-settle-"));
+    roots.push(home);
+    const launch = new FakeLaunch();
+    launch.loaded = true;
+    launch.running = true;
+    /* More polls than the 20 blind bootstrap attempts this window used to be spent on, which is why
+       an upgrade reported `LaunchAgent bootstrap failed` with both artifacts already swapped. */
+    launch.settlePollsAfterBootout = 25;
+
+    await expect(
+      installLocalApplication({
+        home,
+        sourceRoot,
+        nodePath: "/usr/bin/node",
+        launch,
+        settleLaunchd: async () => undefined,
+      }),
+    ).resolves.toBeDefined();
+    expect(launch.actions).toEqual(["bootout", "bootstrap"]);
+  });
+
+  it("bootstraps when launchd releases the label on the very last settle", async () => {
+    const sourceRoot = await sourceFixture();
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-install-boundary-"));
+    roots.push(home);
+    const launch = new FakeLaunch();
+    launch.loaded = true;
+    launch.running = true;
+    /* The exact boundary: the label is still there on the last polled status, so only a look AFTER
+       the final settle can tell a finished teardown from a stuck agent. */
+    launch.settlePollsAfterBootout = SETTLE_POLLS;
+
+    await expect(
+      installLocalApplication({
+        home,
+        sourceRoot,
+        nodePath: "/usr/bin/node",
+        launch,
+        settleLaunchd: async () => undefined,
+      }),
+    ).resolves.toBeDefined();
+    expect(launch.actions).toEqual(["bootout", "bootstrap"]);
+  });
+
+  it("names the stuck agent when launchd never releases the label", async () => {
+    const sourceRoot = await sourceFixture();
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-install-stuck-"));
+    roots.push(home);
+    const launch = new FakeLaunch();
+    launch.loaded = true;
+    launch.running = true;
+    launch.settlePollsAfterBootout = Number.MAX_SAFE_INTEGER;
+
+    await expect(
+      installLocalApplication({
+        home,
+        sourceRoot,
+        nodePath: "/usr/bin/node",
+        launch,
+        settleLaunchd: async () => undefined,
+      }),
+    ).rejects.toThrow(/still loaded after bootout/u);
+    expect(launch.actions).toEqual(["bootout"]);
   });
 });

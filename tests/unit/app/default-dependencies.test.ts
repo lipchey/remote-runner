@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -61,6 +62,7 @@ class FakeProcesses {
   readonly requests: BoundedProcessRequest[] = [];
   registrationExitCode = 0;
   secretsProbeExitCode = 0;
+  workspaceProbeExitCode = 0;
   sessionListing = "[]";
 
   async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
@@ -79,6 +81,11 @@ class FakeProcesses {
     }
     if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-secrets")) {
       return result("", this.secretsProbeExitCode);
+    }
+    /* Keyed on the probe's own command, not on `remote-runner-workspace`: that name is a prefix of
+       the registration probe's `$0`, and both arrive as one encoded remote command string. */
+    if (request.command === "ssh" && request.args.at(-1)?.includes("status --short --branch")) {
+      return result("", this.workspaceProbeExitCode);
     }
     return result();
   }
@@ -265,6 +272,93 @@ describe("concrete Node CLI dependencies", () => {
     expect(secretsRequest?.args.at(-1)).toContain(
       'if found=$(find "$path" -maxdepth 1 -name .env -print); then [ -z "$found" ]; else exit 1; fi',
     );
+  });
+
+  it("warns without a failing reason when the remote workspace was never provisioned", async () => {
+    const paths = await fixture();
+    const processes = new FakeProcesses();
+    /* What both probes' own `[ -d "$path" ] || exit 79` guard returns for a source checkout that has
+       never run remotely — the state the primary Ariadne checkout is permanently in. */
+    processes.secretsProbeExitCode = 79;
+    processes.workspaceProbeExitCode = 79;
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
+    });
+
+    const report = (await dependencies.doctorProfile?.("verify-full"))![0]!.report;
+
+    expect(report.checks).toContainEqual({
+      id: "secrets.persistence",
+      status: "warn",
+      reason: "secrets",
+      detail: "remote workspace is not provisioned",
+      next: expect.stringContaining("if found=$(find"),
+    });
+    expect(report.checks).toContainEqual({
+      id: "remote.workspace",
+      status: "warn",
+      reason: "workspace",
+      detail: "remote workspace is not provisioned",
+      next: expect.stringContaining("git -C <workspace> status"),
+    });
+    /* The absent workspace is what `remote-runner doctor` exits 1 on today, on every checkout that
+       only ever dispatches runs from its worktrees. */
+    expect(report.checks.filter((check) => check.status === "fail")).toEqual([]);
+    const workspaceRequest = processes.requests.find((request) =>
+      request.args.at(-1)?.includes("status --short --branch"),
+    );
+    expect(workspaceRequest?.args.at(-1)).toContain('[ -e "$path" ] || exit 79');
+  });
+
+  it("derives 79 from the generated probes only for an absent workspace", async () => {
+    const paths = await fixture();
+    const processes = new FakeProcesses();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
+    });
+    await dependencies.doctorProfile?.("verify-full");
+    const probe = (token: string): string => {
+      const encoded = processes.requests.find((request) => request.args.at(-1)?.includes(token))?.args.at(-1);
+      if (encoded === undefined) throw new Error(`no generated probe command contains ${token}`);
+      return encoded;
+    };
+    /* The exit codes this suite injects everywhere else are only real if the generated scripts
+       produce them, so these two run for real: the encoded remote command, under the same POSIX
+       shell the remote uses, against a $HOME whose workspace is absent, broken, or clean. */
+    const workspaceProbe = probe("status --short --branch");
+    const secretsProbe = probe("remote-runner-secrets");
+    const exitCode = (command: string, home: string): number | null =>
+      spawnSync("/bin/sh", ["-c", command], { env: { HOME: home, PATH: process.env.PATH ?? "" } }).status;
+    const workspacePath = (home: string): string =>
+      join(home, ".cache", "remote-runner", "workspaces", "ariadne", "verify-full", dependencies.identity);
+    const probeHome = async (): Promise<string> => {
+      const root = await mkdtemp(join(tmpdir(), "remote-runner-probe-home-"));
+      temporaryRoots.push(root);
+      return root;
+    };
+
+    const absent = await probeHome();
+    expect(exitCode(workspaceProbe, absent)).toBe(79);
+    expect(exitCode(secretsProbe, absent)).toBe(79);
+
+    const broken = await probeHome();
+    await mkdir(dirname(workspacePath(broken)), { recursive: true });
+    await writeFile(workspacePath(broken), "");
+    expect(exitCode(workspaceProbe, broken)).not.toBe(79);
+    expect(exitCode(workspaceProbe, broken)).not.toBe(0);
+
+    const provisioned = await probeHome();
+    await mkdir(workspacePath(provisioned), { recursive: true });
+    expect(exitCode(secretsProbe, provisioned)).toBe(0);
+    await writeFile(join(workspacePath(provisioned), ".env"), "SECRET=1\n");
+    expect(exitCode(secretsProbe, provisioned)).not.toBe(0);
+    expect(exitCode(secretsProbe, provisioned)).not.toBe(79);
   });
 
   it("keeps repair actions inside one profile identity and requires its exact dry-run receipt", async () => {
