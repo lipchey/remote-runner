@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DependencyCommandError,
   ensureDependencySetup,
   packageManagerFromPackageJson,
   type DependencySetupRuntime,
@@ -10,6 +11,8 @@ import {
 class FakeRuntime implements DependencySetupRuntime {
   readonly calls: string[] = [];
   writes: HealthySetupState[] = [];
+  setupExitCode = 9;
+  ensureThrows?: Error;
   constructor(
     public state?: HealthySetupState,
     private readonly failureAt?: string,
@@ -22,10 +25,11 @@ class FakeRuntime implements DependencySetupRuntime {
   }
   async runSetup(script: string, workspaceRoot: string, environment: HealthySetupState["environment"]) {
     this.calls.push(`run:${script}:${workspaceRoot}:${environment.node}`);
-    return { exitCode: script === this.failureAt ? 9 : 0 };
+    return { exitCode: script === this.failureAt ? this.setupExitCode : 0 };
   }
   async runEnsure(command: readonly string[], workspaceRoot: string, environment: HealthySetupState["environment"]) {
     this.calls.push(`ensure:${JSON.stringify(command)}:${workspaceRoot}:${environment.node}`);
+    if (this.ensureThrows !== undefined) throw this.ensureThrows;
     return { exitCode: this.ensureExitCodes.shift() ?? 0 };
   }
   async checkArtifact(artifact: string, workspaceRoot: string) {
@@ -116,11 +120,18 @@ describe("dependency setup", () => {
     ]);
   });
 
-  it("fails closed when setup does not recreate a declared artifact", async () => {
+  /* The postcheck is the runner's own, not a consumer command observed exiting non-zero: a damaged
+     remote workspace loses the artifact while the local checkout still has it, so it must keep the
+     outage notification and the fallback. */
+  it("fails closed on a missing artifact without blaming the consumer", async () => {
     const previous = { fingerprint: input.fingerprint, environment };
     const runtime = new FakeRuntime(previous, undefined, [], [1, 1]);
 
-    await expect(ensureDependencySetup(runtime, artifactInput)).rejects.toThrow(/bootstrap artifact.*missing/u);
+    const caught = await ensureDependencySetup(runtime, artifactInput).catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(DependencyCommandError);
+    expect((caught as Error).message).toMatch(/bootstrap artifact.*missing/u);
     expect(runtime.state).toEqual(previous);
     expect(runtime.writes).toEqual([]);
   });
@@ -159,7 +170,12 @@ describe("dependency setup", () => {
   it("preserves the last healthy state and stops later setup after failure", async () => {
     const previous = { fingerprint: `sha256:${"b".repeat(64)}`, environment: { ...environment, uv: "0.11.31" } };
     const runtime = new FakeRuntime(previous, "./scripts/ds-bootstrap.sh");
-    await expect(ensureDependencySetup(runtime, input)).rejects.toThrow("exit code 9");
+    await expect(ensureDependencySetup(runtime, input)).rejects.toMatchObject({
+      name: "DependencyCommandError",
+      command: "./scripts/ds-bootstrap.sh",
+      exitCode: 9,
+      message: expect.stringContaining("exit code 9"),
+    });
     expect(runtime.state).toEqual(previous);
     expect(runtime.writes).toEqual([]);
     expect(runtime.calls).toHaveLength(2);
@@ -169,10 +185,67 @@ describe("dependency setup", () => {
     const previous = { fingerprint: `sha256:${"b".repeat(64)}`, environment };
     const runtime = new FakeRuntime(previous, undefined, [9]);
 
-    await expect(ensureDependencySetup(runtime, input)).rejects.toThrow(/ensure.*exit code 9/u);
+    await expect(ensureDependencySetup(runtime, input)).rejects.toMatchObject({
+      name: "DependencyCommandError",
+      command: "node",
+      exitCode: 9,
+      message: expect.stringMatching(/ensure.*exit code 9/u),
+    });
     expect(runtime.state).toEqual(previous);
     expect(runtime.writes).toEqual([]);
     expect(runtime.calls.at(-1)).toContain("ensure:");
+  });
+
+  /* None of these codes proves the consumer's command ran and failed: 255 is ssh's own failure, 127
+     and 137 are synthesized locally when the ssh client cannot spawn or is signal-killed (the OOM
+     killer during an install), and 125 is the workspace wrapper reporting its own `cd` failure.
+     Blaming the consumer for any of them silences the outage notification and skips the fallback
+     exactly when the machine is broken. */
+  it.each([
+    [255, "setup"],
+    [255, "ensure"],
+    [127, "setup"],
+    [127, "ensure"],
+    [137, "setup"],
+    [137, "ensure"],
+    [125, "setup"],
+    [125, "ensure"],
+  ] as const)("keeps exit %d from a %s command a remote failure", async (exitCode, site) => {
+    let runtime: FakeRuntime;
+    if (site === "setup") {
+      runtime = new FakeRuntime(undefined, "./scripts/ds-bootstrap.sh");
+      runtime.setupExitCode = exitCode;
+    } else {
+      runtime = new FakeRuntime(undefined, undefined, [exitCode]);
+    }
+
+    const caught = await ensureDependencySetup(runtime, input).catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(DependencyCommandError);
+    expect((caught as Error).message).toContain(String(exitCode));
+  });
+
+  /* The upper bound is a range, not a list: 124 must stay the consumer's own failure. */
+  it("still blames the consumer for the highest shell-returnable code", async () => {
+    const runtime = new FakeRuntime(undefined, "./scripts/ds-bootstrap.sh");
+    runtime.setupExitCode = 124;
+
+    await expect(ensureDependencySetup(runtime, input)).rejects.toMatchObject({
+      name: "DependencyCommandError",
+      exitCode: 124,
+    });
+  });
+
+  /* No exit code was ever observed, so the transport dying is not the consumer's command failing. */
+  it("keeps a transport failure during ensure a remote failure", async () => {
+    const runtime = new FakeRuntime({ fingerprint: input.fingerprint, environment });
+    runtime.ensureThrows = new Error("ssh: connection closed");
+
+    const caught = await ensureDependencySetup(runtime, input).catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(DependencyCommandError);
+    expect((caught as Error).message).toContain("dependency ensure node failed");
   });
 
   it("preserves legacy fingerprint-only behavior when no ensure command is declared", async () => {

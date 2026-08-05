@@ -92,6 +92,17 @@ describe("workspace lock contention", () => {
     expect(runtime.calls).toEqual(["prepare", "prepare"]);
   });
 });
+describe("consumer setup failure", () => {
+  it("fails closed instead of rerunning the setup script that already failed identically", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [failed("consumer-setup", false)];
+
+    await expect(runProfile(runtime, { mode: "auto", fallback: "local" }, ["./verify"])).resolves.toBe(
+      INFRASTRUCTURE_EXIT_CODE,
+    );
+    expect(runtime.calls).toEqual(["prepare"]);
+  });
+});
 const profile = { mode: "auto" as const, fallback: "local" as const };
 
 describe("run profile selection", () => {

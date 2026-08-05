@@ -65,6 +65,7 @@ condition.
 | `remote-shell`           | `ssh <remote> printf remote-shell-ok`                                                                            |
 | `capacity`               | `ssh <remote> df -Pk <workspace>`                                                                                |
 | `bootstrap`              | `ssh <remote> test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm`                                      |
+| `consumer-setup`         | `ssh <remote> sh -c 'cd <workspace> && ./scripts/ds-bootstrap.sh'`                                               |
 | `validation`             | `remote-runner validate <profile>`                                                                               |
 | `lock`                   | `ls -ld <lock-root>`                                                                                             |
 | `sync`                   | `mutagen sync list <session>`                                                                                    |
@@ -76,11 +77,32 @@ condition.
 | `timeout`                | `ssh -o ConnectTimeout=2 <remote> true`                                                                          |
 | `unknown`                | `remote-runner status <profile>`                                                                                 |
 
-`lock` and `validation` never raise an outage notification: neither says the remote is unreachable.
+`lock`, `validation` and `consumer-setup` never raise an outage notification: none says the remote is
+unreachable. `consumer-setup` is one of the profile's own `bootstrap.setup` / `bootstrap.ensure`
+commands: the remote ran it and it exited non-zero, which a local fallback would reproduce exactly,
+so the run exits `75` without one. The `detail=` on that line names the failing script or command and
+its exit code (`dependency setup ./scripts/ds-bootstrap.sh failed with exit code 3`); rerun that one
+command in the consumer repository and fix it there — the remote is fine. The command's own output is
+not forwarded, only the exit code.
+
+Only exit codes `1`–`124` enter this class. `255` is ssh's own failure code; `127` and `128+N` are
+what the local process layer reports when the ssh client fails to spawn or is signal-killed; `125` is
+reserved for the remote workspace wrapper's own `cd` failure; `126`/`127` are ambiguous between a
+broken remote shell and a consumer script that is missing or not executable. All of them stay
+`bootstrap`, keep the outage notification and keep the fallback. A declared `bootstrap.artifact` that
+is still missing after setup is also `bootstrap`, not `consumer-setup`: the local checkout can have
+the file while the remote workspace or the sync is damaged.
+
+For the same reason, `255` from the ssh client AFTER the workload started is reported as exit `75`
+with `remote-runner: ssh connection dropped mid-run; the workload result is unknown`, never as the
+workload's own exit code. Rerun it: the workload may have completed, failed, or been killed
+mid-flight, and the run cannot tell which. The ceiling is that a workload genuinely exiting `255` is
+read the same way, because the stream protocol carries no exit marker of its own.
+
 A `lock` means another run of the same workspace — usually a queued prewarm — is already holding it.
 The runner waits for it, printing `another run holds this workspace; waiting for it to finish`, and
-offers the attempt again. A `lock` is the one preparation failure that never falls back to a local
-run: running the workload locally while another run of the same workspace is doing it is the
+offers the attempt again. `lock` and `consumer-setup` are the preparation failures that never fall
+back to a local run: running the workload locally while another run of the same workspace is doing it is the
 duplicate the wait exists to prevent, so exhausted contention exits `75` instead. Diagnose the
 holder with the index command before rerunning.
 

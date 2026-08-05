@@ -7,6 +7,10 @@ export const INFRASTRUCTURE_EXIT_CODE = 75;
 export const WORKLOAD_COMMAND_REASON = "workload-command";
 const WORKLOAD_COMMAND_EXIT_CODE = 127;
 const LOCK_REASON = "lock";
+/* The consumer's own setup or ensure command exiting non-zero on the remote is the caller's error
+   too: it fails identically in a local run, so it neither spends a fallback nor claims the remote
+   is unavailable. */
+const CONSUMER_SETUP_REASON = "consumer-setup";
 const USAGE_EXIT_CODE = 64;
 const MAX_PREPARATION_ATTEMPTS = 2;
 
@@ -72,8 +76,9 @@ export async function runProfile(
     /* A lock failure means another run of THIS workspace is already doing the work. Running it
        again locally is precisely the duplicate the wait exists to prevent, so contention fails
        closed instead of falling back. */
-    const contended = prepared?.ok === false && prepared.reason === LOCK_REASON;
-    return mayFallback(mode, profile) && !contended ? runLocal(runtime, command) : INFRASTRUCTURE_EXIT_CODE;
+    const localIsPointless =
+      prepared?.ok === false && (prepared.reason === LOCK_REASON || prepared.reason === CONSUMER_SETUP_REASON);
+    return mayFallback(mode, profile) && !localIsPointless ? runLocal(runtime, command) : INFRASTRUCTURE_EXIT_CODE;
   }
 
   let childStarted = false;

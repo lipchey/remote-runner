@@ -43,6 +43,7 @@ const REASONS = new Set([
   "remote-shell",
   "capacity",
   "bootstrap",
+  "consumer-setup",
   "validation",
   "lock",
   "sync",
@@ -58,9 +59,10 @@ export function isNotificationReason(value: string): boolean {
   return REASONS.has(value);
 }
 
-/* A busy lock is another local run holding this workspace, and a validation failure is the
-   operator's own manifest — neither says the remote is down, so neither may raise an outage. */
-const LOCAL_REASONS = new Set(["lock", "validation"]);
+/* A busy lock is another local run holding this workspace, a validation failure is the operator's
+   own manifest, and a consumer-setup failure is their own setup script exiting non-zero — none of
+   them says the remote is down, so none may raise an outage. */
+const LOCAL_REASONS = new Set(["lock", "validation", "consumer-setup"]);
 
 export function isOutageReason(value: string): boolean {
   return REASONS.has(value) && !LOCAL_REASONS.has(value);

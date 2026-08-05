@@ -17,6 +17,7 @@ import { dirname, join, posix } from "node:path";
 import process from "node:process";
 
 import {
+  DependencyCommandError,
   ensureDependencySetup,
   packageManagerFromPackageJson,
   type HealthySetupState,
@@ -32,7 +33,7 @@ import { acquireProfileLock, LockTimeoutError } from "../runtime/lock.js";
 import { worktreeIdentity } from "../runtime/identity.js";
 import { PreparationError } from "../run/prepare.js";
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
-import { WORKLOAD_COMMAND_REASON } from "../run/run-profile.js";
+import { INFRASTRUCTURE_EXIT_CODE, WORKLOAD_COMMAND_REASON } from "../run/run-profile.js";
 import type { RemoteExecutionResult } from "../run/run-profile.js";
 import { isNotificationReason, isOutageReason } from "../notifications/outage.js";
 import { encodeSecretFrame } from "../secrets/frame.js";
@@ -196,7 +197,11 @@ export function remoteWorkspaceCommandArguments(
   return [
     "sh",
     "-ceu",
-    'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
+    /* Under -e a failing `cd` (workspace gone, permissions) exits with cd's own status — 1 under
+       bash-as-/bin/sh, 2 under dash — which reads as the consumer's command failing and withholds
+       the fallback. 125 is the conventional "the wrapper itself failed" code (env(1), timeout(1))
+       and sits outside the range dependencies.ts attributes to the consumer. */
+    'cd -- "$1" || exit 125; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
     "remote-runner-workspace-command",
     workspace,
     pathEnvironment,
@@ -258,6 +263,7 @@ const CHILD_MARKER = new TextEncoder().encode("RR_CHILD_STARTED\n");
    workload command itself cannot be executed. Only the launcher emits it pre-marker, so a broken
    remote shell (126/127) still reads as an outage. */
 const WORKLOAD_SPAWN_EXIT_CODE = 69;
+const SSH_FAILURE_EXIT_CODE = 255;
 
 function decode(contents: Uint8Array, label: string): string {
   try {
@@ -835,7 +841,15 @@ export class NodeProfileServices implements ProfileExecutionServices {
         artifacts: this.profile.bootstrap.artifacts,
         ensure: this.profile.bootstrap.ensure,
       },
-    );
+    ).catch((caught: unknown) => {
+      /* The consumer's own setup command ran on the remote and exited non-zero. Reported as
+         `bootstrap` it claimed the workstation was down and bought a local fallback run that fails
+         the same way; its own reason raises no outage and stays remote-only. */
+      if (caught instanceof DependencyCommandError) {
+        throw new PreparationError("consumer-setup", false, { cause: caught });
+      }
+      throw caught;
+    });
   }
 
   async collectSecrets(): Promise<Readonly<Record<string, string>>> {
@@ -918,6 +932,17 @@ export class NodeProfileServices implements ProfileExecutionServices {
         "remote-runner: workspace retention cleanup failed; workload exit preserved\n",
       );
       (this.options.stderr ?? ((chunk: Uint8Array) => process.stderr.write(chunk)))(warning);
+    }
+    /* `result.exitCode` is the ssh CLIENT's, and ssh reports its own failures as 255. After the
+       child marker that means the connection died mid-run: the workload may have done arbitrary
+       work and its real result is unknown, so presenting 255 as the workload's exit is a lie the
+       consumer's CI would read as a verdict. The launcher never exits 255 of its own (64, 69, 70,
+       or the workload's code), so the only ambiguity left is a workload that genuinely exits 255 —
+       it is read as a dropped connection until the stream protocol carries an exit marker emitted
+       by the launcher. No fallback either: the workload already started remotely. */
+    if (result.exitCode === SSH_FAILURE_EXIT_CODE) {
+      this.write("remote-runner: ssh connection dropped mid-run; the workload result is unknown\n");
+      return { kind: "completed", exitCode: INFRASTRUCTURE_EXIT_CODE };
     }
     return { kind: "completed", exitCode: result.exitCode };
   }
