@@ -43,16 +43,19 @@ class FakeServices implements ProfileExecutionServices {
     this.calls.push("secrets");
     return { SECRET: "secret-canary" };
   }
+  throwAt?: "before-marker" | "after-marker";
   async startRemote(
     _command: readonly string[],
     _secrets: Readonly<Record<string, string>>,
     marker: () => Promise<void>,
   ) {
     this.calls.push("remote");
+    if (this.throwAt === "before-marker") throw new Error("controller failed before the child started");
     if (this.notStartedReason !== undefined) {
       return { kind: "not-started" as const, reason: this.notStartedReason };
     }
     await marker();
+    if (this.throwAt === "after-marker") throw new Error("stream writer failed mid-workload");
     return { kind: "completed" as const, exitCode: this.remoteExit };
   }
   async runLocal() {
@@ -148,6 +151,72 @@ describe("profile runtime composition", () => {
       "fallback:child-start",
       "local",
     ]);
+  });
+
+  /* The throwing half of the same outcome. Before this it returned 75 having established no reason
+     at all, so nothing reached stderr, the runner log or the outage channel. */
+  it("announces an unavailable remote before falling back when the controller throws pre-marker", async () => {
+    const services = new FakeServices();
+    services.throwAt = "before-marker";
+
+    const code = await runProfile(createProfileRuntime(services), profile, ["./verify"]);
+
+    expect(code).toBe(17);
+    expect(services.calls).toEqual([
+      "validate",
+      "lock",
+      "probe",
+      "pause",
+      "workspace",
+      "flush",
+      "bootstrap",
+      "secrets",
+      "remote",
+      "unavailable:child-start",
+      "release",
+      "fallback:child-start",
+      "local",
+    ]);
+  });
+
+  it("announces the give-up without a local run when the controller throws pre-marker on fallback=fail", async () => {
+    const services = new FakeServices();
+    services.throwAt = "before-marker";
+
+    const code = await runProfile(createProfileRuntime(services), { mode: "auto", fallback: "fail" }, ["./verify"]);
+
+    expect(code).toBe(INFRASTRUCTURE_EXIT_CODE);
+    expect(services.calls).toContain("unavailable:child-start");
+    expect(services.calls).toContain("outage:child-start");
+    expect(services.calls).not.toContain("local");
+  });
+
+  /* A writer that threw killed the LOCAL ssh process; the workload is already running remotely and
+     its result is unknown. So: no local rerun, no claim that the remote went down, but the operator
+     and the runner log still learn the run gave up. */
+  it("reports an unknown outcome without an outage or a rerun when the throw follows the marker", async () => {
+    const services = new FakeServices();
+    services.throwAt = "after-marker";
+
+    const code = await runProfile(createProfileRuntime(services), profile, ["./verify"]);
+
+    expect(code).toBe(INFRASTRUCTURE_EXIT_CODE);
+    expect(services.calls).toContain("unavailable:unknown");
+    expect(services.calls.some((call) => call.startsWith("outage:"))).toBe(false);
+    expect(services.calls).not.toContain("local");
+    expect(services.calls).not.toContain("unavailable:child-start");
+  });
+
+  /* The reason belongs to the site that knows what failed: an unencodable secret frame is the
+     secrets step failing, not a child that failed to start. */
+  it("keeps the reason a not-started result carries instead of relabelling it child-start", async () => {
+    const services = new FakeServices();
+    services.notStartedReason = "secrets";
+
+    await runProfile(createProfileRuntime(services), profile, ["./verify"]);
+
+    expect(services.calls).toContain("unavailable:secrets");
+    expect(services.calls).toContain("fallback:secrets");
   });
 
   it("neither notifies nor falls back when the workload command cannot be executed", async () => {
@@ -273,13 +342,25 @@ describe("profile runtime composition", () => {
 
   it("records the outage once when the remote child never starts on a fail-closed profile", async () => {
     const services = new FakeServices();
-    services.notStartedReason = "spawn";
+    services.notStartedReason = "child-start";
 
     const code = await runProfile(createProfileRuntime(services), { mode: "auto", fallback: "fail" }, ["./verify"]);
 
     expect(code).toBe(INFRASTRUCTURE_EXIT_CODE);
     expect(services.calls.filter((call) => call.startsWith("outage:"))).toEqual(["outage:child-start"]);
     expect(services.calls).not.toContain("local");
+  });
+
+  /* Passing the port's reason through means an implementation outside the shipped one can put an
+     unrecognised string on the channel, so it degrades to a known code rather than being asserted
+     as a specific diagnosis. The give-up is still announced — only the word is withheld. */
+  it("degrades an unrecognised not-started reason instead of asserting child-start", async () => {
+    const services = new FakeServices();
+    services.notStartedReason = "spawn";
+
+    await runProfile(createProfileRuntime(services), { mode: "auto", fallback: "fail" }, ["./verify"]);
+
+    expect(services.calls.filter((call) => call.startsWith("outage:"))).toEqual(["outage:unknown"]);
   });
 
   /* A failure the second attempt survives means the run reached the remote, so there is no outage to

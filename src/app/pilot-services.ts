@@ -36,7 +36,7 @@ import { assertSafeRepositoryPath } from "../runtime/paths.js";
 import { INFRASTRUCTURE_EXIT_CODE, WORKLOAD_COMMAND_REASON } from "../run/run-profile.js";
 import type { RemoteExecutionResult } from "../run/run-profile.js";
 import { isOutageReason, stableReason } from "../notifications/outage.js";
-import { encodeSecretFrame } from "../secrets/frame.js";
+import { encodeSecretFrame, type SecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
 import { classifySshFailure } from "../ssh/probe.js";
 import {
@@ -902,7 +902,16 @@ export class NodeProfileServices implements ProfileExecutionServices {
       "/usr/bin",
       "/bin",
     ].join(":");
-    const frame = encodeSecretFrame(secrets, this.profile.secrets.allow);
+    let frame: SecretFrame;
+    try {
+      frame = encodeSecretFrame(secrets, this.profile.secrets.allow);
+    } catch {
+      /* Collection already validated every name and each individual value (secrets/provider.ts),
+         so what still fails here is chiefly the aggregate frame limit no single-value check sees.
+         That is the same preparation step failing, not a child that failed to start, so it carries
+         the reason the collection half already uses. */
+      return { kind: "not-started", reason: "secrets" };
+    }
     const result = await this.streamProcess({
       command: "ssh",
       args: sshArguments(
@@ -941,10 +950,10 @@ export class NodeProfileServices implements ProfileExecutionServices {
       await this.touchActivity();
       await this.pruneRetention();
     } catch {
-      const warning = new TextEncoder().encode(
-        "remote-runner: workspace retention cleanup failed; workload exit preserved\n",
-      );
-      (this.options.stderr ?? ((chunk: Uint8Array) => process.stderr.write(chunk)))(warning);
+      /* Through `write`, because this line runs AFTER the marker: an inline writer that throws here
+         escapes startRemote, and the run gives up with exit 75 — losing the very workload exit this
+         message promises to preserve. */
+      this.write("remote-runner: workspace retention cleanup failed; workload exit preserved\n");
     }
     /* `result.exitCode` is the ssh CLIENT's, and ssh reports its own failures as 255. After the
        child marker that means the connection died mid-run: the workload may have done arbitrary
@@ -1030,12 +1039,19 @@ export class NodeProfileServices implements ProfileExecutionServices {
     this.options.onUnavailable?.(reason, detail);
   }
 
+  /* Every caller prints the operator's line BEFORE the durable half of the same report — the
+     runner-log callback in reportUnavailable, recordOutage in recordFallback. A stderr writer that
+     throws must not take that stored fact down with it: the console line is the losable half. */
   private write(text: string): void {
-    (
-      this.options.stderr ??
-      ((chunk) => {
-        process.stderr.write(chunk);
-      })
-    )(new TextEncoder().encode(text));
+    try {
+      (
+        this.options.stderr ??
+        ((chunk) => {
+          process.stderr.write(chunk);
+        })
+      )(new TextEncoder().encode(text));
+    } catch {
+      /* there is nowhere left to report a failing report */
+    }
   }
 }

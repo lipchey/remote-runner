@@ -188,10 +188,16 @@ chat ID. Values remain local.
 A run that gives up on a reported preparation or child-start failure sends one alert, whether or not
 it has a local fallback to take — the alert belongs to the reason, not to the fallback. Reasons that
 name the caller rather than the remote (`lock`, `validation`, `consumer-setup`) send none, and
-neither does a failure a later preparation attempt survives. A give-up with no reported reason
-behind it — a remote that completes without ever starting the child — exits `75` silently, as it
-always has. Repeats while an outage is open remain loud in the terminal without spamming. Failed
-delivery is retried later. The first remote child after an outage sends one recovery message
+neither does a failure a later preparation attempt survives. A give-up that returns its reason is
+announced under that reason — including a secret frame too large to encode, which reports
+`secrets`. A controller that THROWS before any child starts is announced the same way but always
+under `child-start`: unlike the returning half, a throw carries no reason of its own. A throw AFTER
+the child started reaches the operator and the run log as an unknown outcome with no alert and no
+local rerun: the workload is already running remotely, and a stream writer that died says nothing
+about the remote being down. What still exits `75` silently is a remote reported as completed
+without ever starting the child — a result the shipped services cannot produce, guarded against a
+port that does. Repeats while an outage is open remain loud in the terminal without spamming.
+Failed delivery is retried later. The first remote child after an outage sends one recovery message
 regardless of its eventual workload verdict.
 
 Messages contain only consumer/profile labels, remote label, stable reason, timestamp, and

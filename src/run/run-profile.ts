@@ -11,6 +11,14 @@ const LOCK_REASON = "lock";
    too: it fails identically in a local run, so it neither spends a fallback nor claims the remote
    is unavailable. */
 const CONSUMER_SETUP_REASON = "consumer-setup";
+/* Reasons whose local rerun cannot do anything the remote attempt did not already do: a busy lock
+   means another run of THIS workspace is doing the work, and a consumer setup command that exited
+   non-zero exits the same way locally. Exported so the invariant against `LOCAL_REASONS` in
+   notifications/outage.ts is CHECKED rather than kept by hand: every reason here must also be one
+   that raises no outage, or it starts paging the operator about a remote that is fine. Containment
+   only — `LOCAL_REASONS` answers a different question ("does this say the remote is down") and
+   holds `validation` on purpose, which is no reason to skip a local run. */
+export const LOCAL_RERUN_POINTLESS_REASONS: ReadonlySet<string> = new Set([LOCK_REASON, CONSUMER_SETUP_REASON]);
 const USAGE_EXIT_CODE = 64;
 const MAX_PREPARATION_ATTEMPTS = 2;
 
@@ -86,13 +94,7 @@ export async function runProfile(
     if (prepared.ok || !prepared.retryable) break;
   }
   if (prepared === undefined || !prepared.ok) {
-    /* A lock failure means another run of THIS workspace is already doing the work. Running it
-       again locally is precisely the duplicate the wait exists to prevent, so contention fails
-       closed instead of falling back. These reasons are also kept off the outage channel, but by
-       `LOCAL_REASONS` in notifications/outage.ts — this list decides the local run only, so a
-       reason added here must be added there too or it starts paging the operator. */
-    const localIsPointless =
-      prepared?.ok === false && (prepared.reason === LOCK_REASON || prepared.reason === CONSUMER_SETUP_REASON);
+    const localIsPointless = prepared?.ok === false && LOCAL_RERUN_POINTLESS_REASONS.has(prepared.reason);
     return mayFallback(mode, profile) && !localIsPointless ? runLocal(runtime, command) : failClosed(runtime);
   }
 

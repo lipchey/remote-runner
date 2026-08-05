@@ -105,8 +105,13 @@ no local run, and the notification is raised at the point the run gives up rathe
 fallback: those runs alert too, then exit `75` with the same `run-unavailable` record in the runner
 log. A failure the second preparation attempt survives is not an outage on any profile — the run
 reached the remote, so only the stderr line and the log record mention it. The alert follows the
-reported reason, so the reasons listed above as the caller's own error stay off the channel, and a
-give-up with no reported reason behind it exits `75` silently.
+reported reason, so the reasons listed above as the caller's own error stay off the channel. A
+give-up that has a reason of its own alerts under it — `secrets`, when the collected values cannot
+be encoded into one frame. A controller that throws before the child starts has none, and alerts
+under `child-start`. A throw after the child started reports `unknown` with no alert and no local
+rerun: the workload is already running remotely, so its result is unknown and rerunning it would
+repeat side effects. What still exits `75` silently is a remote reported as completed without ever
+starting the child.
 
 For the same reason, `255` from the ssh client AFTER the workload started is reported as exit `75`
 with `remote-runner: ssh connection dropped mid-run; the workload result is unknown`, never as the
