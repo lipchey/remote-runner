@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isNotificationReason,
   isOutageReason,
   recordFallback,
   recordRemoteChildStarted,
@@ -12,7 +13,10 @@ import {
 describe("outage reasons", () => {
   it("excludes the reasons that say nothing about the remote being reachable", () => {
     expect(["transport", "dns", "bootstrap", "child-start"].every(isOutageReason)).toBe(true);
-    expect(["lock", "validation"].some(isOutageReason)).toBe(false);
+    expect(["lock", "validation", "consumer-setup"].some(isOutageReason)).toBe(false);
+    /* A local reason must still be a KNOWN reason: an unknown one is remapped to `unknown`, which
+       is an outage reason, so dropping it from the closed set would restore the Telegram alert. */
+    expect(isNotificationReason("consumer-setup")).toBe(true);
     expect(isOutageReason("not-a-reason")).toBe(false);
   });
 });

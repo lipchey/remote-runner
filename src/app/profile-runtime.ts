@@ -20,16 +20,30 @@ function stableReason(reason: string): string {
 
 export function createProfileRuntime(services: ProfileExecutionServices): RunProfileRuntime {
   let pendingFallbackReason: string | undefined;
+  let reportedReason: string | undefined;
+  let reportedDetail: string | undefined;
   return {
     async prepareRemote() {
       const result = await prepareRemote(services);
-      if (result.ok) pendingFallbackReason = undefined;
-      else {
+      if (result.ok) {
+        pendingFallbackReason = undefined;
+        reportedReason = undefined;
+        reportedDetail = undefined;
+      } else {
         const reason = stableReason(result.reason);
         pendingFallbackReason = reason;
-        /* The notification channel keeps the stable reason; the detail reaches only the operator's
-           stderr and the runner log, which is what makes a wedged sync diagnosable. */
-        services.reportUnavailable(reason, result.detail);
+        /* The prepare loop retries a retryable failure, and one run reporting the same failure twice
+           reads as two outages to the operator and to the run log. Only a byte-identical repeat is
+           suppressed: the detail is what makes a wedged sync diagnosable, so the same reason
+           carrying a NEW detail ("daemon is not running" after "session is in conflict") is the
+           actionable line and still reports. */
+        if (reason !== reportedReason || result.detail !== reportedDetail) {
+          reportedReason = reason;
+          reportedDetail = result.detail;
+          /* The notification channel keeps the stable reason; the detail reaches only the operator's
+             stderr and the runner log. */
+          services.reportUnavailable(reason, result.detail);
+        }
       }
       return result;
     },

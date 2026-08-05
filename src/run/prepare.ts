@@ -24,6 +24,7 @@ export type PreparationReason =
   | "sync"
   | "workspace"
   | "bootstrap"
+  | "consumer-setup"
   | "secrets";
 
 export class RetryablePreparationError extends Error {

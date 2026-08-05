@@ -325,6 +325,37 @@ describe("pilot service boundaries", () => {
     expect(requests.some(({ args }) => JSON.stringify(args).includes("nodejs.org"))).toBe(false);
   });
 
+  it("classifies a consumer setup script that exits non-zero away from a remote outage", async () => {
+    const current = worktreeIdentity(process.cwd());
+    const processes = {
+      async run(request: BoundedProcessRequest) {
+        const argv = JSON.stringify(request.args);
+        return {
+          exitCode: argv.includes("ds-bootstrap.sh") ? 3 : 0,
+          stdout: new TextEncoder().encode(argv.includes("uname") ? "x86_64\n" : ""),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+        };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const services = new NodeProfileServices(ensureProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array([1]),
+      processes,
+    });
+    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
+
+    await expect(services.bootstrap()).rejects.toMatchObject({
+      name: "PreparationError",
+      reason: "consumer-setup",
+      retryable: false,
+    });
+  });
+
   it("keeps a busy lock off the outage channel while still telling the operator", async () => {
     const lines: string[] = [];
     let recorded: string | undefined;
@@ -379,7 +410,7 @@ describe("pilot service boundaries", () => {
     expect(args).toEqual([
       "sh",
       "-ceu",
-      'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
+      'cd -- "$1" || exit 125; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
       "remote-runner-workspace-command",
       "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
       "/remote/node/bin:/remote/uv:/usr/bin:/bin",
@@ -399,7 +430,7 @@ describe("pilot service boundaries", () => {
     expect(args).toEqual([
       "sh",
       "-ceu",
-      'cd -- "$1"; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
+      'cd -- "$1" || exit 125; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
       "remote-runner-workspace-command",
       "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
       "/remote/node/bin:/remote/uv:/usr/bin:/bin",
@@ -677,6 +708,40 @@ describe("pilot service boundaries", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]!.byteLength).toBeLessThan(256);
     expect(new TextDecoder().decode(warnings[0])).not.toContain("secret-canary");
+  });
+
+  it("refuses to present ssh's own 255 as the workload's exit once the child has started", async () => {
+    const current = worktreeIdentity(process.cwd());
+    const lines: string[] = [];
+    const processes = {
+      async run() {
+        return { exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array(), outputTruncated: false };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const services = new NodeProfileServices(retainedDataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array([1]),
+      processes,
+      stderr: (chunk) => lines.push(new TextDecoder().decode(chunk)),
+      streamProcess: async (request) => {
+        await request.onMarker();
+        return { exitCode: 255, signal: null, markerSeen: true, spawned: true };
+      },
+    });
+    Object.assign(services, {
+      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current),
+      nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
+      uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
+    });
+
+    const result = await services.startRemote(["./scripts/verify"], {}, async () => undefined);
+
+    expect(result).toEqual({ kind: "completed", exitCode: 75 });
+    expect(lines.join("")).toContain("connection dropped mid-run");
   });
 
   it.each([
