@@ -44,7 +44,7 @@ class FakeRuntime implements DependencySetupRuntime {
   }
 }
 
-const environment = { node: "26.5.0-linux-x64", packageManager: "pnpm@11.9.0", uv: "0.11.32", gitleaks: "8.30.1" };
+const environment = { node: "26.5.0-linux-x64", packageManager: "pnpm@11.9.0", uv: "0.11.32" };
 const input = {
   fingerprint: `sha256:${"a".repeat(64)}`,
   environment,
