@@ -15,6 +15,14 @@ import {
 
 const roots: string[] = [];
 
+function keyOf(material: string): string {
+  return Buffer.from(new TextEncoder().encode(material)).toString("base64");
+}
+
+function pinOf(material: string): string {
+  return `SHA256:${createHash("sha256").update(new TextEncoder().encode(material)).digest("base64").replace(/=+$/u, "")}`;
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -60,13 +68,28 @@ describe("managed Mutagen SSH transport", () => {
   });
 
   it("merges verified host lines without dropping another managed target", () => {
-    const existing = "alpha ssh-ed25519 AAAA\n";
-    const added = "beta ssh-ed25519 BBBB\n";
+    const existing = `alpha ssh-ed25519 ${keyOf("alpha-key")}\n`;
+    const added = `beta ssh-ed25519 ${keyOf("beta-key")}\n`;
 
     expect(mergeManagedKnownHosts(existing, added)).toBe(existing + added);
     expect(mergeManagedKnownHosts(existing + added, added)).toBe(existing + added);
-    expect(managedKnownHostsContains(existing + added, "alpha")).toBe(true);
-    expect(managedKnownHostsContains(existing + added, "gamma")).toBe(false);
+    expect(managedKnownHostsContains(existing + added, "alpha", pinOf("alpha-key"))).toBe(true);
+    expect(managedKnownHostsContains(existing + added, "gamma", pinOf("alpha-key"))).toBe(false);
+  });
+
+  it("treats a host whose listed key is not the pinned one as absent", () => {
+    const contents = `alpha ssh-ed25519 ${keyOf("superseded-key")}\n`;
+
+    expect(managedKnownHostsContains(contents, "admin@alpha", pinOf("superseded-key"))).toBe(true);
+    expect(managedKnownHostsContains(contents, "admin@alpha", pinOf("replacement-key"))).toBe(false);
+  });
+
+  /* Every version before the pin check merged the new record beside the old one, so this two-record
+     shape is what a machine that has already re-pinned once has on disk. */
+  it("treats a host still carrying a superseded record beside the pinned one as absent", () => {
+    const contents = `alpha ssh-ed25519 ${keyOf("superseded-key")}\nalpha ssh-ed25519 ${keyOf("current-key")}\n`;
+
+    expect(managedKnownHostsContains(contents, "alpha", pinOf("current-key"))).toBe(false);
   });
 
   it("scopes the documented Mutagen SSH override to the managed wrapper directory", () => {
@@ -124,5 +147,71 @@ describe("managed Mutagen SSH transport", () => {
     expect(scans).toBe(1);
     expect(await readFile(knownHostsPath, "utf8")).toBe(`alpha ssh-ed25519 AAAA\nbeta ssh-ed25519 ${encoded}\n`);
     expect((await stat(knownHostsPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("re-enrolls a re-pinned host and evicts the key it superseded", async () => {
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-managed-repin-"));
+    roots.push(home);
+    const knownHostsPath = join(home, ".local/state/remote-runner/known_hosts/managed");
+    await mkdir(join(home, ".local/state/remote-runner/known_hosts"), { recursive: true });
+    await writeFile(
+      knownHostsPath,
+      `alpha ssh-ed25519 ${keyOf("alpha-key")}\nbeta ssh-ed25519 ${keyOf("superseded-key")}\n`,
+      { mode: 0o600 },
+    );
+
+    await ensureManagedKnownHost(
+      {
+        async run() {
+          return {
+            exitCode: 0,
+            stdout: new TextEncoder().encode(`beta ssh-ed25519 ${keyOf("replacement-key")}\n`),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+          };
+        },
+      },
+      {
+        target: "admin@beta",
+        trustedFingerprint: pinOf("replacement-key"),
+        knownHostsPath,
+        connectTimeoutSeconds: 4,
+      },
+    );
+
+    expect(await readFile(knownHostsPath, "utf8")).toBe(
+      `alpha ssh-ed25519 ${keyOf("alpha-key")}\nbeta ssh-ed25519 ${keyOf("replacement-key")}\n`,
+    );
+  });
+
+  it("evicts only the re-pinned alias from a record that also serves another host", async () => {
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-managed-alias-"));
+    roots.push(home);
+    const knownHostsPath = join(home, ".local/state/remote-runner/known_hosts/managed");
+    await mkdir(join(home, ".local/state/remote-runner/known_hosts"), { recursive: true });
+    await writeFile(knownHostsPath, `alpha,beta ssh-ed25519 ${keyOf("shared-key")}\n`, { mode: 0o600 });
+
+    await ensureManagedKnownHost(
+      {
+        async run() {
+          return {
+            exitCode: 0,
+            stdout: new TextEncoder().encode(`beta ssh-ed25519 ${keyOf("beta-key")}\n`),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+          };
+        },
+      },
+      {
+        target: "admin@beta",
+        trustedFingerprint: pinOf("beta-key"),
+        knownHostsPath,
+        connectTimeoutSeconds: 4,
+      },
+    );
+
+    expect(await readFile(knownHostsPath, "utf8")).toBe(
+      `alpha ssh-ed25519 ${keyOf("shared-key")}\nbeta ssh-ed25519 ${keyOf("beta-key")}\n`,
+    );
   });
 });

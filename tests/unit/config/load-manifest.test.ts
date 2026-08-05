@@ -94,6 +94,24 @@ describe("loadManifestText", () => {
     });
   });
 
+  it("excludes the dotenv secret source from the sync even when the consumer forgot to", () => {
+    const manifest = loadManifestText(
+      validManifest.replace('provider: ["node", "scripts/remote-runner-env.mjs"]', "dotenv: config/local.env"),
+    );
+
+    expect(manifest.profiles[0]?.sync.ignores).toEqual(["node_modules", ".git", "config/local.env"]);
+    expect(loadManifestText(validManifest).profiles[0]?.sync.ignores).toEqual(["node_modules", ".git"]);
+  });
+
+  it("rejects a remote target carrying git transport syntax", () => {
+    for (const target of ['"ext::sh -c \\"touch /tmp/pwned\\""', '"-oProxyCommand=touch /tmp/pwned"', '"a b"']) {
+      expect(() => loadManifestText(validManifest.replace("target: admin@pop-os", `target: ${target}`))).toThrow(
+        /plain \[user@\]host/u,
+      );
+    }
+    expect(loadManifestText(validManifest).profiles[0]?.remote.target).toBe("admin@pop-os");
+  });
+
   it("requires exactly one secret source", () => {
     expect(() =>
       loadManifestText(

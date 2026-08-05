@@ -3,6 +3,7 @@ import { posix } from "node:path";
 import { parseDocument } from "yaml";
 
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
+import { SSH_TARGET } from "../ssh/client.js";
 import type { ManifestV1, Profile } from "./types.js";
 
 const PROFILE_ID = /^[a-z][a-z0-9-]*$/;
@@ -200,6 +201,13 @@ function parseProfile(value: unknown): Profile {
   }
 
   const remote = closed(source.remote, ["label", "target", "hostKeySha256"], "remote");
+  /* The target is interpolated into a git URL, where `ext::sh -c "…"` is a documented transport
+     that executes its argument locally. Only the two transports validated it, and neither is on
+     the doctor/status paths. */
+  const target = nonEmptyString(remote.target, "remote target");
+  if (!SSH_TARGET.test(target)) {
+    throw new Error("remote target must be a plain [user@]host");
+  }
   const hostKeySha256 = nonEmptyString(remote.hostKeySha256, "remote hostKeySha256");
   if (!/^SHA256:\S+$/.test(hostKeySha256)) {
     throw new Error("remote hostKeySha256 must be a trusted SHA256: fingerprint");
@@ -240,6 +248,7 @@ function parseProfile(value: unknown): Profile {
   if (hasProvider === hasDotenv) {
     throw new Error("secrets must declare exactly one of provider or dotenv");
   }
+  const dotenv = hasDotenv ? assertSafeRepositoryPath(nonEmptyString(secrets.dotenv, "secrets dotenv")) : undefined;
   const notifications = closed(source.notifications, ["policy"], "notifications");
   const benchmark = closed(source.benchmark, ["samples", "workloads"], "benchmark");
   if (!Array.isArray(benchmark.workloads) || benchmark.workloads.length === 0) {
@@ -269,7 +278,7 @@ function parseProfile(value: unknown): Profile {
     fallback: oneOf(source.fallback, ["local", "fail"], "profile fallback"),
     remote: {
       label: nonEmptyString(remote.label, "remote label"),
-      target: nonEmptyString(remote.target, "remote target"),
+      target,
       hostKeySha256,
     },
     workspace: {
@@ -285,7 +294,9 @@ function parseProfile(value: unknown): Profile {
     sync: {
       provider: literal(sync.provider, "mutagen", "sync provider"),
       mode: literal(sync.mode, "one-way-replica", "sync mode"),
-      ignores: safePaths(sync.ignores, "sync ignores"),
+      /* The dotenv file is a secret by definition; leaving its exclusion to the consumer's own
+         ignore list replicates it to the remote the day the two disagree. */
+      ignores: [...safePaths(sync.ignores, "sync ignores"), ...(dotenv === undefined ? [] : [dotenv])],
     },
     bootstrap: {
       node: literal(bootstrap.node, "local-exact", "bootstrap node"),
@@ -301,11 +312,7 @@ function parseProfile(value: unknown): Profile {
     },
     secrets: {
       allow: secretNames(secrets.allow),
-      ...(hasProvider
-        ? { provider: commandArray(secrets.provider, "secrets provider") }
-        : {
-            dotenv: assertSafeRepositoryPath(nonEmptyString(secrets.dotenv, "secrets dotenv")),
-          }),
+      ...(dotenv === undefined ? { provider: commandArray(secrets.provider, "secrets provider") } : { dotenv }),
     },
     notifications: {
       policy: literal(notifications.policy, "outage-recovery", "notification policy"),
