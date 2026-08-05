@@ -1,11 +1,16 @@
 import { posix } from "node:path";
 
 import { DiagnosableError, diagnosableMessage } from "../runtime/diagnostic.js";
+import { pathIdentity } from "../runtime/identity.js";
 import { SSH_TARGET, type BoundedProcessRequest, type BoundedProcessResult } from "../ssh/client.js";
 
 const CAPTURE_BYTES = 64 * 1024;
 const COMPONENT = /^[a-z][a-z0-9-]{0,62}$/u;
 const IDENTITY = /^[0-9a-f]{24}$/u;
+/* Mutagen's own session identifier shape (`sync_` plus base62, v0.18.1). Enforced because the sweep
+   passes it as a bare `<session>` argument: `sync terminate` also reads `-a` there, which terminates
+   EVERY session on the machine, so an identifier that is not this shape is not spendable as argv. */
+const SESSION_IDENTIFIER = /^sync_[A-Za-z0-9]{1,64}$/u;
 const LIST_TEMPLATE = "{{ json . }}";
 /* Diagnostics list sessions exactly as the run does, so a probe can never green on a listing the
    run would reject. */
@@ -67,6 +72,7 @@ interface ValidatedTermination {
 }
 
 interface SessionRecord {
+  readonly identifier: string;
   readonly name: string;
   readonly alpha: string;
   readonly beta: string;
@@ -116,13 +122,17 @@ export function mutagenSessionName(consumer: string, profile: string, identity: 
   return `remote-runner-${consumer}-${profile}-${identity}`;
 }
 
-function assertCanonicalAbsolutePath(value: string, label: string): void {
-  if (
+function isCanonicalAbsolutePath(value: string): boolean {
+  return !(
     /[\u0000-\u001f\u007f]/u.test(value) ||
     !posix.isAbsolute(value) ||
     posix.normalize(value) !== value ||
     value === "/"
-  ) {
+  );
+}
+
+function assertCanonicalAbsolutePath(value: string, label: string): void {
+  if (!isCanonicalAbsolutePath(value)) {
     throw new Error(`${label} must be a canonical absolute path`);
   }
 }
@@ -195,6 +205,7 @@ function parseListing(contents: Uint8Array): SessionRecord[] {
       throw new DiagnosableError("Mutagen session list returned malformed status");
     if (!item.paused && !text(item.status)) throw new DiagnosableError("active Mutagen session is missing status");
     return {
+      identifier: item.identifier,
       name: item.name,
       alpha,
       beta: betaValue,
@@ -338,6 +349,17 @@ export function inspectOwnedSession(listing: Uint8Array, expected: OwnedSessionE
   }
 }
 
+export interface AbandonedSessionSweep {
+  readonly consumer: string;
+  readonly profile: string;
+  readonly betaTarget: string;
+  readonly profileRoot: string;
+  /* Answers false ONLY for a root that is genuinely gone. Every other filesystem answer — permission
+     denied, an unreachable mount — must read as present: absence is what terminates a session, so an
+     unanswerable path has to keep it alive. */
+  alphaExists(root: string): Promise<boolean>;
+}
+
 function assertOwnedTerminationRecord(record: SessionRecord, expected: ValidatedTermination): void {
   assertCanonicalAbsolutePath(record.alpha, "Mutagen alpha root");
   if (record.beta !== expected.beta) throw new DiagnosableError("Mutagen session endpoint mismatch");
@@ -392,6 +414,67 @@ export class MutagenSyncLifecycle {
     if (!match) return;
     assertOwnedTerminationRecord(match, expected);
     await this.checked(["sync", "terminate", expected.name], "Mutagen session retention terminate");
+  }
+
+  /* One session exists per local worktree. Every other path that terminates one — retention, and the
+     drift and disconnect recoveries below — acts on the identity that is currently running, and none
+     of them ever asks whether a session's ALPHA is still on disk, so deleting a worktree leaks its
+     session for good (6 of 18 live sessions on the author's laptop, 2026-08-05). A completed remote
+     run cannot know a sibling identity's remote state, but it can see that the sibling's local root
+     is gone, so it sweeps its own namespace. */
+  async terminateAbandoned(sweep: AbandonedSessionSweep): Promise<void> {
+    const result = await this.run(MUTAGEN_LIST_ARGUMENTS, "Mutagen session list");
+    if (result.exitCode !== 0) throw new DiagnosableError("Mutagen session list failed");
+    const listing = parseListing(result.stdout);
+    /* A duplicated name means the evidence cannot be attributed: one of the twins may belong to a live
+       worktree. The run path refuses an ambiguous owned name outright; a sweep skips just that name,
+       leaving the rest of the namespace reapable. */
+    const ambiguous = new Set(
+      listing
+        .filter(({ name }, index) => listing.findIndex((other) => other.name === name) !== index)
+        .map(({ name }) => name),
+    );
+    let failures = 0;
+    for (const record of listing) {
+      const identity = record.name.slice(record.name.lastIndexOf("-") + 1);
+      if (
+        ambiguous.has(record.name) ||
+        !IDENTITY.test(identity) ||
+        record.name !== mutagenSessionName(sweep.consumer, sweep.profile, identity)
+      ) {
+        continue;
+      }
+      /* An owned NAME is not an owned session, and this branch terminates. The identity is the sha256
+         of the alpha root the creating run canonicalized (`worktreeIdentity`), and Mutagen echoes that
+         path back verbatim — checked against all 11 live sessions on this laptop, 2026-08-05 — so a
+         record whose own alpha does not derive its identity was never created by this runner for it,
+         whatever the name claims. Endpoint, mode and a probeable canonical alpha are checked for the
+         same reason: the sweep reconstructs the expectation instead of receiving it. */
+      if (
+        pathIdentity(record.alpha) !== identity ||
+        record.beta !== betaEndpoint(sweep.betaTarget, posix.join(sweep.profileRoot, identity)) ||
+        record.mode !== "one-way-replica" ||
+        !isCanonicalAbsolutePath(record.alpha) ||
+        !SESSION_IDENTIFIER.test(record.identifier)
+      ) {
+        continue;
+      }
+      if (await sweep.alphaExists(record.alpha)) continue;
+      try {
+        /* By identifier, never by name. A name is a slot: between this listing and this command another
+           run of the same profile can recreate the worktree at that path and create a live session
+           under the same name — the profile lock is released the moment the workload's child starts,
+           long before this sweep runs — and terminating by name would kill that new session on evidence
+           gathered about the old one. An identifier belongs to one session for its lifetime, so the
+           worst case becomes a command that matches nothing. */
+        await this.checked(["sync", "terminate", record.identifier], "Mutagen abandoned session terminate");
+      } catch {
+        /* One refusal — a session terminated by hand since the listing, a daemon that dropped it — must
+           not strand every later orphan until the next run; the count is reported after the sweep. */
+        failures += 1;
+      }
+    }
+    if (failures > 0) throw new Error(`${failures} abandoned Mutagen session terminations failed`);
   }
 
   private createArguments(session: ValidatedSession, paused: boolean): string[] {

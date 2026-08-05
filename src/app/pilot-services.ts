@@ -1,5 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  readlink,
+  realpath,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import process from "node:process";
 
@@ -197,6 +210,30 @@ export function remoteArtifactCheckArguments(
   artifact: string,
 ): readonly string[] {
   return remoteWorkspaceCommandArguments(workspace, pathEnvironment, ["test", "-f", artifact]);
+}
+
+/* The alpha-root probe for the abandoned-session sweep, where a `false` authorizes a termination, so
+   absence has to be positively established rather than merely unrefuted: nothing that could hold a
+   worktree is at the path, AND the directory that would contain it is readable. Every answer that
+   leaves the question open — an unreadable ancestor, an I/O error, a volume that is not mounted and
+   whose whole mount path is therefore missing — counts as present. The asymmetry is the point: a stale
+   session left alive costs one Mutagen entry until the next run, while killing a live one breaks the
+   sync under a running workload. */
+export async function localWorktreeExists(root: string): Promise<boolean> {
+  try {
+    /* A regular file where a worktree used to be holds no worktree, and Mutagen cannot sync it as one,
+       so it is treated exactly like a root that is gone. */
+    if ((await stat(root)).isDirectory()) return true;
+  } catch (caught) {
+    const code = (caught as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") return true;
+  }
+  try {
+    await access(dirname(root));
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 const CAPTURE_BYTES = 64 * 1024;
@@ -452,30 +489,51 @@ export class NodeProfileServices implements ProfileExecutionServices {
   }
 
   private async pruneRetention(): Promise<void> {
-    const policy = this.profile.workspace.retention;
-    if (policy === undefined) return;
     const paths = this.paths();
-    const setupStateRoot = posix.dirname(posix.dirname(paths.setupState));
-    const runtime = new RemoteWorkspaceRetentionRuntime(
-      this.retentionCommands(),
-      {
-        profileRoot: paths.profileRoot,
-        setupStateRoot,
-        mirror: posix.join(paths.generatedRoot, this.profile.consumer, ".mirror.git"),
-        privateRefPrefix: `refs/remote-runner/${this.profile.consumer}/${this.profile.id}`,
-      },
-      (identity) =>
-        this.mutagen.terminateOwned({
-          consumer: this.profile.consumer,
-          profile: this.profile.id,
-          identity,
-          betaTarget: this.profile.remote.target,
-          betaRoot: posix.join(paths.profileRoot, identity),
-        }),
-    );
-    await pruneRemoteWorkspaces(runtime, this.identity, policy, Date.now(), () =>
-      randomUUID().replaceAll("-", "").slice(0, 16),
-    );
+    const policy = this.profile.workspace.retention;
+    let retentionFailure: unknown;
+    if (policy !== undefined) {
+      const setupStateRoot = posix.dirname(posix.dirname(paths.setupState));
+      const runtime = new RemoteWorkspaceRetentionRuntime(
+        this.retentionCommands(),
+        {
+          profileRoot: paths.profileRoot,
+          setupStateRoot,
+          mirror: posix.join(paths.generatedRoot, this.profile.consumer, ".mirror.git"),
+          privateRefPrefix: `refs/remote-runner/${this.profile.consumer}/${this.profile.id}`,
+        },
+        (identity) =>
+          this.mutagen.terminateOwned({
+            consumer: this.profile.consumer,
+            profile: this.profile.id,
+            identity,
+            betaTarget: this.profile.remote.target,
+            betaRoot: posix.join(paths.profileRoot, identity),
+          }),
+      );
+      try {
+        await pruneRemoteWorkspaces(runtime, this.identity, policy, Date.now(), () =>
+          randomUUID().replaceAll("-", "").slice(0, 16),
+        );
+      } catch (caught) {
+        /* Held, not propagated: the two cleanups share nothing but this call site, so neither may be
+           the reason the other is skipped. Whichever failed still reaches the operator as the single
+           post-workload cleanup warning. */
+        retentionFailure = caught;
+      }
+    }
+    /* Last, and outside the policy check. Outside, because a leaked session is local state that no
+       retention policy governs, so a profile configuring none still has to stop accumulating them;
+       last, because a sweep that throws — a stopped daemon, a listing this runner refuses to read —
+       must not be what keeps the remote prune from reclaiming a checkout's worth of disk. */
+    await this.mutagen.terminateAbandoned({
+      consumer: this.profile.consumer,
+      profile: this.profile.id,
+      betaTarget: this.profile.remote.target,
+      profileRoot: paths.profileRoot,
+      alphaExists: localWorktreeExists,
+    });
+    if (retentionFailure !== undefined) throw retentionFailure;
   }
 
   async validate(): Promise<void> {
