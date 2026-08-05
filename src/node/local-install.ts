@@ -47,6 +47,27 @@ async function bootstrapLaunchAgent(
   }
 }
 
+/* `launchctl bootout` reports success once launchd ACCEPTS the request, not once the job is gone:
+   measured on darwin 24.6, the label still answers `launchctl print` more than four seconds after
+   rc=0 while the controller is torn down, and every `bootstrap` inside that window fails with
+   `5: Input/output error` — the same generic code an unusable plist produces. Retrying bootstrap
+   blind for the two seconds this settle budget used to cover therefore reported
+   `LaunchAgent bootstrap failed` on an install that had already swapped both artifacts, while the
+   next install — seeing an unloaded agent — silently succeeded. Wait for the domain to release the
+   label instead of guessing how long a teardown takes. */
+export const SETTLE_POLLS = 300;
+
+async function bootoutAndSettle(launch: LocalLaunchRuntime, settle: () => Promise<void>): Promise<void> {
+  await launch.bootout();
+  for (let poll = 1; poll <= SETTLE_POLLS; poll += 1) {
+    if (!(await launch.status()).loaded) return;
+    await settle();
+  }
+  /* The last settle is a wait like every other one, so the label has to be looked at after it too —
+     throwing straight out of the loop would report a stuck agent for a teardown that just finished. */
+  if ((await launch.status()).loaded) throw new Error("LaunchAgent is still loaded after bootout");
+}
+
 export interface LocalInstallResult {
   readonly appRoot: string;
   readonly appIdentity: string;
@@ -275,7 +296,7 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
   const launch = settledValue(written[2]);
   const settleLaunchd = options.settleLaunchd ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 100)));
   if (launch.loaded && (executableChanged || plistChanged)) {
-    await options.launch.bootout();
+    await bootoutAndSettle(options.launch, settleLaunchd);
     await bootstrapLaunchAgent(options.launch, plistPath, settleLaunchd);
   } else if (!launch.loaded) {
     await bootstrapLaunchAgent(options.launch, plistPath, settleLaunchd);

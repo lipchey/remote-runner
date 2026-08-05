@@ -84,6 +84,12 @@ run: running the workload locally while another run of the same workspace is doi
 duplicate the wait exists to prevent, so exhausted contention exits `75` instead. Diagnose the
 holder with the index command before rerunning.
 
+`workspace` and `secrets` also appear as `warn` carrying the detail `remote workspace is not
+provisioned`, and `doctor` exits `0` on them. A workspace is a cache, so a checkout that only ever
+dispatches runs from its worktrees never has one — and then neither its Git state nor a secret inside
+it is knowable. Read that pair as "nothing to inspect here", not as a plaintext `.env` sitting on the
+remote, which is what the `fail` they used to report looked like.
+
 A workload command that cannot be executed at all is not one of these reasons: the run exits `127`
 with `remote-runner launcher: child spawn failed`, without a local fallback or an outage
 notification. The usual cause is passing a shell line as the workload — `run <profile> -- 'a && b'`
