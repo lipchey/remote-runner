@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -48,12 +48,25 @@ class NodeLockFiles implements LockFileSystem {
   async symlink(target: string, path: string): Promise<void> {
     await symlink(target, path, "dir");
   }
+
+  async readlink(path: string): Promise<string> {
+    return readlink(path);
+  }
+
+  async readdir(path: string): Promise<readonly string[]> {
+    return readdir(path);
+  }
+
+  async modifiedAt(path: string): Promise<number> {
+    return (await lstat(path)).mtimeMs;
+  }
 }
 
 class MemoryLockFiles implements LockFileSystem {
   readonly directories = new Set<string>();
   readonly files = new Map<string, Uint8Array>();
   readonly links = new Map<string, string>();
+  readonly times = new Map<string, number>();
   readonly diagnostics: string[] = [];
   readonly renames: Array<{ readonly from: string; readonly to: string; readonly ownerToken?: string }> = [];
   beforeReadFile?: (path: string) => Promise<void>;
@@ -61,14 +74,40 @@ class MemoryLockFiles implements LockFileSystem {
   beforeRemove?: (path: string) => Promise<void>;
   beforeWriteFile?: (path: string) => Promise<void>;
   beforeRename?: (from: string, to: string) => Promise<void>;
+  beforeReadlink?: (path: string) => Promise<void>;
 
   async mkdir(path: string): Promise<void> {
     await this.beforeMkdir?.(path);
     if (this.exists(path)) throw fileError("EEXIST");
-    if (path.startsWith(`${lockPath}/`) && !this.exists(lockPath)) {
+    /* Resolving through the canonical name, not merely observing it, is what models a dangling
+       symlink: the link exists while the directory it names does not. */
+    if (path.startsWith(`${lockPath}/`) && !this.directories.has(this.resolve(lockPath))) {
       throw fileError("ENOENT");
     }
     this.directories.add(this.resolve(path));
+  }
+
+  async readlink(path: string): Promise<string> {
+    await this.beforeReadlink?.(path);
+    const target = this.links.get(path);
+    if (target === undefined) throw fileError("EINVAL");
+    return target;
+  }
+
+  async readdir(path: string): Promise<readonly string[]> {
+    const prefix = `${path}/`;
+    const names = new Set<string>();
+    for (const entry of [...this.directories, ...this.links.keys()]) {
+      if (!entry.startsWith(prefix)) continue;
+      const name = entry.slice(prefix.length);
+      if (!name.includes("/")) names.add(name);
+    }
+    return [...names];
+  }
+
+  async modifiedAt(path: string): Promise<number> {
+    if (!this.exists(path)) throw fileError("ENOENT");
+    return this.times.get(path) ?? 0;
   }
 
   async readFile(path: string): Promise<Uint8Array> {
@@ -516,5 +555,144 @@ describe("acquireProfileLock", () => {
     ).toEqual(["owner-token"]);
     expect(files.ownerToken(lockPath)).toBe("successor-token");
     await successorRelease();
+  });
+
+  it("repairs a canonical symlink left dangling instead of waiting out the budget", async () => {
+    const root = await mkdtemp(join(tmpdir(), "remote-runner-lock-dangling-"));
+    temporaryRoots.push(root);
+    const path = join(root, "profile.lock");
+    await symlink(`${path}.generation-vanished`, path, "dir");
+    const adapter = runtime(new NodeLockFiles(), { path, token: "repairing-owner" });
+
+    const release = await acquireProfileLock(adapter, "ariadne/identity", 500);
+
+    expect(adapter.sleeps).toEqual([]);
+    expect(JSON.parse(await readFile(join(path, "owner.json"), "utf8")).token).toBe("repairing-owner");
+    expect((await readdir(root)).some((name) => name.includes(".corrupt-"))).toBe(true);
+    await release();
+  });
+
+  it("never lets a repairer that decided while the link dangled displace the republished owner", async () => {
+    const files = new MemoryLockFiles();
+    files.links.set(lockPath, `${lockPath}.generation-vanished`);
+    const lateDecisionMade = deferred();
+    const finishLateDecision = deferred();
+    let observed = 0;
+    /* Block the repair the moment it has resolved the dangling link and before it acts on that
+       decision — the interval the whole race lives in. The sweep at the head of the same
+       acquisition readlinks first, hence the second observation, not the first. */
+    files.beforeReadlink = async (path) => {
+      if (path !== lockPath) return;
+      observed += 1;
+      if (observed !== 2) return;
+      lateDecisionMade.resolve();
+      await finishLateDecision.promise;
+    };
+
+    const lateRepair = acquireProfileLock(
+      runtime(files, { alive: [52], pid: 51, token: "late-repairer" }),
+      "ariadne/identity",
+      50,
+    );
+    await lateDecisionMade.promise;
+    const ownerRelease = await acquireProfileLock(
+      runtime(files, { pid: 52, token: "republished-owner" }),
+      "ariadne/identity",
+      500,
+    );
+    finishLateDecision.resolve();
+
+    await expect(lateRepair).rejects.toBeInstanceOf(LockTimeoutError);
+    expect(files.links.get(lockPath)).toBe(`${lockPath}.generation-republished-owner`);
+    expect(files.ownerToken(lockPath)).toBe("republished-owner");
+    await ownerRelease();
+  });
+
+  it("reaps abandoned artifacts and keeps every generation directory still in use", async () => {
+    const files = new MemoryLockFiles();
+    const now = 5 * 24 * 60 * 60 * 1000;
+    /* Each survivor is old enough to reap and protected by exactly one rule, so no rule can be
+       removed without a failure: the canonical link (its owner is dead), the owner's liveness (it
+       is not the canonical target), the retention window, and the artifact-name namespace. */
+    files.seed(`${lockPath}.generation-published`, { token: "published", pid: 7, acquiredAt: 0, leaseUntil: 10 });
+    files.links.set(lockPath, `${lockPath}.generation-published`);
+    files.seed(`${lockPath}.generation-running`, { token: "running", pid: 9, acquiredAt: 0, leaseUntil: 10 });
+    files.directories.add(`${lockPath}.generation-abandoned`);
+    files.links.set(`${lockPath}.stale-1-abandoned-0`, `${lockPath}.generation-abandoned`);
+    files.directories.add(`${lockPath}.generation-fresh`);
+    files.times.set(`${lockPath}.generation-fresh`, now);
+    files.directories.add(`${lockPath}.unrelated`);
+    files.directories.add(`${lockPath}.generation-`);
+
+    const release = await acquireProfileLock(runtime(files, { alive: [9], now }), "ariadne/identity", 50);
+
+    expect(files.exists(`${lockPath}.generation-abandoned`)).toBe(false);
+    expect(files.exists(`${lockPath}.stale-1-abandoned-0`)).toBe(false);
+    expect(files.exists(`${lockPath}.generation-published`)).toBe(true);
+    expect(files.exists(`${lockPath}.generation-running`)).toBe(true);
+    expect(files.exists(`${lockPath}.generation-fresh`)).toBe(true);
+    expect(files.exists(`${lockPath}.unrelated`)).toBe(true);
+    expect(files.exists(`${lockPath}.generation-`)).toBe(true);
+    await release();
+  });
+
+  it("keeps sweeping after an artifact refuses to be removed", async () => {
+    const files = new MemoryLockFiles();
+    const now = 5 * 24 * 60 * 60 * 1000;
+    files.directories.add(`${lockPath}.generation-stuck`);
+    files.directories.add(`${lockPath}.generation-removable`);
+    files.beforeRemove = async (path) => {
+      if (path === `${lockPath}.generation-stuck`) throw fileError("EACCES");
+    };
+
+    const release = await acquireProfileLock(runtime(files, { now }), "ariadne/identity", 50);
+
+    expect(files.exists(`${lockPath}.generation-stuck`)).toBe(true);
+    expect(files.exists(`${lockPath}.generation-removable`)).toBe(false);
+    await release();
+  });
+
+  it("refuses to sweep when the canonical link cannot be read", async () => {
+    const files = new MemoryLockFiles();
+    const now = 5 * 24 * 60 * 60 * 1000;
+    files.seed(`${lockPath}.generation-published`, { token: "published", pid: 7, acquiredAt: 0, leaseUntil: 10 });
+    files.links.set(lockPath, `${lockPath}.generation-published`);
+    files.directories.add(`${lockPath}.generation-abandoned`);
+    files.beforeReadlink = async (path) => {
+      if (path === lockPath) throw fileError("EACCES");
+    };
+
+    await expect(
+      acquireProfileLock(runtime(files, { alive: [7], now }), "ariadne/identity", 50),
+    ).rejects.toBeInstanceOf(LockTimeoutError);
+
+    /* Unreadable link means the sweep cannot tell which generation is live, so it removes nothing —
+       the alternative deletes a live owner's directory and hands the lock to a second process. */
+    expect(files.exists(`${lockPath}.generation-abandoned`)).toBe(true);
+    expect(files.exists(`${lockPath}.generation-published`)).toBe(true);
+  });
+
+  it("falls back to the budgeted wait when the generation directory keeps vanishing", async () => {
+    const files = new MemoryLockFiles();
+    files.links.set(lockPath, `${lockPath}.generation-vanishing`);
+    /* An external actor destroying the generation directory again on every guard attempt: repairing
+       costs no sleep, so an unbounded repair would spin at 100% CPU past the caller's budget. */
+    files.beforeMkdir = async (path) => {
+      if (path === `${lockPath}/.operation`) files.directories.delete(`${lockPath}.generation-vanishing`);
+    };
+    const adapter = runtime(files, { token: "spinner" });
+
+    await expect(acquireProfileLock(adapter, "ariadne/identity", 250)).rejects.toBeInstanceOf(LockTimeoutError);
+
+    expect(adapter.sleeps).toEqual([100, 100, 50]);
+  });
+
+  it("refuses to repair a canonical link pointing outside the lock root", async () => {
+    const files = new MemoryLockFiles();
+    files.links.set(lockPath, `${lockPath}.generation-../../escaped`);
+
+    await expect(acquireProfileLock(runtime(files), "ariadne/identity", 50)).rejects.toBeInstanceOf(LockTimeoutError);
+
+    expect(files.exists(`${lockPath}.generation-../../escaped`)).toBe(false);
   });
 });

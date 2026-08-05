@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import process from "node:process";
 
@@ -501,6 +501,11 @@ export class NodeProfileServices implements ProfileExecutionServices {
       symlink: async (target: string, path: string) => {
         await symlink(target, path);
       },
+      readlink: (path: string) => readlink(path),
+      readdir: (path: string) => readdir(path),
+      /* lstat, not stat: the age of a quarantined symlink is the age of the link itself, and its
+         target may not exist at all. */
+      modifiedAt: async (path: string) => (await lstat(path)).mtimeMs,
       rename: async (from: string, to: string) => {
         await rename(from, to);
       },
