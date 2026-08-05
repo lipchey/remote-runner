@@ -26,6 +26,22 @@ describe("RemoteToolchainRuntime", () => {
     await expect(runtime.createTemporaryDirectory("uv-0.11.30")).rejects.toThrow("escaped");
   });
 
+  it("reads an install probe's exit code as present or absent and refuses anything else", async () => {
+    const root = "/home/admin/.local/share/remote-runner/toolchains";
+    const probe = (exitCode: number): RemoteCommandPort => ({
+      async run() {
+        return { exitCode, stdout: new Uint8Array(), stderr: new Uint8Array() };
+      },
+    });
+
+    await expect(new RemoteToolchainRuntime(probe(0), root).installed(`${root}/node/bin/node`)).resolves.toBe(true);
+    await expect(new RemoteToolchainRuntime(probe(1), root).installed(`${root}/node/bin/node`)).resolves.toBe(false);
+    await expect(new RemoteToolchainRuntime(probe(255), root).installed(`${root}/node/bin/node`)).rejects.toThrow(
+      "exit code 255",
+    );
+    await expect(new RemoteToolchainRuntime(probe(0), root).installed("/etc/passwd")).rejects.toThrow("escaped");
+  });
+
   it("uses fixed argv commands for download, digest, extraction, and cleanup", async () => {
     const remote = new FakeRemote();
     remote.outputs = ["", "a".repeat(64) + "\n"];

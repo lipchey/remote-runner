@@ -58,6 +58,14 @@ export function isNotificationReason(value: string): boolean {
   return REASONS.has(value);
 }
 
+/* A busy lock is another local run holding this workspace, and a validation failure is the
+   operator's own manifest — neither says the remote is down, so neither may raise an outage. */
+const LOCAL_REASONS = new Set(["lock", "validation"]);
+
+export function isOutageReason(value: string): boolean {
+  return REASONS.has(value) && !LOCAL_REASONS.has(value);
+}
+
 function closed(value: object, expected: readonly string[]): boolean {
   const keys = Object.keys(value).sort();
   return keys.length === expected.length && keys.every((key, index) => key === [...expected].sort()[index]);
@@ -92,7 +100,14 @@ function validateState(value: OutageState | undefined): OutageState {
   ) {
     throw new Error("outage state is corrupt");
   }
-  return { ...value, queue: [...value.queue] };
+  const queue = value.queue.filter((entry) => isOutageReason(entry.reason));
+  /* State written before local reasons stopped raising outages can still carry an ACTIVE `lock` or
+     `validation` outage. Left in place it swallows the next real outage (an active outage suppresses
+     the new event) and later emits a recovery for an outage that never happened. */
+  if (value.outageActive && !isOutageReason(value.activeReason ?? "")) {
+    return { schemaVersion: 1, outageActive: false, queue };
+  }
+  return { ...value, queue };
 }
 
 function event(

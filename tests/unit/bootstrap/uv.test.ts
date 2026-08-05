@@ -5,6 +5,11 @@ import { installUv, uvLinuxTarget, type UvInstallRuntime } from "../../../src/bo
 class FakeRuntime implements UvInstallRuntime {
   readonly calls: string[] = [];
   digest = "c".repeat(64);
+  present = false;
+  async installed(path: string) {
+    this.calls.push(`installed:${path}`);
+    return this.present;
+  }
   async createTemporaryDirectory(label: string) {
     this.calls.push(`temp:${label}`);
     return "/tools/.tmp/uv";
@@ -48,6 +53,21 @@ describe("uv bootstrap", () => {
     });
     expect(runtime.calls.some((call) => call.startsWith("promote:"))).toBe(true);
     expect(runtime.calls.at(-1)).toBe("cleanup:/tools/.tmp/uv");
+  });
+
+  it("reuses an already promoted install instead of downloading it again", async () => {
+    const runtime = new FakeRuntime();
+    runtime.present = true;
+
+    const result = await installUv(runtime, {
+      version: "0.11.32",
+      machine: "x86_64",
+      sha256: "c".repeat(64),
+      toolchainRoot: "/tools",
+    });
+
+    expect(result.root).toBe("/tools/uv-0.11.32-x86_64-unknown-linux-gnu");
+    expect(runtime.calls).toEqual(["installed:/tools/uv-0.11.32-x86_64-unknown-linux-gnu/uv"]);
   });
 
   it("does not extract or promote a mismatched archive", async () => {

@@ -15,13 +15,13 @@ import type { Profile } from "../config/types.js";
 import { NodeProcessRuntime, runStreamingProcess } from "../node/process.js";
 import { ensureManagedKnownHost, mutagenSshEnvironment } from "../node/managed-ssh.js";
 import { RemoteToolchainRuntime, type RemoteCommandPort } from "../node/remote-toolchain.js";
-import { acquireProfileLock } from "../runtime/lock.js";
+import { acquireProfileLock, LockTimeoutError } from "../runtime/lock.js";
 import { worktreeIdentity } from "../runtime/identity.js";
 import { PreparationError } from "../run/prepare.js";
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
 import { WORKLOAD_COMMAND_REASON } from "../run/run-profile.js";
 import type { RemoteExecutionResult } from "../run/run-profile.js";
-import { isNotificationReason } from "../notifications/outage.js";
+import { isNotificationReason, isOutageReason } from "../notifications/outage.js";
 import { encodeSecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
 import { classifySshFailure } from "../ssh/probe.js";
@@ -201,6 +201,15 @@ export function remoteArtifactCheckArguments(
 
 const CAPTURE_BYTES = 64 * 1024;
 const LOCAL_GIT_CAPTURE_BYTES = 4 * 1024 * 1024;
+/* A dependency install prints far more than the 64 KiB that bounds an ordinary control command,
+   and exceeding the bound SIGKILLs the ssh mid-install — repeated on every run, because the
+   healthy state is never written. */
+const SETUP_CAPTURE_BYTES = 16 * 1024 * 1024;
+const WORKLOAD_LOCK_BUSY_EXIT_CODE = 75;
+/* A queued prewarm holds the profile lock for its whole workload, so a wait shorter than a run
+   turns "someone else is already doing this" into a full duplicate run on the laptop. */
+const LOCK_WAIT_MS = 15 * 60 * 1000;
+const LOCK_WAIT_NOTICE_MS = 2 * 1000;
 const UV_VERSION = "0.11.30";
 const UV_SHA256 = {
   x86_64: "04bc7d180d6138bf6dc08387acf507a823f397a98fea55da36b0ccc7fbce3b68",
@@ -380,7 +389,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
     );
   }
 
-  private remote(): RemoteCommandPort {
+  private remote(captureBytes = CAPTURE_BYTES): RemoteCommandPort {
     return {
       run: (args) =>
         runSsh(
@@ -389,7 +398,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
           args,
           this.profile.probes.connectTimeoutSeconds,
           this.knownHostsPath,
-          CAPTURE_BYTES,
+          captureBytes,
         ),
     };
   }
@@ -493,23 +502,35 @@ export class NodeProfileServices implements ProfileExecutionServices {
         await rm(path, { recursive: true });
       },
     };
-    return acquireProfileLock(
-      {
-        files,
-        processes: this.processes,
-        clock: {
-          now: () => Date.now(),
-          sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    const notice = setTimeout(() => {
+      this.write("remote-runner: another run holds this workspace; waiting for it to finish\n");
+    }, LOCK_WAIT_NOTICE_MS);
+    try {
+      return await acquireProfileLock(
+        {
+          files,
+          processes: this.processes,
+          clock: {
+            now: () => Date.now(),
+            sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+          },
+          lockDirectory: (identity) => join(this.lockRoot, identity),
+          pid: process.pid,
+          leaseDurationMs: 120_000,
+          pollIntervalMs: 100,
+          createToken: randomUUID,
         },
-        lockDirectory: (identity) => join(this.lockRoot, identity),
-        pid: process.pid,
-        leaseDurationMs: 120_000,
-        pollIntervalMs: 100,
-        createToken: randomUUID,
-      },
-      this.identity,
-      30_000,
-    );
+        this.identity,
+        LOCK_WAIT_MS,
+      );
+    } catch (caught) {
+      /* Waiting out a concurrent run is the point; falling back to a local duplicate of the very
+         workload that already holds the lock is not, so the timeout is offered for another wait. */
+      if (caught instanceof LockTimeoutError) throw new PreparationError("lock", true, { cause: caught });
+      throw caught;
+    } finally {
+      clearTimeout(notice);
+    }
   }
 
   async probe(): Promise<void> {
@@ -568,14 +589,18 @@ export class NodeProfileServices implements ProfileExecutionServices {
   private async touchActivity(): Promise<void> {
     const paths = this.paths();
     const marker = paths.activityMarker;
+    /* The workload lock is held by the remote child for the whole run, so an unbounded flock here
+       hangs the second run silently and without end. The bounded wait turns that into a retryable
+       lock failure instead. The lock itself stays: it fences the marker against `git reset --hard`. */
     const result = await this.remote().run([
       "sh",
       "-ceu",
-      'umask 077; marker=$1; lock=$2; mkdir -p -- "$(dirname -- "$marker")" "$(dirname -- "$lock")"; exec 9>"$lock"; flock -x 9; : >"$marker"',
+      'umask 077; marker=$1; lock=$2; mkdir -p -- "$(dirname -- "$marker")" "$(dirname -- "$lock")"; exec 9>"$lock"; flock -w 60 9 || exit 75; : >"$marker"',
       "remote-runner-touch-activity",
       marker,
       paths.workloadLock,
     ]);
+    if (result.exitCode === WORKLOAD_LOCK_BUSY_EXIT_CODE) throw new PreparationError("lock", true);
     if (result.exitCode !== 0) throw new Error("remote activity marker update failed");
   }
 
@@ -652,6 +677,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
   async bootstrap(): Promise<void> {
     const paths = this.paths();
     const remote = this.remote();
+    const setupRemote = this.remote(SETUP_CAPTURE_BYTES);
     const machineResult = await remote.run(["uname", "-m"]);
     if (machineResult.exitCode !== 0) throw new Error("remote architecture probe failed");
     const machine = decode(machineResult.stdout, "remote architecture").trim();
@@ -719,11 +745,15 @@ export class NodeProfileServices implements ProfileExecutionServices {
           return { exitCode: result.exitCode };
         },
         runSetup: async (script, workspaceRoot) => {
-          const result = await remote.run(remoteWorkspaceCommandArguments(workspaceRoot, pathEnvironment, [script]));
+          const result = await setupRemote.run(
+            remoteWorkspaceCommandArguments(workspaceRoot, pathEnvironment, [script]),
+          );
           return { exitCode: result.exitCode };
         },
         runEnsure: async (command, workspaceRoot) => {
-          const result = await remote.run(remoteWorkspaceCommandArguments(workspaceRoot, pathEnvironment, command));
+          const result = await setupRemote.run(
+            remoteWorkspaceCommandArguments(workspaceRoot, pathEnvironment, command),
+          );
           return { exitCode: result.exitCode };
         },
         writeHealthyState: (state) => this.writeRemoteState(paths.setupState, state),
@@ -854,9 +884,10 @@ export class NodeProfileServices implements ProfileExecutionServices {
     /* reason crosses into a log line and a persistence callback, so it is mapped to the closed
        notification-reason set here, at the boundary, rather than trusted from the caller. */
     const stable = isNotificationReason(reason) ? reason : "unknown";
-    const line = new TextEncoder().encode(`remote-runner: running locally (fallback reason=${stable})\n`);
-    (this.options.stderr ?? ((chunk) => process.stderr.write(chunk)))(line);
-    await this.options.recordFallback?.(stable);
+    this.write(`remote-runner: running locally (fallback reason=${stable})\n`);
+    /* The operator still sees the line above; only the outage channel is spared reasons that say
+       nothing about the remote being reachable. */
+    if (isOutageReason(stable)) await this.options.recordFallback?.(stable);
   }
 
   async recordRemoteChildStarted(): Promise<void> {
@@ -864,14 +895,17 @@ export class NodeProfileServices implements ProfileExecutionServices {
   }
 
   reportUnavailable(reason: string, detail?: string): void {
-    const line = new TextEncoder().encode(
+    this.write(
       `remote-runner: remote unavailable reason=${reason}${detail === undefined ? "" : ` detail=${detail}`}\n`,
     );
+  }
+
+  private write(text: string): void {
     (
       this.options.stderr ??
       ((chunk) => {
         process.stderr.write(chunk);
       })
-    )(line);
+    )(new TextEncoder().encode(text));
   }
 }

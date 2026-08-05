@@ -58,6 +58,40 @@ function prepared(runtime: FakeRuntime): PrepareResult {
   };
 }
 const failed = (reason = "transport", retryable = false): PrepareResult => ({ ok: false, reason, retryable });
+
+describe("early lock release", () => {
+  it("keeps the started workload when releasing the lock fails, then releases after it exits", async () => {
+    const runtime = new FakeRuntime();
+    runtime.remoteExit = 3;
+    let attempts = 0;
+    runtime.preparations = [
+      {
+        ok: true,
+        secrets: {},
+        release: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error("release failed");
+        },
+      },
+    ];
+
+    await expect(runProfile(runtime, { mode: "auto", fallback: "local" }, ["true"])).resolves.toBe(3);
+    expect(runtime.calls).not.toContain("local:true");
+    expect(attempts).toBe(2);
+  });
+});
+
+describe("workspace lock contention", () => {
+  it("fails closed instead of duplicating the workload that holds the lock", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [failed("lock", true), failed("lock", true)];
+
+    await expect(runProfile(runtime, { mode: "auto", fallback: "local" }, ["true"])).resolves.toBe(
+      INFRASTRUCTURE_EXIT_CODE,
+    );
+    expect(runtime.calls).toEqual(["prepare", "prepare"]);
+  });
+});
 const profile = { mode: "auto" as const, fallback: "local" as const };
 
 describe("run profile selection", () => {

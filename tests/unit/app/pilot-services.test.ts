@@ -30,6 +30,13 @@ const retainedDataAiProfile = loadManifestText(
   ),
 ).profiles[0]!;
 
+const ensureProfile = loadManifestText(
+  validManifest.replace(
+    'setup: ["./scripts/ds-bootstrap.sh"]',
+    'setup: ["./scripts/ds-bootstrap.sh"], ensure: [["node", "scripts/pnpm-state.mjs"]]',
+  ),
+).profiles[0]!;
+
 describe("pilot service boundaries", () => {
   it("applies the manifest child environment to a local workload", async () => {
     const chunks: Uint8Array[] = [];
@@ -220,13 +227,95 @@ describe("pilot service boundaries", () => {
 
     expect(requests[0]?.command).toBe("ssh");
     expect(JSON.stringify(requests[0]?.args)).toContain("remote-runner-touch-activity");
-    expect(JSON.stringify(requests[0]?.args)).toContain("flock -x 9");
+    expect(JSON.stringify(requests[0]?.args)).toContain("flock -w 60 9 || exit 75");
     expect(JSON.stringify(requests[0]?.args)).toContain(`${current}`);
     expect(requests.slice(1).map(({ args }) => args.slice(0, 2).join(" "))).toEqual([
       "daemon start",
       "sync list",
       "sync create",
     ]);
+  });
+
+  it("offers a busy workload lock for another attempt instead of failing the preparation", async () => {
+    const current = worktreeIdentity(process.cwd());
+    const processes = {
+      async run() {
+        return {
+          exitCode: 75,
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+        };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const services = new NodeProfileServices(retainedDataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array([1]),
+      processes,
+    });
+    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current) });
+
+    await expect(services.pauseSync()).rejects.toMatchObject({ reason: "lock", retryable: true });
+  });
+
+  it("gives dependency setup a capture bound that a package install fits into", async () => {
+    const current = worktreeIdentity(process.cwd());
+    const requests: BoundedProcessRequest[] = [];
+    const processes = {
+      async run(request: BoundedProcessRequest) {
+        requests.push(request);
+        const argv = JSON.stringify(request.args);
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode(argv.includes("uname") ? "x86_64\n" : ""),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+        };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const services = new NodeProfileServices(ensureProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array([1]),
+      processes,
+    });
+    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
+
+    await services.bootstrap();
+
+    const setup = requests.find(({ args }) => JSON.stringify(args).includes("ds-bootstrap.sh"));
+    expect(setup?.maxOutputBytes).toBe(16 * 1024 * 1024);
+    const ensure = requests.find(({ args }) => JSON.stringify(args).includes("pnpm-state.mjs"));
+    expect(ensure?.maxOutputBytes).toBe(16 * 1024 * 1024);
+    const control = requests.find(({ args }) => JSON.stringify(args).includes("remote-runner-install-launcher"));
+    expect(control?.maxOutputBytes).toBe(64 * 1024);
+    expect(requests.some(({ args }) => JSON.stringify(args).includes("nodejs.org"))).toBe(false);
+  });
+
+  it("keeps a busy lock off the outage channel while still telling the operator", async () => {
+    const lines: string[] = [];
+    let recorded: string | undefined;
+    const services = new NodeProfileServices(profile, {
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      stderr: (chunk) => lines.push(new TextDecoder().decode(chunk)),
+      recordFallback: async (reason) => {
+        recorded = reason;
+      },
+    });
+
+    await services.recordFallback("lock");
+
+    expect(lines).toEqual(["remote-runner: running locally (fallback reason=lock)\n"]);
+    expect(recorded).toBeUndefined();
   });
 
   it("builds fixed child argv without putting secret values into it", () => {

@@ -94,9 +94,16 @@ function reasonFor(step: (typeof PREPARATION_STEPS)[number]): PreparationReason 
   return "secrets";
 }
 
+/* Only a SUCCESSFUL release is memoized. Caching a rejected one made a transient release failure
+   permanent, and the lock it left published is never reclaimed when the owner is a long-lived
+   process such as the prewarm controller. */
 function idempotentRelease(release: () => Promise<void>): () => Promise<void> {
   let pending: Promise<void> | undefined;
-  return () => (pending ??= release());
+  return () =>
+    (pending ??= release().catch((caught: unknown) => {
+      pending = undefined;
+      throw caught;
+    }));
 }
 
 export async function prepareRemote(runtime: PreparationRuntime): Promise<PrepareResult> {
