@@ -78,12 +78,6 @@ export const DIAGNOSTIC_PROBES = [
     readOnly: true,
     command: ["ssh", "<remote>", "test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm"],
   },
-  {
-    id: "profile.validation",
-    reason: "validation",
-    readOnly: true,
-    command: ["remote-runner", "validate", "<profile>"],
-  },
   { id: "runtime.lock", reason: "lock", readOnly: true, command: ["ls", "-ld", "<lock-root>"] },
   { id: "sync.session", reason: "sync", readOnly: true, command: ["mutagen", "sync", "list", "<session>"] },
   {
@@ -114,14 +108,18 @@ export const DIAGNOSTIC_PROBES = [
     readOnly: true,
     command: ["launchctl", "print", "gui/<uid>/com.lipchey.remote-runner"],
   },
-  { id: "workload.child-start", reason: "child-start", readOnly: true, command: ["tail", "-n", "50", "<runner-log>"] },
   {
     id: "network.timeout",
     reason: "timeout",
     readOnly: true,
     command: ["ssh", "-o", "ConnectTimeout=2", "<remote>", "true"],
   },
-  { id: "runtime.unknown", reason: "unknown", readOnly: true, command: ["remote-runner", "status", "<profile>"] },
+  /* Not every stable reason has a probe, and this table must not grow one for the sake of coverage:
+     a row here is executed, and its status feeds the doctor exit code, so a row without a check that
+     can fail makes the exit code assert a check that never ran. `validation`, `child-start` and
+     `unknown` were exactly that (two hardcoded `ok`, one `tail` proving only that the log file
+     exists) and joined `consumer-setup` and `connection-lost` in the runbook's reason index, which
+     is where a reason with no read-only check gets its operator next step. */
 ] as const satisfies readonly DiagnosticProbe[];
 
 function isDiagnosticStatus(value: unknown): value is DiagnosticStatus {

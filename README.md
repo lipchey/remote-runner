@@ -2,7 +2,7 @@
 
 Automatic execution of repository-defined workloads on a trusted remote workstation. The package
 owns synchronization, native remote setup, fallback, Telegram outage/recovery notifications,
-diagnostics, repair, prewarming, and benchmark collection. Consumer repositories provide only a
+diagnostics, prewarming, and benchmark collection. Consumer repositories provide only a
 closed `.remote-runner.yaml` manifest and a thin call to the installed executable.
 
 ## Install once

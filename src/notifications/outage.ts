@@ -35,7 +35,7 @@ export interface DeliveryResult {
 const DEFAULT_STATE: OutageState = { schemaVersion: 1, outageActive: false, queue: [] };
 const MAX_QUEUE = 64;
 const FIELD = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-const REASONS = new Set([
+export const NOTIFICATION_REASONS = new Set([
   "dns",
   "host-key",
   "authentication",
@@ -57,7 +57,7 @@ const REASONS = new Set([
 ]);
 
 export function isNotificationReason(value: string): boolean {
-  return REASONS.has(value);
+  return NOTIFICATION_REASONS.has(value);
 }
 
 /* The notification channel and durable state carry only closed-set reasons, so a caller crossing
@@ -74,7 +74,7 @@ export function stableReason(value: string): string {
 const LOCAL_REASONS = new Set(["lock", "validation", "consumer-setup"]);
 
 export function isOutageReason(value: string): boolean {
-  return REASONS.has(value) && !LOCAL_REASONS.has(value);
+  return NOTIFICATION_REASONS.has(value) && !LOCAL_REASONS.has(value);
 }
 
 function closed(value: object, expected: readonly string[]): boolean {
