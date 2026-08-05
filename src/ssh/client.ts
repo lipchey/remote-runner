@@ -11,6 +11,9 @@ const DEFAULT_CAPTURE_BYTES = 64 * 1024;
 const HOST_KEY_TYPE =
   /^(?:ssh-(?:rsa|dss|ed25519)|ecdsa-sha2-nistp(?:256|384|521)|sk-(?:ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$/u;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/u;
+/* A plain [user@]host. Anything richer is git/ssh transport syntax (`ext::sh -c …`), so the
+   manifest loader and both transports share this one shape. */
+export const SSH_TARGET = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$/u;
 
 export interface BoundedProcessRequest extends ProcessRequest {
   readonly maxOutputBytes: number;
@@ -163,6 +166,14 @@ function parseHostKeys(output: Uint8Array): ParsedHostKey[] {
 function sha256Fingerprint(blob: Uint8Array): string {
   const digest = createHash("sha256").update(blob).digest("base64").replace(/=+$/u, "");
   return `SHA256:${digest}`;
+}
+
+/* A known_hosts line names a host, and the host name is the one thing an operator does NOT
+   change when the box behind it is replaced — so only the key it carries can decide whether the
+   entry still matches the manifest pin. */
+export function hostKeyMatchesPin(line: string, trustedFingerprint: string): boolean {
+  const [parsed] = parseHostKeys(new TextEncoder().encode(line));
+  return parsed !== undefined && sha256Fingerprint(parsed.blob) === trustedFingerprint;
 }
 
 export async function enrollKnownHost(

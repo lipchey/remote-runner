@@ -4,13 +4,13 @@ import { join, posix } from "node:path";
 
 import {
   enrollKnownHost,
+  hostKeyMatchesPin,
   NodeKnownHostsStore,
   SERVER_ALIVE_COUNT_MAX,
   SERVER_ALIVE_INTERVAL_SECONDS,
+  SSH_TARGET,
   type SshProcessRuntime,
 } from "../ssh/client.js";
-
-const TARGET = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$/u;
 
 export interface ManagedSshTransport {
   readonly changed: boolean;
@@ -108,10 +108,40 @@ function hostField(line: string): string | undefined {
   return trimmed.split(/\s+/u, 1)[0];
 }
 
-export function managedKnownHostsContains(contents: string, target: string): boolean {
-  if (!TARGET.test(target) || target.startsWith("-")) throw new Error("managed SSH target is invalid");
-  const host = target.includes("@") ? target.slice(target.lastIndexOf("@") + 1) : target;
-  return contents.split(/\r?\n/u).some((line) => hostField(line)?.split(",").includes(host));
+function managedTargetHost(target: string): string {
+  if (!SSH_TARGET.test(target) || target.startsWith("-")) throw new Error("managed SSH target is invalid");
+  return target.includes("@") ? target.slice(target.lastIndexOf("@") + 1) : target;
+}
+
+function namesHost(line: string, host: string): boolean {
+  return hostField(line)?.split(",").includes(host) === true;
+}
+
+export function managedKnownHostsContains(contents: string, target: string, trustedFingerprint: string): boolean {
+  const host = managedTargetHost(target);
+  const records = contents.split(/\r?\n/u).filter((line) => namesHost(line, host));
+  /* One matching record is not enough: ssh trusts EVERY key listed for a host, and appending
+     beside the superseded one is exactly what this function did before it checked the pin — so
+     that two-record shape is what an already-re-pinned machine has on disk. */
+  return records.length > 0 && records.every((line) => hostKeyMatchesPin(line, trustedFingerprint));
+}
+
+/* Re-pinning after the box was replaced only takes effect once the records carrying the
+   superseded key are gone — but a record may list further aliases, whose own pins this eviction
+   is not entitled to drop. */
+function withoutHost(contents: string, host: string): string {
+  const kept: string[] = [];
+  for (const line of contents.split(/\r?\n/u)) {
+    if (line.length === 0) continue;
+    if (!namesHost(line, host)) {
+      kept.push(line);
+      continue;
+    }
+    const [hosts, ...rest] = line.trim().split(/\s+/u);
+    const aliases = (hosts ?? "").split(",").filter((alias) => alias !== host);
+    if (aliases.length > 0) kept.push([aliases.join(","), ...rest].join(" "));
+  }
+  return kept.length === 0 ? "" : `${kept.join("\n")}\n`;
 }
 
 export function mergeManagedKnownHosts(existing: string, addition: string): string {
@@ -149,10 +179,8 @@ export async function ensureManagedKnownHost(
     ))
       throw caught;
   }
-  if (managedKnownHostsContains(existing, options.target)) return;
-  const host = options.target.includes("@")
-    ? options.target.slice(options.target.lastIndexOf("@") + 1)
-    : options.target;
+  if (managedKnownHostsContains(existing, options.target, options.trustedFingerprint)) return;
+  const host = managedTargetHost(options.target);
   const enrolledPath = `${options.knownHostsPath}.enroll-${randomUUID()}`;
   try {
     await enrollKnownHost(processes, new NodeKnownHostsStore(), {
@@ -162,7 +190,7 @@ export async function ensureManagedKnownHost(
       connectTimeoutSeconds: options.connectTimeoutSeconds,
     });
     const addition = await readFile(enrolledPath, "utf8");
-    const merged = mergeManagedKnownHosts(existing, addition);
+    const merged = mergeManagedKnownHosts(withoutHost(existing, host), addition);
     await new NodeKnownHostsStore().persistAtomically(options.knownHostsPath, new TextEncoder().encode(merged), 0o600);
   } finally {
     await rm(enrolledPath, { force: true });

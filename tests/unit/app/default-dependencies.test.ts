@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -362,12 +363,20 @@ describe("concrete Node CLI dependencies", () => {
   });
 
   it("keeps each run's provider execution-local when a local run and a stalled remote attempt overlap", async () => {
-    const paths = await fixture();
-    /* ensureManagedKnownHost skips its ssh-keyscan round trip once the target's host is already
-       on file, so the remote attempt's first (and only, before it fails) ssh call is the home
-       probe below — the one point we gate. */
+    /* ensureManagedKnownHost skips its ssh-keyscan round trip once the target is on file under
+       the PINNED key, so the remote attempt's first (and only, before it fails) ssh call is the
+       home probe below — the one point we gate. */
+    const hostKey = new TextEncoder().encode("pop-os-host-key");
+    const paths = await fixture(
+      validManifest.replace(
+        'hostKeySha256: "SHA256:trusted"',
+        `hostKeySha256: "SHA256:${createHash("sha256").update(hostKey).digest("base64").replace(/=+$/u, "")}"`,
+      ),
+    );
     await mkdir(dirname(paths.knownHostsPath), { recursive: true });
-    await writeFile(paths.knownHostsPath, "pop-os ssh-ed25519 AAAA\n", { mode: 0o600 });
+    await writeFile(paths.knownHostsPath, `pop-os ssh-ed25519 ${Buffer.from(hostKey).toString("base64")}\n`, {
+      mode: 0o600,
+    });
 
     let releaseRemoteProbe: () => void = () => undefined;
     const remoteProbeGate = new Promise<void>((resolve) => {

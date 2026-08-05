@@ -1,12 +1,11 @@
 import { posix } from "node:path";
 
 import { DiagnosableError, diagnosableMessage } from "../runtime/diagnostic.js";
-import type { BoundedProcessRequest, BoundedProcessResult } from "../ssh/client.js";
+import { SSH_TARGET, type BoundedProcessRequest, type BoundedProcessResult } from "../ssh/client.js";
 
 const CAPTURE_BYTES = 64 * 1024;
 const COMPONENT = /^[a-z][a-z0-9-]{0,62}$/u;
 const IDENTITY = /^[0-9a-f]{24}$/u;
-const SSH_TARGET = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$/u;
 const LIST_TEMPLATE = "{{ json . }}";
 /* Diagnostics list sessions exactly as the run does, so a probe can never green on a listing the
    run would reject. */
