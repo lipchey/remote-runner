@@ -168,6 +168,31 @@ means the workload verdict is authoritative and cleanup will retry on a later ma
 the profile root, `.activity`, `.locks`, owned Mutagen session names, and `.gc-*` entries before any
 manual intervention.
 
+Local Mutagen sessions are reaped on a different rule than remote workspaces, and independently of
+whether the profile configures retention at all: after a marker-seen run the runner lists sessions and
+terminates every one of its own `remote-runner-<consumer>-<profile>-<identity>` sessions whose alpha
+root is no longer on the laptop. That is the state deleting a worktree leaves behind, and no
+remote-side retention plan can ever nominate it. The sweep and the remote prune are independent — the
+prune runs first, and either one failing still lets the other run — so a stopped Mutagen daemon does
+not park remote disk, and an unreachable remote does not park sessions. `mutagen sync list` after a
+run is the check.
+
+A session is only reaped once it has proved it is this runner's: its identity must be the SHA-256 of
+its own alpha root, its beta endpoint the workspace this profile derives for that identity, and its
+mode `one-way-replica`. A duplicated session name is skipped rather than resolved. Termination targets
+Mutagen's session identifier, never the name, so that a session created under the same name after the
+listing cannot be terminated on the previous one's evidence; one refused termination is reported but
+does not stop the rest of the sweep.
+
+Two consequences worth knowing before reading a sweep as a bug. Absence has to be established, not
+merely unrefuted: the root is gone only when the directory that would contain it is itself readable, so
+an unreadable ancestor, an I/O error, or a volume whose whole mount path has disappeared all keep the
+session alive — while a mount point that survives unmounting as an empty directory does read as a
+deletion, and the next run from that worktree resynchronizes it. A regular file where the worktree used
+to be also counts as gone, since no worktree can live there. And the remote workspace of a deleted
+worktree is not touched by this sweep: it ages out through `keep` and `graceMinutes` like any other
+idle identity.
+
 ## Disk capacity
 
 For `capacity`, run `ssh <remote> df -Pk <generated-root>`. The runner creates and canonicalizes the

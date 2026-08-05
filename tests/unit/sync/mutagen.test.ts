@@ -9,6 +9,7 @@ import {
   type MutagenProcessRuntime,
   type MutagenSessionOptions,
 } from "../../../src/sync/mutagen.js";
+import { pathIdentity } from "../../../src/runtime/identity.js";
 
 const bytes = (value = ""): Uint8Array => new TextEncoder().encode(value);
 
@@ -112,6 +113,43 @@ function liveV018PausedSession(): string {
       status: "disconnected",
     },
   ]);
+}
+
+const PROFILE_ROOT = "/srv/remote-runner/workspaces/ariadne";
+const LIVE_ALPHA = "/Users/dev/live-worktree";
+const GONE_ALPHA = "/Users/dev/deleted-worktree";
+const GONE_IDENTITY = pathIdentity(GONE_ALPHA);
+
+const sweep = {
+  consumer: "ariadne",
+  profile: "verify-full",
+  betaTarget: "runner@example.test",
+  profileRoot: PROFILE_ROOT,
+};
+
+/* Every field a real session derives from its alpha root derives from it here too — an identity typed
+   in by hand would make the ownership proof the sweep applies untestable. */
+function abandonable(
+  alpha: string,
+  patch: Partial<{ identity: string; name: string; beta: string; mode: string }> = {},
+): Record<string, unknown> {
+  const identity = patch.identity ?? pathIdentity(alpha);
+  return {
+    identifier: `sync_${identity}`,
+    name: patch.name ?? `remote-runner-ariadne-verify-full-${identity}`,
+    alpha: { protocol: "local", path: alpha },
+    beta: { url: patch.beta ?? `runner@example.test:${PROFILE_ROOT}/${identity}` },
+    configuration: { synchronizationMode: patch.mode ?? "one-way-replica" },
+    ignore: { paths: compileIgnores(options.ignores) },
+    paused: false,
+    status: "watching",
+    conflicts: [],
+    excludedConflicts: 0,
+  };
+}
+
+function sweepListing(...records: Array<Record<string, unknown>>): string {
+  return JSON.stringify(records);
 }
 
 function commandNames(processes: FakeProcesses): string[] {
@@ -230,6 +268,65 @@ describe("Mutagen one-way lifecycle", () => {
     await absentLifecycle.terminateOwned(options);
 
     expect(commandNames(absentProcesses)).toEqual(["sync list"]);
+  });
+
+  it("terminates every namespaced session whose local root is gone and nothing else", async () => {
+    const listing = sweepListing(abandonable(LIVE_ALPHA), abandonable(GONE_ALPHA));
+    const processes = new FakeProcesses([{ stdout: listing }, {}]);
+    const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
+
+    await lifecycle.terminateAbandoned({ ...sweep, alphaExists: async (root) => root === LIVE_ALPHA });
+
+    expect(commandNames(processes)).toEqual(["sync list", "sync terminate"]);
+    /* By identifier: a name is a slot another run can rebind to a live session between the listing and
+       this command. */
+    expect(processes.requests[1]?.args).toEqual(["sync", "terminate", `sync_${GONE_IDENTITY}`]);
+  });
+
+  it("keeps reaping after a refused termination and then reports the failure", async () => {
+    const second = "/Users/dev/second-deleted-worktree";
+    const listing = sweepListing(abandonable(GONE_ALPHA), abandonable(second));
+    const processes = new FakeProcesses([{ stdout: listing }, { exitCode: 1 }, {}]);
+    const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
+
+    await expect(lifecycle.terminateAbandoned({ ...sweep, alphaExists: async () => false })).rejects.toThrow(
+      /1 abandoned Mutagen session terminations failed/u,
+    );
+
+    expect(processes.requests.map(({ args }) => args.at(-1))).toEqual([
+      "{{ json . }}",
+      `sync_${GONE_IDENTITY}`,
+      `sync_${pathIdentity(second)}`,
+    ]);
+  });
+
+  it.each([
+    ["another consumer", [abandonable(GONE_ALPHA, { name: `remote-runner-other-verify-full-${GONE_IDENTITY}` })]],
+    ["another profile", [abandonable(GONE_ALPHA, { name: `remote-runner-ariadne-verify-fast-${GONE_IDENTITY}` })]],
+    ["a name without an identity", [abandonable(GONE_ALPHA, { name: "remote-runner-ariadne-verify-full-manual" })]],
+    [
+      "an alpha that did not derive the identity",
+      [abandonable(GONE_ALPHA, { identity: pathIdentity("/Users/dev/other") })],
+    ],
+    [
+      "a workspace this profile never derives",
+      [abandonable(GONE_ALPHA, { beta: "runner@example.test:/srv/elsewhere" })],
+    ],
+    ["another host", [abandonable(GONE_ALPHA, { beta: `other@example.test:${PROFILE_ROOT}/${GONE_IDENTITY}` })]],
+    ["a foreign sync mode", [abandonable(GONE_ALPHA, { mode: "two-way-resolved" })]],
+    ["an alpha that is not a canonical path", [abandonable("../deleted-worktree")]],
+    ["a name shared with a second session", [abandonable(GONE_ALPHA), abandonable(GONE_ALPHA)]],
+    /* `sync terminate -a` terminates every session on the machine, so an identifier that is not a
+       Mutagen identifier is never spent as argv. */
+    ["an identifier that is a flag", [{ ...abandonable(GONE_ALPHA), identifier: "-a" }]],
+    ["an identifier of a foreign shape", [{ ...abandonable(GONE_ALPHA), identifier: "session/../-all" }]],
+  ])("never terminates a session with %s, whatever its local root", async (_label, records) => {
+    const processes = new FakeProcesses([{ stdout: sweepListing(...records) }]);
+    const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
+
+    await lifecycle.terminateAbandoned({ ...sweep, alphaExists: async () => false });
+
+    expect(commandNames(processes)).toEqual(["sync list"]);
   });
 
   it.each([

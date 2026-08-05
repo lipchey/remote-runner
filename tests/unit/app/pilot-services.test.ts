@@ -1,9 +1,14 @@
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
   NodeProfileServices,
   listLocalFingerprintFiles,
   listLocalGitlinks,
+  localWorktreeExists,
   parseProbeOutput,
   remoteArtifactCheckArguments,
   remoteChildArguments,
@@ -12,7 +17,7 @@ import {
 } from "../../../src/app/pilot-services.js";
 import { loadManifestText } from "../../../src/config/load-manifest.js";
 import type { NodeProcessRuntime, StreamingProcessRequest } from "../../../src/node/process.js";
-import { worktreeIdentity } from "../../../src/runtime/identity.js";
+import { pathIdentity, worktreeIdentity } from "../../../src/runtime/identity.js";
 import type { BoundedProcessRequest } from "../../../src/ssh/client.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
@@ -459,6 +464,178 @@ describe("pilot service boundaries", () => {
     const serializedRequests = requests.map((request) => JSON.stringify(request.args));
     expect(serializedRequests.filter((value) => value.includes("activity")).length).toBeGreaterThanOrEqual(1);
     expect(serializedRequests.some((value) => value.includes("remote-runner-retention-list"))).toBe(true);
+  });
+
+  it("reaps the Mutagen session of a deleted worktree after a workload, with no retention policy", async () => {
+    const current = worktreeIdentity(process.cwd());
+    const sandbox = await mkdtemp(join(tmpdir(), "remote-runner-sweep-"));
+    const barrier = join(sandbox, "barrier");
+    await mkdir(join(barrier, "worktree"), { recursive: true });
+    const alphaRoots = [await realpath(process.cwd()), join(sandbox, "deleted-worktree"), join(barrier, "worktree")];
+    const gone = pathIdentity(alphaRoots[1]!);
+    const paths = resolveRemotePaths("/home/admin", profile, current);
+    const listing = JSON.stringify(
+      alphaRoots.map((alpha) => {
+        const identity = pathIdentity(alpha);
+        return {
+          identifier: `sync_${identity}`,
+          name: `remote-runner-${profile.consumer}-${profile.id}-${identity}`,
+          alpha: { protocol: "local", path: alpha },
+          beta: { url: `${profile.remote.target}:${paths.profileRoot}/${identity}` },
+          mode: "one-way-replica",
+          ignore: { paths: [] },
+          paused: false,
+          status: "watching",
+        };
+      }),
+    );
+    const requests: BoundedProcessRequest[] = [];
+    const processes = {
+      async run(request: BoundedProcessRequest) {
+        requests.push(request);
+        const sessionList = request.command === "mutagen" && request.args[1] === "list";
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode(sessionList ? listing : ""),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+        };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const services = new NodeProfileServices(profile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array([1]),
+      processes,
+      streamProcess: async (request: StreamingProcessRequest) => {
+        await request.onMarker();
+        return { exitCode: 0, signal: null, markerSeen: true, spawned: true };
+      },
+    });
+    Object.assign(services, {
+      remotePaths: paths,
+      nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
+      uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
+    });
+
+    try {
+      /* An alpha root nobody can look at is the fail-closed case: `access` answers EACCES, not
+         ENOENT, and a live worktree behind a temporarily unreadable parent must survive the sweep. */
+      await chmod(barrier, 0o000);
+      const result = await services.startRemote(["./scripts/verify", "--full"], {}, async () => undefined);
+
+      expect(result).toEqual({ kind: "completed", exitCode: 0 });
+      expect(requests.filter(({ command }) => command === "mutagen").map(({ args }) => args)).toEqual([
+        ["sync", "list", "--template", "{{ json . }}"],
+        ["sync", "terminate", `sync_${gone}`],
+      ]);
+    } finally {
+      await chmod(barrier, 0o700);
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("establishes a local worktree root as gone only when its own container answers", async () => {
+    const sandbox = await mkdtemp(join(tmpdir(), "remote-runner-root-"));
+    const barrier = join(sandbox, "barrier");
+    await mkdir(join(barrier, "worktree"), { recursive: true });
+    await writeFile(join(sandbox, "file-not-worktree"), "");
+
+    try {
+      await chmod(barrier, 0o000);
+
+      await expect(localWorktreeExists(sandbox)).resolves.toBe(true);
+      await expect(localWorktreeExists(join(sandbox, "deleted"))).resolves.toBe(false);
+      /* No worktree can live at a regular file, so the session that syncs it is abandoned too. */
+      await expect(localWorktreeExists(join(sandbox, "file-not-worktree"))).resolves.toBe(false);
+      await expect(localWorktreeExists(join(sandbox, "file-not-worktree", "under-a-file"))).resolves.toBe(false);
+      /* Unreadable container and vanished container: the same ENOENT/EACCES a run would see for a
+         worktree on an unmounted volume, and neither establishes a deletion. */
+      await expect(localWorktreeExists(join(barrier, "worktree"))).resolves.toBe(true);
+      await expect(localWorktreeExists(join(sandbox, "gone-volume", "worktree"))).resolves.toBe(true);
+    } finally {
+      await chmod(barrier, 0o700);
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("sweeps abandoned sessions even when the remote prune fails, and still reports the failure", async () => {
+    const current = worktreeIdentity(process.cwd());
+    const sandbox = await mkdtemp(join(tmpdir(), "remote-runner-both-"));
+    const gone = pathIdentity(join(sandbox, "deleted-worktree"));
+    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current);
+    const listing = JSON.stringify([
+      {
+        identifier: `sync_${gone}`,
+        name: `remote-runner-${retainedDataAiProfile.consumer}-${retainedDataAiProfile.id}-${gone}`,
+        alpha: { protocol: "local", path: join(sandbox, "deleted-worktree") },
+        beta: { url: `${retainedDataAiProfile.remote.target}:${paths.profileRoot}/${gone}` },
+        mode: "one-way-replica",
+        ignore: { paths: [] },
+        paused: false,
+        status: "watching",
+      },
+    ]);
+    const warnings: Uint8Array[] = [];
+    const requests: BoundedProcessRequest[] = [];
+    const processes = {
+      async run(request: BoundedProcessRequest) {
+        requests.push(request);
+        if (request.command === "mutagen") {
+          const sessionList = request.args[1] === "list";
+          return {
+            exitCode: 0,
+            stdout: new TextEncoder().encode(sessionList ? listing : ""),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+          };
+        }
+        /* Only the retention prune fails: the post-workload activity marker has to succeed, or the
+           cleanup block never reaches either half. */
+        const retentionList = JSON.stringify(request.args).includes("remote-runner-retention-list");
+        return {
+          exitCode: retentionList ? 1 : 0,
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+        };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const services = new NodeProfileServices(retainedDataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array([1]),
+      processes,
+      stderr: (chunk) => warnings.push(chunk),
+      streamProcess: async (request: StreamingProcessRequest) => {
+        await request.onMarker();
+        return { exitCode: 23, signal: null, markerSeen: true, spawned: true };
+      },
+    });
+    Object.assign(services, {
+      remotePaths: paths,
+      nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
+      uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
+    });
+
+    try {
+      const result = await services.startRemote(["./scripts/verify", "--full"], {}, async () => undefined);
+
+      expect(result).toEqual({ kind: "completed", exitCode: 23 });
+      expect(requests.filter(({ command }) => command === "mutagen").map(({ args }) => args.at(-1))).toEqual([
+        "{{ json . }}",
+        `sync_${gone}`,
+      ]);
+      expect(warnings).toHaveLength(1);
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
   });
 
   it("preserves the workload exit and emits one bounded warning when cleanup fails", async () => {
