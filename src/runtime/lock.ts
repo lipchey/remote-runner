@@ -3,6 +3,10 @@ export interface LockFileSystem {
   readFile(path: string): Promise<Uint8Array>;
   writeFile(path: string, contents: Uint8Array, mode: number): Promise<void>;
   symlink(target: string, path: string): Promise<void>;
+  readlink(path: string): Promise<string>;
+  readdir(path: string): Promise<readonly string[]>;
+  /* Age of the entry itself, never of a symlink's target. */
+  modifiedAt(path: string): Promise<number>;
   rename(from: string, to: string): Promise<void>;
   remove(path: string): Promise<void>;
 }
@@ -121,6 +125,65 @@ async function publishInitializedLock(runtime: LockRuntime, lockPath: string, to
   }
 }
 
+/* Every name this protocol leaves in the lock root is `${lockPath}` plus one of these infixes, and
+   nothing in the tool ever reads them back, so an unswept root grows by one entry per crashed run
+   forever. The window keeps them long enough to be worth the diagnosis they were renamed for. */
+const ARTIFACT_INFIXES = [".generation-", ".stale-", ".corrupt-", ".release-"];
+const ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+async function isAbandoned(runtime: LockRuntime, path: string): Promise<boolean> {
+  try {
+    return runtime.clock.now() - (await runtime.files.modifiedAt(path)) >= ARTIFACT_RETENTION_MS;
+  } catch {
+    return false;
+  }
+}
+
+async function hasLiveOwner(runtime: LockRuntime, generationPath: string): Promise<boolean> {
+  try {
+    const owner = parseOwner(await runtime.files.readFile(`${generationPath}/owner.json`));
+    return await runtime.processes.isAlive(owner.pid);
+  } catch {
+    return false;
+  }
+}
+
+async function reapAbandonedArtifacts(runtime: LockRuntime, lockPath: string): Promise<void> {
+  const separator = lockPath.lastIndexOf("/");
+  if (separator <= 0) return;
+  const root = lockPath.slice(0, separator);
+  const prefix = lockPath.slice(separator + 1);
+  let published: string | undefined;
+  try {
+    published = await runtime.files.readlink(lockPath);
+  } catch (caught) {
+    /* ENOENT is an unheld lock and EINVAL the legacy plain-directory shape, both meaning "nothing
+       is published". Any other errno means the link exists and could not be read, so the sweep has
+       no idea which generation is live: skip it entirely rather than fall back to the age bound. */
+    if (!["ENOENT", "EINVAL"].includes(errorCode(caught) ?? "")) return;
+  }
+  for (const name of await runtime.files.readdir(root)) {
+    const infix = ARTIFACT_INFIXES.find(
+      (candidate) => name.startsWith(`${prefix}${candidate}`) && name.length > prefix.length + candidate.length,
+    );
+    if (infix === undefined) continue;
+    const path = `${root}/${name}`;
+    /* Two independent reasons to keep a generation directory, because deleting a live one hands the
+       canonical name to a second owner: it is what the canonical symlink resolves to, or its owner
+       process is still running. Neither is sufficient alone — the first is blind for the moments
+       between reading the link and a newer owner publishing (the age bound covers that: a directory
+       young enough to belong to a lock this sweep never observed is never removed), the second is
+       blind to a holder whose pid was reused. Keeping a quarantined artifact whose pid was reused
+       is the price, and it costs one undeleted directory. */
+    if (path === published) continue;
+    if (!(await isAbandoned(runtime, path))) continue;
+    if (infix === ".generation-" && (await hasLiveOwner(runtime, path))) continue;
+    /* An entry that refuses to be removed must not abort the entries after it, or one root-owned
+       leftover disables the sweep for good. */
+    await removeIfPresent(runtime.files, path).catch(() => undefined);
+  }
+}
+
 type GuardResult = "acquired" | "busy" | "missing";
 
 async function acquireOperationGuard(runtime: LockRuntime, guardPath: string): Promise<GuardResult> {
@@ -131,6 +194,37 @@ async function acquireOperationGuard(runtime: LockRuntime, guardPath: string): P
     if (errorCode(caught) === "EEXIST") return "busy";
     if (errorCode(caught) === "ENOENT") return "missing";
     throw caught;
+  }
+}
+
+/* A canonical symlink whose generation directory was removed underneath it (an operator or a tmp
+   sweeper tidying the lock root is the only way in — no path in this file unpublishes a directory
+   before its symlink) wedges every future run: nobody can create `${lockPath}/.operation` through
+   it, so neither the guarded recovery below nor the owner's own release can ever fire, and each run
+   burns its whole wait budget. Recreating the missing target restores the ordinary "owner metadata
+   is unreadable" shape, which the guarded recovery already quarantines. Restoring the target is
+   deliberately ALL this does: removing the canonical name outside the guard is what would let a
+   process that decided while the link was dangling unpublish a lock somebody else has since
+   republished, and two owners would run at once. */
+async function restoreDanglingGeneration(runtime: LockRuntime, lockPath: string): Promise<boolean> {
+  let target: string;
+  try {
+    target = await runtime.files.readlink(lockPath);
+  } catch {
+    return false;
+  }
+  /* Only directories this protocol names itself are ever recreated, and only as a single sibling
+     segment: a prefix test alone accepts `${lockPath}.generation-../../elsewhere`, which would put
+     mkdir on a target chosen by whoever wrote the link rather than inside the lock root. */
+  const suffix = target.startsWith(`${lockPath}.generation-`) ? target.slice(`${lockPath}.generation-`.length) : "";
+  if (suffix.length === 0 || suffix.includes("/")) return false;
+  try {
+    await runtime.files.mkdir(target);
+    return true;
+  } catch {
+    /* Including EEXIST: another process repaired it, so retry through the wait rather than
+       immediately, which is what kept the pre-repair spin off the CPU. */
+    return false;
   }
 }
 
@@ -232,6 +326,10 @@ export async function acquireProfileLock(
   const generationPath = `${lockPath}.generation-${token}`;
   const deadline = runtime.clock.now() + waitBudgetMs;
   let diagnosticAttempt = 0;
+  let repaired = false;
+
+  /* A lock root that cannot be swept is still a lock root that can be taken. */
+  await reapAbandonedArtifacts(runtime, lockPath).catch(() => undefined);
 
   for (;;) {
     if (await publishInitializedLock(runtime, lockPath, token)) {
@@ -249,10 +347,16 @@ export async function acquireProfileLock(
 
     const guardPath = `${lockPath}/.operation`;
     const guard = await acquireOperationGuard(runtime, guardPath);
-    /* "missing" means the published lock vanished between the two calls. Retrying without the
-       sleep spins at 100% CPU forever on a dangling symlink, which never resolves on its own. */
+    /* "missing" is either a lock that vanished between the two calls, which the ordinary retry
+       covers, or a dangling canonical symlink, which does not resolve on its own. */
     if (guard === "missing") {
-      await waitForRetry(runtime, identity, waitBudgetMs, deadline);
+      /* One repair per acquisition: the retry below is the only deadline enforcement in this loop,
+         so a canonical name that keeps being re-dangled by whatever destroyed it in the first place
+         would otherwise spin here for free, ignoring the caller's budget. */
+      if (repaired || !(await restoreDanglingGeneration(runtime, lockPath))) {
+        await waitForRetry(runtime, identity, waitBudgetMs, deadline);
+      }
+      repaired = true;
       continue;
     }
     if (guard === "busy") {
