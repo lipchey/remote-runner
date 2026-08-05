@@ -461,7 +461,6 @@ os.chmod(arguments[-1], int(arguments[0], 8))
 
   it("uses one lock key for concurrent calls of the same profile and identity", async () => {
     const { options, processes } = await fixture();
-    const identity = worktreeIdentity(options.sourceRoot);
 
     await Promise.all([reconcileWorkspace(options, processes), reconcileWorkspace(options, processes)]);
     const transactions = processes.requests
