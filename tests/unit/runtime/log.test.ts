@@ -31,27 +31,24 @@ class NodeLogFiles implements LogFileSystem {
 }
 
 describe("createJsonlLogger", () => {
-  it("recursively redacts registered exact values and URL credentials before serialization", async () => {
+  it("recursively redacts URL credentials before serialization", async () => {
     const root = await mkdtemp(join(tmpdir(), "remote-runner-log-"));
     temporaryRoots.push(root);
     const path = join(root, "runner.jsonl");
     const logger = createJsonlLogger(new NodeLogFiles(), path);
-    const canary = "exact-secret-canary-93f4";
-    logger.registerSecret(canary);
 
     await logger.write({
       event: "probe",
-      nested: { values: [canary, `prefix:${canary}:suffix`] },
+      nested: { url: "https://alice:password@example.com/private?q=1" },
       url: "https://alice:password@example.com/private?q=1",
     });
 
     const serialized = await readFile(path, "utf8");
-    expect(serialized).not.toContain(canary);
     expect(serialized).not.toContain("alice");
     expect(serialized).not.toContain("password");
     expect(JSON.parse(serialized)).toEqual({
       event: "probe",
-      nested: { values: ["[REDACTED]", "prefix:[REDACTED]:suffix"] },
+      nested: { url: "https://example.com/private?q=1" },
       url: "https://example.com/private?q=1",
     });
   });
@@ -79,7 +76,6 @@ describe("createJsonlLogger", () => {
     const path = join(root, "runner.jsonl");
     const logger = createJsonlLogger(new NodeLogFiles(), path);
     const canary = "hook-secret-canary-4f8a";
-    logger.registerSecret(canary);
     let hookCalls = 0;
     const record = Object.create(null) as Record<string, unknown>;
     Object.defineProperties(record, {

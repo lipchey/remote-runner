@@ -22,6 +22,7 @@ import { createNodeNotificationCallbacks } from "../node/notifications.js";
 import { ensureNodeController, NodeControllerRuntime } from "../node/controller.js";
 import { ensureManagedSshTransport, mutagenSshEnvironment, type ManagedSshTransport } from "../node/managed-ssh.js";
 import { NodeProcessRuntime } from "../node/process.js";
+import { errorCode } from "../runtime/errno.js";
 import { worktreeIdentity } from "../runtime/identity.js";
 import { createJsonlLogger } from "../runtime/log.js";
 import { inspectPrewarmRequest, publishPrewarmRequest } from "../prewarm/queue.js";
@@ -84,12 +85,6 @@ async function readLauncherSource(): Promise<Uint8Array> {
     }
   }
   throw new Error("remote launcher asset is missing");
-}
-
-function errorCode(caught: unknown): string | undefined {
-  return typeof caught === "object" && caught !== null && "code" in caught
-    ? String((caught as { readonly code?: unknown }).code)
-    : undefined;
 }
 
 function profileRoot(home: string, profile: Pick<Profile, "consumer" | "id">, identity: string): string {

@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { link, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
+import { errorCode } from "../runtime/errno.js";
+
 const COMPONENT = /^[a-z][a-z0-9-]{0,62}$/u;
 const IDENTITY = /^[0-9a-f]{24}$/u;
 const MAX_REQUEST_BYTES = 16 * 1024;
@@ -14,12 +16,6 @@ export interface PrewarmRequest {
   readonly identity: string;
   readonly sourceRoot: string;
   readonly manifestPath: string;
-}
-
-function errorCode(caught: unknown): string | undefined {
-  return typeof caught === "object" && caught !== null && "code" in caught
-    ? String((caught as { readonly code?: unknown }).code)
-    : undefined;
 }
 
 function queueRoot(home: string): string {

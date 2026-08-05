@@ -1,6 +1,6 @@
 const encoder = new TextEncoder();
-const SECRET_NAME = /^[A-Z][A-Z0-9_]*$/u;
-const MAX_SECRET_BYTES = 64 * 1024;
+export const SECRET_NAME = /^[A-Z][A-Z0-9_]*$/u;
+export const MAX_SECRET_BYTES = 64 * 1024;
 const MAX_FRAME_BYTES = 128 * 1024;
 
 export const SECRET_FRAME_MAGIC = encoder.encode("RRSE1\0");
@@ -13,7 +13,7 @@ export interface SecretFrame {
   };
 }
 
-function validateAllowlist(allow: readonly string[]): Set<string> {
+export function validateAllowlist(allow: readonly string[]): Set<string> {
   const result = new Set<string>();
   for (const name of allow) {
     if (!SECRET_NAME.test(name)) throw new Error("secret allowlist contains an invalid name");

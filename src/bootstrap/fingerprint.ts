@@ -2,7 +2,6 @@ export interface EnvironmentIdentity {
   readonly node: string;
   readonly packageManager: string;
   readonly uv?: string;
-  readonly gitleaks?: string;
 }
 
 export interface GitlinkIdentity {
@@ -59,7 +58,6 @@ function environmentRecord(environment: EnvironmentIdentity): Record<string, str
     packageManager: environment.packageManager,
   };
   if (environment.uv !== undefined) result.uv = environment.uv;
-  if (environment.gitleaks !== undefined) result.gitleaks = environment.gitleaks;
   for (const [name, value] of Object.entries(result)) field(value, `environment ${name}`);
   return Object.fromEntries(Object.entries(result).sort(([left], [right]) => compareText(left, right)));
 }

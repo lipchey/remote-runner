@@ -1,3 +1,5 @@
+import { errorCode } from "./errno.js";
+
 export interface LockFileSystem {
   mkdir(path: string): Promise<void>;
   readFile(path: string): Promise<Uint8Array>;
@@ -45,12 +47,6 @@ export class LockReleaseRetryableError extends Error {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
-
-function errorCode(caught: unknown): string | undefined {
-  return typeof caught === "object" && caught !== null && "code" in caught
-    ? String((caught as { code?: unknown }).code)
-    : undefined;
-}
 
 function parseOwner(contents: Uint8Array): LockOwner {
   const parsed: unknown = JSON.parse(decoder.decode(contents));

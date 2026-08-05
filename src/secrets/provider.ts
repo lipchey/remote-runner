@@ -1,26 +1,15 @@
 import { parseDocument } from "yaml";
 import { parseEnv } from "node:util";
 
+import { MAX_SECRET_BYTES, SECRET_NAME, validateAllowlist } from "./frame.js";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../ssh/client.js";
 
 const MAX_PROVIDER_BYTES = 128 * 1024;
-const MAX_SECRET_BYTES = 64 * 1024;
-const SECRET_NAME = /^[A-Z][A-Z0-9_]*$/u;
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const encoder = new TextEncoder();
 
 export interface SecretProviderRuntime {
   run(request: BoundedProcessRequest): Promise<BoundedProcessResult>;
-}
-
-function validateAllowlist(allow: readonly string[]): Set<string> {
-  const result = new Set<string>();
-  for (const name of allow) {
-    if (!SECRET_NAME.test(name)) throw new Error("secret allowlist contains an invalid name");
-    if (result.has(name)) throw new Error("secret allowlist contains a duplicate");
-    result.add(name);
-  }
-  return result;
 }
 
 function validateCommand(command: readonly string[]): [string, ...string[]] {

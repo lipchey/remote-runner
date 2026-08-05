@@ -1,4 +1,4 @@
-import { access, readFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { join } from "node:path";
 import process from "node:process";
 
@@ -55,20 +55,6 @@ export class NodeControllerRuntime implements ControllerRuntime {
     });
     if (result.exitCode !== 0) throw new Error("controller kickstart failed");
   }
-  async registeredProfiles() {
-    try {
-      const parsed: unknown = JSON.parse(
-        await readFile(join(this.home, ".local", "state", "remote-runner", "registrations.json"), "utf8"),
-      );
-      return Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string") ? parsed : [];
-    } catch {
-      return [];
-    }
-  }
-  async reconcile() {
-    return { healthy: true };
-  }
-  async recordHealth() {}
 }
 
 export async function ensureNodeController(home: string): Promise<void> {

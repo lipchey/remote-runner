@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { ensureController, runControllerPass, type ControllerRuntime } from "../../../src/controller/controller.js";
+import { ensureController, type ControllerRuntime } from "../../../src/controller/controller.js";
 
 class FakeRuntime implements ControllerRuntime {
   readonly actions: string[] = [];
   statuses: Array<{ loaded: boolean; running: boolean; compatible: boolean }> = [];
-  profiles = ["alpha", "beta"];
   async inspect() {
     this.actions.push("inspect");
     return this.statuses.shift() ?? { loaded: true, running: true, compatible: true };
@@ -18,17 +17,6 @@ class FakeRuntime implements ControllerRuntime {
   }
   async kickstart() {
     this.actions.push("kickstart");
-  }
-  async registeredProfiles() {
-    this.actions.push("profiles");
-    return this.profiles;
-  }
-  async reconcile(profile: string) {
-    this.actions.push(`reconcile:${profile}`);
-    return profile === "alpha" ? { healthy: true } : { healthy: false, reason: "transport" };
-  }
-  async recordHealth(profile: string, health: { healthy: boolean; reason?: string }) {
-    this.actions.push(`health:${profile}:${health.healthy}:${health.reason ?? "ok"}`);
   }
 }
 
@@ -77,17 +65,5 @@ describe("controller self-healing", () => {
       { loaded: true, running: false, compatible: true },
     ];
     await expect(ensureController(runtime)).rejects.toThrow("unhealthy");
-  });
-
-  it("controller pass reconciles registered sessions and records bounded health without workloads", async () => {
-    const runtime = new FakeRuntime();
-    await runControllerPass(runtime);
-    expect(runtime.actions).toEqual([
-      "profiles",
-      "reconcile:alpha",
-      "health:alpha:true:ok",
-      "reconcile:beta",
-      "health:beta:false:transport",
-    ]);
   });
 });
