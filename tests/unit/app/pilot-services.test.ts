@@ -107,6 +107,27 @@ describe("pilot service boundaries", () => {
     expect(recorded).toBe("child-start");
   });
 
+  it("forwards the unavailable reason and its optional detail to the run log observer", () => {
+    const lines: string[] = [];
+    const observed: (readonly [string, string | undefined])[] = [];
+    const services = new NodeProfileServices(profile, {
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      stderr: (chunk) => lines.push(new TextDecoder().decode(chunk)),
+      onUnavailable: (reason, detail) => observed.push([reason, detail]),
+    });
+
+    services.reportUnavailable("sync", "Mutagen session list returned malformed JSON");
+    services.reportUnavailable("bootstrap");
+
+    expect(observed).toEqual([
+      ["sync", "Mutagen session list returned malformed JSON"],
+      ["bootstrap", undefined],
+    ]);
+    expect(lines.join("")).toContain("Mutagen session list returned malformed JSON");
+  });
+
   it("maps a hostile fallback reason to the closed set before logging or forwarding it", async () => {
     const lines: string[] = [];
     let recorded: string | undefined;

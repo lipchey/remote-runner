@@ -346,6 +346,7 @@ export interface NodeProfileServicesOptions {
   readonly recordFallback?: (reason: string) => Promise<void>;
   readonly recordRemoteChildStarted?: () => Promise<void>;
   readonly onLocalExecution?: () => void;
+  readonly onUnavailable?: (reason: string, detail?: string) => void;
 }
 
 export class NodeProfileServices implements ProfileExecutionServices {
@@ -457,7 +458,12 @@ export class NodeProfileServices implements ProfileExecutionServices {
     const setupStateRoot = posix.dirname(posix.dirname(paths.setupState));
     const runtime = new RemoteWorkspaceRetentionRuntime(
       this.retentionCommands(),
-      { profileRoot: paths.profileRoot, setupStateRoot },
+      {
+        profileRoot: paths.profileRoot,
+        setupStateRoot,
+        mirror: posix.join(paths.generatedRoot, this.profile.consumer, ".mirror.git"),
+        privateRefPrefix: `refs/remote-runner/${this.profile.consumer}/${this.profile.id}`,
+      },
       (identity) =>
         this.mutagen.terminateOwned({
           consumer: this.profile.consumer,
@@ -898,6 +904,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
     this.write(
       `remote-runner: remote unavailable reason=${reason}${detail === undefined ? "" : ` detail=${detail}`}\n`,
     );
+    this.options.onUnavailable?.(reason, detail);
   }
 
   private write(text: string): void {

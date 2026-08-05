@@ -12,6 +12,10 @@ remote-runner doctor <profile>
 remote-runner logs <profile>
 ```
 
+`doctor` exits 0 when no check failed, 1 when at least one check is `fail`, 70 on a runtime error,
+and 2 on a usage error; a `warn` check keeps the exit code 0, so a non-zero `doctor` is a scriptable
+signal that a listed check needs the read-only diagnosis below.
+
 Build the checkout whose source should become the installed application, then install and inspect
 its immutable receipt:
 
@@ -43,6 +47,12 @@ controller owns the request, and `prewarm=idle` after completion. The final stat
 `remote-runner logs <profile>`. Do not poll this state from a worktree-creation hook or add
 project-local adapters for mode selection, dotenv parsing, fallback, notification, or prewarm
 policy.
+
+Every log record of one run carries the same `runId` and the writing `pid`, so a prewarm and a
+manual run interleaved in one file stay separable; `run-finish` and `run-error` add `durationMs`.
+A `run-unavailable` record names the stable reason the remote could not be prepared, with the
+operator detail when the failure carried one — read it before treating an exit code 75 as a single
+condition.
 
 ## Stable reason-code index
 

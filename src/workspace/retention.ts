@@ -37,6 +37,7 @@ export interface WorkspaceRetentionRuntime {
   removeQuarantine(quarantineName: string): Promise<void>;
   removeActivity(identity: string): Promise<void>;
   removeSetupState(identity: string): Promise<void>;
+  removePrivateRef(identity: string): Promise<void>;
 }
 
 export interface WorkspaceRetentionSummary {
@@ -56,6 +57,8 @@ export interface WorkspaceRetentionCommandPort {
 export interface RemoteWorkspaceRetentionPaths {
   readonly profileRoot: string;
   readonly setupStateRoot: string;
+  readonly mirror: string;
+  readonly privateRefPrefix: string;
 }
 
 function requireSafeInteger(value: number, label: string): void {
@@ -109,6 +112,7 @@ export function planWorkspaceRetention(
 
 const NONCE = /^[0-9a-f]{16}$/u;
 const QUARANTINE = /^\.gc-([0-9a-f]{24})-([0-9a-f]{16})$/u;
+const PRIVATE_REF_PREFIX = /^refs\/remote-runner\/[a-z][a-z0-9-]{0,62}\/[a-z][a-z0-9-]{0,62}$/u;
 const CAPTURE_BYTES = 64 * 1024;
 
 function canonicalRoot(value: string, label: string): void {
@@ -150,6 +154,8 @@ export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntim
   ) {
     canonicalRoot(paths.profileRoot, "workspace profile root");
     canonicalRoot(paths.setupStateRoot, "setup state root");
+    canonicalRoot(paths.mirror, "workspace mirror");
+    if (!PRIVATE_REF_PREFIX.test(paths.privateRefPrefix)) throw new Error("workspace private ref prefix is invalid");
     this.activityRoot = posix.join(paths.profileRoot, ".activity");
     this.lockRoot = posix.join(paths.profileRoot, ".locks");
   }
@@ -251,6 +257,25 @@ export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntim
       "workspace setup state removal",
     );
   }
+
+  async removePrivateRef(identity: string): Promise<void> {
+    if (!IDENTITY.test(identity)) throw new Error("workspace retention identity is invalid");
+    checked(
+      await this.commands.run([
+        "sh",
+        "-ceu",
+        /* A mirror the consumer never created is not a failure to clean up; update-ref -d already
+           exits 0 on a ref that is gone, so only a missing git dir needs the guard. */
+        /* `core.hooksPath=/dev/null` mirrors the push path: `update-ref` runs the mirror's
+           reference-transaction hook, and no repository hook may execute inside a runner transaction. */
+        'test -d "$1" || exit 0; exec git -c core.hooksPath=/dev/null --git-dir="$1" update-ref -d "$2"',
+        "remote-runner-private-ref",
+        this.paths.mirror,
+        `${this.paths.privateRefPrefix}/${identity}`,
+      ]),
+      "workspace private ref removal",
+    );
+  }
 }
 
 export async function pruneRemoteWorkspaces(
@@ -277,6 +302,9 @@ export async function pruneRemoteWorkspaces(
     try {
       const result = await runtime.withQuarantine(identity, quarantineName, existing, graceCutoffMs, async () => {
         await runtime.terminateOwnedSync(identity);
+        /* Before the quarantine goes: a failed ref deletion then leaves the quarantine directory
+           for the next pass to resume, instead of orphaning the ref with nothing left to retry. */
+        await runtime.removePrivateRef(identity);
         await runtime.removeQuarantine(quarantineName);
         await runtime.removeActivity(identity);
         await runtime.removeSetupState(identity);

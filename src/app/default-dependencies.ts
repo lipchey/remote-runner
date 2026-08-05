@@ -8,7 +8,14 @@ import { runBenchmark, type BenchmarkExecution } from "../benchmark/run-benchmar
 import type { CliDependencies } from "../cli.js";
 import { loadManifestText } from "../config/load-manifest.js";
 import type { ManifestV1, Profile, RunMode } from "../config/types.js";
-import { doctor, formatStatus, tailLogs, type DiagnosticProbe, type DiagnosticStatus } from "../diagnostics/doctor.js";
+import {
+  doctor,
+  formatStatus,
+  tailLogs,
+  type DiagnosticProbe,
+  type DiagnosticStatus,
+  type DoctorProfileReport,
+} from "../diagnostics/doctor.js";
 import { repair, type RepairAction, type RepairReceipt } from "../diagnostics/repair.js";
 import { mutagenDarwinArchitecture } from "../install/mutagen.js";
 import { createNodeNotificationCallbacks } from "../node/notifications.js";
@@ -35,6 +42,7 @@ export interface NodeCliDependencyOptions {
   readonly managedSsh?: ManagedSshTransport;
   readonly processes?: NodeProcessRuntime;
   readonly now?: () => string;
+  readonly createRunId?: () => string;
   readonly executeProfile?: (profile: Profile, command: readonly string[], mode: RunMode) => Promise<number>;
 }
 
@@ -400,13 +408,19 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     profile: Profile,
     command: readonly string[],
     mode: RunMode,
+    onUnavailable: (reason: string, detail?: string) => void,
   ) => Promise<{ readonly status: number; readonly provider: "remote" | "local" }> =
     options.executeProfile !== undefined
       ? async (profile, command, mode) => ({
           status: await options.executeProfile!(profile, command, mode),
           provider: "remote",
         })
-      : async (profile: Profile, command: readonly string[], mode: RunMode) => {
+      : async (
+          profile: Profile,
+          command: readonly string[],
+          mode: RunMode,
+          onUnavailable: (reason: string, detail?: string) => void,
+        ) => {
           const resources = await executionResources();
           const notifications = createNodeNotificationCallbacks({
             statePath: join(profileRoot(home, profile, identity), "outage.json"),
@@ -431,6 +445,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
             onLocalExecution: () => {
               provider = "local";
             },
+            onUnavailable,
           });
           const status = await runProfile(createProfileRuntime(services), profile, command, mode);
           return { status, provider };
@@ -455,30 +470,62 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         // Diagnostics must never block or alter workload selection.
       }
     };
+    const now = options.now ?? (() => new Date().toISOString());
+    /* A prewarm and a manual run interleave their records in this one file, so every record of a
+       run carries the same runId and the writer's pid; status 75 alone names four failures. */
+    const runId = (options.createRunId ?? (() => randomUUID().replaceAll("-", "").slice(0, 16)))();
+    /* Monotonic: a wall clock corrected backwards mid-run would otherwise report a negative run. */
+    const startedMs = performance.now();
+    /* The unavailable callback fires mid-run: chaining it keeps its record ahead of the terminal
+       one without the workload ever waiting on a diagnostic write. */
+    let unavailable: Promise<void> = Promise.resolve();
     await writeLog({
-      at: (options.now ?? (() => new Date().toISOString()))(),
+      at: now(),
       event: "run-start",
+      runId,
+      pid: process.pid,
       profile: profile.id,
       mode,
     });
     try {
-      const { status, provider } = await executeWorkload(profile, command, mode);
+      const { status, provider } = await executeWorkload(profile, command, mode, (reason, detail) => {
+        unavailable = unavailable.then(() =>
+          writeLog({
+            at: now(),
+            event: "run-unavailable",
+            runId,
+            pid: process.pid,
+            profile: profile.id,
+            mode,
+            reason,
+            ...(detail === undefined ? {} : { detail }),
+          }),
+        );
+      });
+      await unavailable;
       await writeLog({
-        at: (options.now ?? (() => new Date().toISOString()))(),
+        at: now(),
         event: "run-finish",
+        runId,
+        pid: process.pid,
         profile: profile.id,
         mode,
         status,
         provider,
+        durationMs: Math.round(performance.now() - startedMs),
       });
       return status;
     } catch (caught) {
+      await unavailable;
       await writeLog({
-        at: (options.now ?? (() => new Date().toISOString()))(),
+        at: now(),
         event: "run-error",
+        runId,
+        pid: process.pid,
         profile: profile.id,
         mode,
         error: caught instanceof Error ? caught.name : "UnknownError",
+        durationMs: Math.round(performance.now() - startedMs),
         /* Deliberately no provider field: a throw reaches here only from resource setup, before
            either path ran (runProfile absorbs execution failures into a status code), so any
            value would name a path that was never attempted. */
@@ -541,7 +588,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     },
     async doctorProfile(profileId) {
       const profiles = selectedProfiles(await loadManifest(), profileId);
-      const reports = [];
+      const reports: DoctorProfileReport[] = [];
       for (const profile of profiles) {
         reports.push({
           profile: profile.id,
@@ -558,7 +605,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
           }),
         });
       }
-      return profileId === undefined ? { profiles: reports } : reports[0]!.report;
+      return reports;
     },
     async logsProfile(profileId) {
       const profiles = selectedProfiles(await loadManifest(), profileId);

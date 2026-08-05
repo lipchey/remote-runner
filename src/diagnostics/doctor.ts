@@ -29,6 +29,11 @@ export interface DoctorReport {
   readonly checks: readonly DiagnosticCheck[];
 }
 
+export interface DoctorProfileReport {
+  readonly profile: string;
+  readonly report: DoctorReport;
+}
+
 export interface DoctorRuntime {
   inspect(probe: DiagnosticProbe): Promise<{
     readonly status: DiagnosticStatus;
