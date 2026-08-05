@@ -14,19 +14,23 @@ export interface HealthySetupState {
   readonly environment: EnvironmentIdentity;
 }
 
+/* `spawned` is the transport's, not the remote command's: false means the local ssh client never
+   started, so `exitCode` was manufactured here and proves nothing about what ran remotely. Carried
+   this far because attribution below turns on it — a code alone cannot say "never ran". */
+export interface DependencyCommandResult {
+  readonly exitCode: number;
+  readonly spawned: boolean;
+}
+
 export interface DependencySetupRuntime {
   readHealthyState(): Promise<HealthySetupState | undefined>;
-  checkArtifact?(artifact: string, workspaceRoot: string): Promise<{ readonly exitCode: number }>;
-  runSetup(
-    script: string,
-    workspaceRoot: string,
-    environment: EnvironmentIdentity,
-  ): Promise<{ readonly exitCode: number }>;
+  checkArtifact?(artifact: string, workspaceRoot: string): Promise<DependencyCommandResult>;
+  runSetup(script: string, workspaceRoot: string, environment: EnvironmentIdentity): Promise<DependencyCommandResult>;
   runEnsure(
     command: readonly string[],
     workspaceRoot: string,
     environment: EnvironmentIdentity,
-  ): Promise<{ readonly exitCode: number }>;
+  ): Promise<DependencyCommandResult>;
   writeHealthyState(state: HealthySetupState): Promise<void>;
 }
 
@@ -60,18 +64,28 @@ export class DependencyCommandError extends DiagnosableError {
   }
 }
 
-/* Blaming the consumer silences the outage notification AND skips the local fallback, so it may key
-   only on codes that PROVE the remote shell ran the command and it failed — never on the call site.
-   Everything above this ceiling is manufactured elsewhere: 255 is ssh's own failure, 127 is what the
-   local process layer synthesizes when the ssh client itself fails to spawn (ENOENT/EMFILE/ENOMEM
-   under load), and >=128 is that client killed by a signal — exactly the overloaded-machine case the
-   alert exists for. 125 is reserved by the workspace wrapper for its own `cd` failure, and 126/127
-   are ambiguous (a consumer's missing or non-executable setup script produces them too); both
-   resolve toward the alerting path, which costs a spurious fallback rather than a silenced outage. */
+/* Blaming the consumer silences the outage notification AND skips the local fallback, so this is an
+   ALLOW-LIST of codes that PROVE the remote shell ran the consumer's own command and it failed.
+   Stated as what is admitted, never as "everything except X": the wide form is what once admitted a
+   code no remote command had emitted.
+   Admitted: 1..124, the command's own failure status, and only after `spawned` has established that
+   an exit code was observed at all.
+   Excluded: 0 is not a failure; 125 is the workspace wrapper's own `cd` failure (see
+   remoteWorkspaceCommandArguments — a remote workspace that vanished); 128..255 covers ssh's own 255
+   and any client killed by a signal.
+   126/127 are excluded too, although the remote shell does emit them: setup scripts live INSIDE the
+   synced workspace and ensure commands resolve through toolchain roots under it, so "not found" and
+   "not executable" there describe a sync Mutagen did not deliver, a lost exec bit, or a toolchain a
+   retention prune erased — while the local checkout still holds the file. That is the same
+   attribution the artifact postcondition below refuses for its own 1, and for the same reason:
+   blaming the consumer withholds the fallback run that would have succeeded.
+   Each exclusion resolves toward alerting, which costs a spurious fallback rather than a silenced
+   outage. */
 const LAST_CONSUMER_EXIT_CODE = 124;
 
-function commandFailure(command: string, exitCode: number, message: string): Error {
-  return Number.isSafeInteger(exitCode) && exitCode >= 1 && exitCode <= LAST_CONSUMER_EXIT_CODE
+function commandFailure(command: string, result: DependencyCommandResult, message: string): Error {
+  const { exitCode } = result;
+  return result.spawned && Number.isSafeInteger(exitCode) && exitCode >= 1 && exitCode <= LAST_CONSUMER_EXIT_CODE
     ? new DependencyCommandError(command, exitCode, message)
     : new Error(message);
 }
@@ -160,13 +174,18 @@ async function checkArtifacts(
     throw new Error("bootstrap artifact inspection runtime is unavailable");
   }
   for (const artifact of artifacts) {
-    let result: { readonly exitCode: number };
+    let result: DependencyCommandResult;
     try {
       result = await runtime.checkArtifact(artifact, input.workspaceRoot);
     } catch (caught) {
       throw new Error(`bootstrap artifact inspection failed: ${artifact}`, { cause: caught });
     }
-    if (!Number.isSafeInteger(result.exitCode) || (result.exitCode !== 0 && result.exitCode !== 1)) {
+    /* The exit code of a client that never started means NOTHING, whatever it is: Node reports the
+       negative errno on close (-2 ENOENT, -24 EMFILE), and nothing pins it there. So the spawn check
+       comes first and unconditionally, rather than excluding whichever values happen to collide with
+       `test -f`'s 0/1 today — read as an answer, a failed spawn triggers a setup rerun against a
+       remote nothing can reach. */
+    if (!result.spawned || !Number.isSafeInteger(result.exitCode) || (result.exitCode !== 0 && result.exitCode !== 1)) {
       throw new Error(`bootstrap artifact inspection failed with exit code ${String(result.exitCode)}: ${artifact}`);
     }
     if (result.exitCode === 1) {
@@ -187,7 +206,7 @@ async function runSetup(runtime: DependencySetupRuntime, input: DependencySetupI
     if (!Number.isSafeInteger(result.exitCode) || result.exitCode !== 0) {
       throw commandFailure(
         script,
-        result.exitCode,
+        result,
         `dependency setup ${script} failed with exit code ${String(result.exitCode)}`,
       );
     }
@@ -200,7 +219,7 @@ async function runEnsure(
   failClosed: boolean,
 ): Promise<boolean> {
   for (const command of input.ensure) {
-    let result: { readonly exitCode: number };
+    let result: DependencyCommandResult;
     try {
       result = await runtime.runEnsure(command, input.workspaceRoot, input.environment);
     } catch (caught) {
@@ -213,7 +232,7 @@ async function runEnsure(
       if (failClosed) {
         throw commandFailure(
           command[0]!,
-          result.exitCode,
+          result,
           `dependency ensure ${command[0]} failed with exit code ${String(result.exitCode)}`,
         );
       }

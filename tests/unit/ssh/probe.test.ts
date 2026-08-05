@@ -10,15 +10,22 @@ describe("SSH availability reasons", () => {
     ["ssh: connect to host pop-os port 22: Connection timed out", "transport"],
     ["bash: node: command not found", "remote-shell"],
   ] as const)("classifies stderr without exposing it: %s", (stderr, reason) => {
-    expect(classifySshFailure(stderr, 255)).toBe(reason);
+    expect(classifySshFailure(stderr, { exitCode: 255, spawned: true })).toBe(reason);
   });
 
   it.each(["Permission denied (publickey).", "Connection closed by remote host", "Host key verification failed."])(
     "treats remote command stderr as remote-shell for non-255 exit: %s",
     (stderr) => {
-      expect(classifySshFailure(stderr, 23)).toBe("remote-shell");
+      expect(classifySshFailure(stderr, { exitCode: 23, spawned: true })).toBe("remote-shell");
     },
   );
+
+  /* The failure never left the workstation: the local ssh binary could not be spawned, and its
+     manufactured exit code is whatever the process layer put there. Diagnosed as `remote-shell` it
+     sends the operator to `ssh <remote> true` for a remote that was never contacted. */
+  it.each([-2, 23, 255])("refuses to diagnose the remote when the ssh client never started (exit %i)", (exitCode) => {
+    expect(classifySshFailure("bash: node: command not found", { exitCode, spawned: false })).toBe("transport");
+  });
 
   it("does not declare an outage after one transient failure", async () => {
     const once = vi

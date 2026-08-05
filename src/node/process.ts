@@ -32,6 +32,7 @@ export class NodeProcessRuntime implements SshProcessRuntime {
       let stderrBytes = 0;
       let outputTruncated = false;
       let spawned = true;
+      let spawnErrorCode: string | undefined;
       let settled = false;
 
       const capture = (target: Buffer[], chunk: Buffer, current: number): number => {
@@ -51,18 +52,21 @@ export class NodeProcessRuntime implements SshProcessRuntime {
       child.stderr.on("data", (chunk: Buffer) => {
         stderrBytes = capture(stderr, chunk, stderrBytes);
       });
-      child.on("error", () => {
+      child.on("error", (error: Error) => {
         spawned = false;
+        spawnErrorCode = (error as NodeJS.ErrnoException).code;
       });
       child.on("close", (code, signal) => {
         if (settled) return;
         settled = true;
-        const observedExitCode = spawned ? (code ?? signalExitCode(signal)) : 127;
+        const observedExitCode = code ?? signalExitCode(signal);
         resolve({
           exitCode: outputTruncated && observedExitCode === 0 ? 75 : observedExitCode,
           stdout: Buffer.concat(stdout),
           stderr: Buffer.concat(stderr),
           outputTruncated,
+          spawned,
+          ...(spawnErrorCode === undefined ? {} : { spawnErrorCode }),
         });
       });
       child.stdin.on("error", () => undefined);
@@ -193,6 +197,11 @@ export async function runStreamingProcess(request: StreamingProcessRequest): Pro
         if (streamFailure !== undefined) reject(streamFailure);
         else
           resolve({
+            /* Load-bearing, unlike the bounded path's removed synthesis: `runLocal` hands this code
+               straight back as the run's exit status, and 127 is the conventional "command not
+               found" — the same value run-profile.ts reports for the remote equivalent. Dropping it
+               for symmetry would present a mistyped local workload as infrastructure exit 75. The
+               remote caller reads `spawned` before the code, so it never reaches an attribution. */
             exitCode: spawned ? (code ?? signalExitCode(signal)) : 127,
             signal,
             markerSeen,

@@ -21,6 +21,17 @@ export interface BoundedProcessRequest extends ProcessRequest {
 
 export interface BoundedProcessResult extends ProcessResult {
   readonly outputTruncated: boolean;
+  /* False when the local process never ran at all (ENOENT/EMFILE/ENOMEM on spawn), in which case
+     `exitCode` is manufactured by the process layer and describes nothing the command did. Callers
+     that attribute a failure — to the consumer, to the remote, to a missing binary — must read this
+     before the code: no exit code can carry "did not start" without colliding with a code the
+     remote shell emits for its own reasons. */
+  readonly spawned: boolean;
+  /* The libuv error that stopped the spawn, present only when `spawned` is false. `spawned` alone
+     collapses "the binary is not installed" (ENOENT) with "the machine is out of file descriptors
+     or memory" (EMFILE/ENOMEM), and a caller that tolerates the first must not tolerate the second:
+     under pressure the binary IS there and whatever it was going to do still has to happen. */
+  readonly spawnErrorCode?: string;
 }
 
 export interface SshProcessRuntime {

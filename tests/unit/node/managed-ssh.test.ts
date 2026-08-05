@@ -120,6 +120,7 @@ describe("managed Mutagen SSH transport", () => {
             stdout: new TextEncoder().encode(`beta ssh-ed25519 ${encoded}\n`),
             stderr: new Uint8Array(),
             outputTruncated: false,
+            spawned: true,
           };
         },
       },
@@ -168,6 +169,7 @@ describe("managed Mutagen SSH transport", () => {
             stdout: new TextEncoder().encode(`beta ssh-ed25519 ${keyOf("replacement-key")}\n`),
             stderr: new Uint8Array(),
             outputTruncated: false,
+            spawned: true,
           };
         },
       },
@@ -199,6 +201,7 @@ describe("managed Mutagen SSH transport", () => {
             stdout: new TextEncoder().encode(`beta ssh-ed25519 ${keyOf("beta-key")}\n`),
             stderr: new Uint8Array(),
             outputTruncated: false,
+            spawned: true,
           };
         },
       },

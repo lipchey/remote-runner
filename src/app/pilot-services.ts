@@ -28,7 +28,7 @@ import { installUv } from "../bootstrap/uv.js";
 import type { Profile } from "../config/types.js";
 import { NodeProcessRuntime, runStreamingProcess } from "../node/process.js";
 import { ensureManagedKnownHost, mutagenSshEnvironment } from "../node/managed-ssh.js";
-import { RemoteToolchainRuntime, type RemoteCommandPort } from "../node/remote-toolchain.js";
+import { RemoteToolchainRuntime } from "../node/remote-toolchain.js";
 import { acquireProfileLock, LockTimeoutError } from "../runtime/lock.js";
 import { worktreeIdentity } from "../runtime/identity.js";
 import { PreparationError } from "../run/prepare.js";
@@ -39,7 +39,13 @@ import { isNotificationReason, isOutageReason } from "../notifications/outage.js
 import { encodeSecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
 import { classifySshFailure } from "../ssh/probe.js";
-import { runSsh, sshArguments, type BoundedProcessRequest, type SshProcessRuntime } from "../ssh/client.js";
+import {
+  runSsh,
+  sshArguments,
+  type BoundedProcessRequest,
+  type BoundedProcessResult,
+  type SshProcessRuntime,
+} from "../ssh/client.js";
 import { MutagenSyncLifecycle, type PausedMutagenSession } from "../sync/mutagen.js";
 import { reconcileWorkspace } from "../workspace/git-workspace.js";
 import {
@@ -264,6 +270,10 @@ const CHILD_MARKER = new TextEncoder().encode("RR_CHILD_STARTED\n");
    remote shell (126/127) still reads as an outage. */
 const WORKLOAD_SPAWN_EXIT_CODE = 69;
 const SSH_FAILURE_EXIT_CODE = 255;
+/* Kept apart from `child-start`: both are the remote going away, but this one happens to a machine
+   that had already accepted the workload, so it leaves side effects of unknown extent behind and is
+   never answered by a local rerun. The operator needs the two told apart in the alert. */
+const CONNECTION_LOST_REASON = "connection-lost";
 
 function decode(contents: Uint8Array, label: string): string {
   try {
@@ -433,7 +443,10 @@ export class NodeProfileServices implements ProfileExecutionServices {
     );
   }
 
-  private remote(captureBytes = CAPTURE_BYTES): RemoteCommandPort {
+  /* Widens RemoteCommandPort's result to the bounded one, which the bootstrap callbacks need: only
+     `spawned` separates a remote command that failed from an ssh client that never started, and
+     that difference decides whether the consumer is blamed. Still assignable to RemoteCommandPort. */
+  private remote(captureBytes = CAPTURE_BYTES): { run(args: readonly string[]): Promise<BoundedProcessResult> } {
     return {
       run: (args) =>
         runSsh(
@@ -618,7 +631,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
       CAPTURE_BYTES,
     );
     if (homeResult.exitCode !== 0) {
-      const reason = classifySshFailure(decode(homeResult.stderr, "SSH home probe"), homeResult.exitCode);
+      const reason = classifySshFailure(decode(homeResult.stderr, "SSH home probe"), homeResult);
       throw new PreparationError(reason, true);
     }
     const remoteHome = decode(homeResult.stdout, "SSH home probe").replace(/\r?\n$/u, "");
@@ -644,7 +657,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
     );
     if (capacityResult.exitCode !== 0) {
       if (capacityResult.exitCode === 73) throw new PreparationError("workspace", false);
-      const reason = classifySshFailure(decode(capacityResult.stderr, "SSH capacity probe"), capacityResult.exitCode);
+      const reason = classifySshFailure(decode(capacityResult.stderr, "SSH capacity probe"), capacityResult);
       throw new PreparationError(reason, true);
     }
     const capacity = decode(capacityResult.stdout, "SSH capacity probe").trim();
@@ -817,19 +830,19 @@ export class NodeProfileServices implements ProfileExecutionServices {
         },
         checkArtifact: async (artifact, workspaceRoot) => {
           const result = await remote.run(remoteArtifactCheckArguments(workspaceRoot, pathEnvironment, artifact));
-          return { exitCode: result.exitCode };
+          return { exitCode: result.exitCode, spawned: result.spawned };
         },
         runSetup: async (script, workspaceRoot) => {
           const result = await setupRemote.run(
             remoteWorkspaceCommandArguments(workspaceRoot, pathEnvironment, [script]),
           );
-          return { exitCode: result.exitCode };
+          return { exitCode: result.exitCode, spawned: result.spawned };
         },
         runEnsure: async (command, workspaceRoot) => {
           const result = await setupRemote.run(
             remoteWorkspaceCommandArguments(workspaceRoot, pathEnvironment, command),
           );
-          return { exitCode: result.exitCode };
+          return { exitCode: result.exitCode, spawned: result.spawned };
         },
         writeHealthyState: (state) => this.writeRemoteState(paths.setupState, state),
       },
@@ -939,9 +952,20 @@ export class NodeProfileServices implements ProfileExecutionServices {
        consumer's CI would read as a verdict. The launcher never exits 255 of its own (64, 69, 70,
        or the workload's code), so the only ambiguity left is a workload that genuinely exits 255 —
        it is read as a dropped connection until the stream protocol carries an exit marker emitted
-       by the launcher. No fallback either: the workload already started remotely. */
+       by the launcher. No fallback either: the workload already started remotely, so a local rerun
+       would repeat side effects that may already have landed.
+       The remote is nevertheless down, and a drop one minute earlier would have alerted — so this
+       one alerts too, on the same channel. Without it the only trace is exit 75, which names four
+       other conditions. */
     if (result.exitCode === SSH_FAILURE_EXIT_CODE) {
       this.write("remote-runner: ssh connection dropped mid-run; the workload result is unknown\n");
+      this.reportUnavailable(CONNECTION_LOST_REASON);
+      try {
+        await this.raiseOutage(CONNECTION_LOST_REASON);
+      } catch {
+        /* The workload has already run; a notification that cannot be delivered may not change what
+           the caller is told about it. */
+      }
       return { kind: "completed", exitCode: INFRASTRUCTURE_EXIT_CODE };
     }
     return { kind: "completed", exitCode: result.exitCode };
@@ -979,9 +1003,19 @@ export class NodeProfileServices implements ProfileExecutionServices {
        notification-reason set here, at the boundary, rather than trusted from the caller. */
     const stable = isNotificationReason(reason) ? reason : "unknown";
     this.write(`remote-runner: running locally (fallback reason=${stable})\n`);
-    /* The operator still sees the line above; only the outage channel is spared reasons that say
+    await this.raiseOutage(stable);
+  }
+
+  /* Separate from recordFallback because an outage is not always a fallback: a connection lost
+     after the workload started raises one without any local run to announce.
+     Known and accepted ceiling: if the earlier `recordRemoteChildStarted` threw, profile-runtime
+     swallowed it and the notification state still has an outage open under the PREVIOUS reason — so
+     this call dedupes into silence, and the next healthy run sends a recovery naming that stale
+     reason. Narrow (the state write itself has to fail) and noticed, not overlooked. */
+  private async raiseOutage(reason: string): Promise<void> {
+    /* The operator still sees the stderr line; only the outage channel is spared reasons that say
        nothing about the remote being reachable. */
-    if (isOutageReason(stable)) await this.options.recordFallback?.(stable);
+    if (isOutageReason(reason)) await this.options.recordFallback?.(reason);
   }
 
   async recordRemoteChildStarted(): Promise<void> {

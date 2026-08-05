@@ -32,6 +32,25 @@ describe("NodeProcessRuntime", () => {
     expect(result.stdout.byteLength).toBeLessThanOrEqual(128);
     expect(result.outputTruncated).toBe(true);
     expect(result.exitCode).not.toBe(0);
+    expect(result.spawned).toBe(true);
+  });
+
+  /* "Never started" used to travel as a synthesized 127 — the same code a remote shell emits for
+     "command not found", so no consumer of this result could tell the two apart. It travels as a
+     flag now, and the code stays whatever the process layer actually observed. */
+  it("reports a missing executable as not spawned rather than as a shell-shaped exit code", async () => {
+    const runtime = new NodeProcessRuntime();
+    const result = await runtime.run({
+      command: "/definitely/missing/remote-runner-test",
+      args: [],
+      maxOutputBytes: 1_024,
+    });
+
+    expect(result.spawned).toBe(false);
+    expect(result.exitCode).not.toBe(127);
+    /* `spawned` alone collapses "not installed" with "out of file descriptors", and a caller that
+       tolerates the first must not tolerate the second — so the libuv code travels with it. */
+    expect(result.spawnErrorCode).toBe("ENOENT");
   });
 });
 

@@ -18,6 +18,7 @@ interface Outcome {
   readonly stdout?: string;
   readonly stderr?: string;
   readonly outputTruncated?: boolean;
+  readonly spawned?: boolean;
 }
 
 class FakeProcesses implements MutagenProcessRuntime {
@@ -38,6 +39,7 @@ class FakeProcesses implements MutagenProcessRuntime {
       stdout: bytes(outcome.stdout),
       stderr: bytes(outcome.stderr),
       outputTruncated: outcome.outputTruncated ?? false,
+      spawned: outcome.spawned ?? true,
     };
   }
 }

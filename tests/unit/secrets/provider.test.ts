@@ -7,7 +7,13 @@ const bytes = (value: string): Uint8Array => new TextEncoder().encode(value);
 class FakeRuntime implements SecretProviderRuntime {
   readonly requests: unknown[] = [];
   constructor(
-    private readonly result: { exitCode?: number; stdout?: string; stderr?: string; outputTruncated?: boolean },
+    private readonly result: {
+      exitCode?: number;
+      stdout?: string;
+      stderr?: string;
+      outputTruncated?: boolean;
+      spawned?: boolean;
+    },
   ) {}
   async run(request: unknown) {
     this.requests.push(request);
@@ -16,6 +22,7 @@ class FakeRuntime implements SecretProviderRuntime {
       stdout: bytes(this.result.stdout ?? ""),
       stderr: bytes(this.result.stderr ?? ""),
       outputTruncated: this.result.outputTruncated ?? false,
+      spawned: this.result.spawned ?? true,
     };
   }
 }

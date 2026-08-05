@@ -12,7 +12,9 @@ import {
 
 describe("outage reasons", () => {
   it("excludes the reasons that say nothing about the remote being reachable", () => {
-    expect(["transport", "dns", "bootstrap", "child-start"].every(isOutageReason)).toBe(true);
+    /* `connection-lost` is the remote going away mid-run: an outage like any other, even though it
+       is the one reason that never buys a local fallback run. */
+    expect(["transport", "dns", "bootstrap", "child-start", "connection-lost"].every(isOutageReason)).toBe(true);
     expect(["lock", "validation", "consumer-setup"].some(isOutageReason)).toBe(false);
     /* A local reason must still be a KNOWN reason: an unknown one is remapped to `unknown`, which
        is an outage reason, so dropping it from the closed set would restore the Telegram alert. */
