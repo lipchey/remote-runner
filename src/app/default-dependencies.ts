@@ -636,7 +636,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
             const startedAt = performance.now();
             const status = await executeProfile(profile, execution.command, execution.location);
             const finishedAt = performance.now();
-            return { syncMs: 0, setupMs: 0, workloadMs: Math.max(0, finishedAt - startedAt), status };
+            return { elapsedMs: Math.max(0, finishedAt - startedAt), status };
           },
           async writeReceipt(path, contents) {
             const target = confinedPath(sourceRoot, path);

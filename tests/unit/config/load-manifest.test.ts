@@ -219,7 +219,7 @@ describe("loadManifestText", () => {
     ["child environment name", "REMOTE_RUNNER_CHILD", "remote_runner_child", /environment name/],
     ["secret name", "NEON_DEV_DATABASE_URL", "NeonUrl", /secret name/],
     ["notification policy", "policy: outage-recovery", "policy: always", /notification policy/],
-    ["benchmark sample lower bound", "samples: 3", "samples: 0", /benchmark samples/],
+    ["benchmark sample lower bound", "samples: 3", "samples: 2", /benchmark samples/],
     ["benchmark sample upper bound", "samples: 3", "samples: 1001", /benchmark samples/],
   ])("rejects an invalid %s", (_case, before, after, message) => {
     expect(() => loadManifestText(validManifest.replace(before, after))).toThrow(message);

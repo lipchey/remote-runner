@@ -13,24 +13,9 @@ class FakeBenchmarkRuntime implements BenchmarkRuntime {
     private readonly executeSample: (
       execution: BenchmarkExecution,
       index: number,
-    ) => Promise<{
-      syncMs: number;
-      setupMs: number;
-      workloadMs: number;
-      status: number;
-      cpuLoad?: number;
-      peakMemoryBytes?: number;
-      transferredBytes?: number;
-      cacheHitRatio?: number;
-    }> = async (_execution, index) => ({
-      syncMs: 10,
-      setupMs: 20,
-      workloadMs: [0, 1_800, 2_000, 2_300, 1_000, 1_100, 1_200][index]!,
+    ) => Promise<{ elapsedMs: number; status: number }> = async (_execution, index) => ({
+      elapsedMs: [0, 1_800, 2_000, 2_300][index]!,
       status: 0,
-      cpuLoad: 2.5,
-      peakMemoryBytes: 1_024,
-      transferredBytes: 512,
-      cacheHitRatio: 0.75,
     }),
   ) {}
 
@@ -50,59 +35,68 @@ class FakeBenchmarkRuntime implements BenchmarkRuntime {
     this.writes.push({ path, contents });
   }
 
-  samples(location: "local" | "remote", workloadId: string) {
-    return this.executions
-      .filter((entry) => entry.location === location && entry.workloadId === workloadId)
-      .map((entry) => entry.cache);
+  executionCount(location: "local" | "remote", workloadId: string) {
+    return this.executions.filter((entry) => entry.location === location && entry.workloadId === workloadId).length;
   }
 }
 
 const profile = loadManifestText(validManifest).profiles[0]!;
 
 describe("runBenchmark", () => {
-  it("runs warm-up plus three cold and three warm samples per location", async () => {
+  it("runs one warm-up plus samples measured runs per (location x workload) pair", async () => {
     const runtime = new FakeBenchmarkRuntime();
 
     const report = await runBenchmark(runtime, profile);
 
-    expect(runtime.samples("local", "full")).toEqual(["warmup", "cold", "cold", "cold", "warm", "warm", "warm"]);
-    expect(runtime.samples("remote", "full")).toEqual(["warmup", "cold", "cold", "cold", "warm", "warm", "warm"]);
+    expect(runtime.executionCount("local", "full")).toBe(1 + profile.benchmark.samples);
+    expect(runtime.executionCount("remote", "full")).toBe(1 + profile.benchmark.samples);
+    expect(report.rows).toHaveLength(2);
     expect(report.rows[0]).toMatchObject({
       location: "local",
       workloadId: "full",
-      cache: "cold",
+      samples: profile.benchmark.samples,
       medianMs: 2_000,
       minMs: 1_800,
       maxMs: 2_300,
-      wallMedianMs: 2_030,
       status: 0,
     });
   });
 
-  it("excludes warm-up, preserves workload failures, and aggregates available metrics", async () => {
+  it("excludes the warm-up sample from aggregation, and preserves workload failures", async () => {
     const runtime = new FakeBenchmarkRuntime(async (execution, index) => ({
-      syncMs: index === 0 ? 99_999 : 10 + index,
-      setupMs: index === 0 ? 99_999 : 20 + index,
-      workloadMs: index === 0 ? 99_999 : index * 100,
+      elapsedMs: index === 0 ? 99_999 : index * 100,
       status: execution.location === "local" && index === 2 ? 42 : 0,
-      ...(index % 2 === 0 ? { peakMemoryBytes: index * 1_000 } : {}),
     }));
 
     const report = await runBenchmark(runtime, profile);
-    const localCold = report.rows.find(
-      (row) => row.location === "local" && row.workloadId === "full" && row.cache === "cold",
-    );
+    const local = report.rows.find((row) => row.location === "local" && row.workloadId === "full");
 
-    expect(localCold).toMatchObject({
+    expect(local).toMatchObject({
       medianMs: 200,
       minMs: 100,
       maxMs: 300,
       status: 42,
       samples: 3,
       successfulSamples: 2,
-      peakMemoryBytes: 2_000,
     });
-    expect(localCold?.medianMs).not.toBe(99_999);
+    expect(local?.medianMs).not.toBe(99_999);
+    expect(report.samples.some((sample) => sample.elapsedMs === 99_999)).toBe(false);
+  });
+
+  it("reports null median and range for a pair with no successful sample, never a fabricated 0", async () => {
+    const runtime = new FakeBenchmarkRuntime(async () => ({ elapsedMs: 0, status: 1 }));
+
+    const report = await runBenchmark(runtime, profile);
+    const local = report.rows.find((row) => row.location === "local" && row.workloadId === "full");
+
+    expect(local).toMatchObject({
+      samples: profile.benchmark.samples,
+      successfulSamples: 0,
+      status: 1,
+      medianMs: null,
+      minMs: null,
+      maxMs: null,
+    });
   });
 
   it("uses only declared workload argv and writes timestamped JSON and Markdown receipts", async () => {
@@ -110,6 +104,7 @@ describe("runBenchmark", () => {
 
     const report = await runBenchmark(runtime, profile);
 
+    expect(runtime.executions).toHaveLength(2 * (1 + profile.benchmark.samples));
     expect(
       runtime.executions.every(
         (execution) => execution.command.join("\0") === profile.benchmark.workloads[0]!.command.join("\0"),
@@ -120,16 +115,17 @@ describe("runBenchmark", () => {
       "benchmark/20260731T123456Z-verify-full.md",
     ]);
     expect(JSON.parse(runtime.writes[0]!.contents)).toMatchObject({
+      schemaVersion: 2,
       profile: "verify-full",
       receiptPaths: report.receiptPaths,
     });
-    expect(runtime.writes[1]!.contents).toContain("| local | full | cold |");
+    expect(runtime.writes[1]!.contents).toContain("| local | full |");
   });
 
   it("turns thrown secret-bearing errors into sanitized failed samples", async () => {
     const runtime = new FakeBenchmarkRuntime(async (_execution, index) => {
       if (index === 2) throw new Error("postgres://user:secret-canary@db/test");
-      return { syncMs: 1, setupMs: 2, workloadMs: 3, status: 0 };
+      return { elapsedMs: 3, status: 0 };
     });
 
     const report = await runBenchmark(runtime, profile);
@@ -137,6 +133,5 @@ describe("runBenchmark", () => {
 
     expect(serialized).not.toContain("secret-canary");
     expect(report.rows.some((row) => row.status === 75)).toBe(true);
-    expect(report.rows.every((row) => row.cpuLoad === undefined)).toBe(true);
   });
 });
