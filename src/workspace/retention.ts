@@ -24,8 +24,18 @@ export type WorkspaceRetentionEntry =
 
 export type WorkspaceQuarantineResult = "removed" | "locked" | "missing" | "unsafe" | "refreshed";
 
+/* The clock ships with the listing because it must come from the same machine as the timestamps it
+   is compared against: activity mtimes are remote. A local clock running more than `graceMinutes`
+   ahead makes every marker look stale, so a preparing identity that has fallen outside `keep` is
+   quarantined and `rm -rf`d mid-preparation — before its workload lock exists, and past the remote
+   freshness guard in `withQuarantine`, which is handed the same skewed cutoff. */
+export interface WorkspaceRetentionListing {
+  readonly nowMs: number;
+  readonly entries: readonly WorkspaceRetentionEntry[];
+}
+
 export interface WorkspaceRetentionRuntime {
-  list(): Promise<readonly WorkspaceRetentionEntry[]>;
+  list(): Promise<WorkspaceRetentionListing>;
   withQuarantine(
     identity: string,
     quarantineName: string,
@@ -136,11 +146,19 @@ function decodeRecords(contents: Uint8Array): string[] {
   } catch {
     throw new Error("workspace retention listing returned invalid UTF-8");
   }
-  if (decoded.length === 0) return [];
   if (!decoded.endsWith("\0")) throw new Error("workspace retention listing was not NUL terminated");
   const records = decoded.slice(0, -1).split("\0");
-  if (records.length % 3 !== 0) throw new Error("workspace retention listing returned partial records");
+  if (records.length % 3 !== 1) throw new Error("workspace retention listing returned partial records");
   return records;
+}
+
+function parseSeconds(value: string): number {
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) {
+    throw new Error("workspace retention listing returned an invalid timestamp");
+  }
+  const milliseconds = Number(value) * 1000;
+  if (!Number.isSafeInteger(milliseconds)) throw new Error("workspace retention timestamp is unsafe");
+  return milliseconds;
 }
 
 export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntime {
@@ -160,12 +178,12 @@ export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntim
     this.lockRoot = posix.join(paths.profileRoot, ".locks");
   }
 
-  async list(): Promise<readonly WorkspaceRetentionEntry[]> {
+  async list(): Promise<WorkspaceRetentionListing> {
     const result = checked(
       await this.commands.run([
         "sh",
         "-ceu",
-        'umask 077; root=$1; activity=$2; mkdir -p -- "$root" "$activity" "$root/.locks"; find "$root" -mindepth 1 -maxdepth 1 ! -name .activity ! -name .locks -exec sh -ceu \'activity=$1; shift; for path do name=${path##*/}; kind=u; mtime=0; if [ -d "$path" ] && [ ! -L "$path" ] && printf "%s\\n" "$name" | grep -Eq "^[0-9a-f]{24}$"; then kind=d; marker="$activity/$name"; if [ -f "$marker" ] && [ ! -L "$marker" ]; then mtime=$(stat -c %Y -- "$marker"); else mtime=$(stat -c %Y -- "$path"); fi; elif [ -d "$path" ] && [ ! -L "$path" ] && printf "%s\\n" "$name" | grep -Eq "^\\.gc-[0-9a-f]{24}-[0-9a-f]{16}$"; then kind=q; fi; printf "%s\\0%s\\0%s\\0" "$kind" "$name" "$mtime"; done\' remote-runner-retention-entry "$activity" {} +',
+        'umask 077; root=$1; activity=$2; mkdir -p -- "$root" "$activity" "$root/.locks"; printf "%s\\0" "$(date +%s)"; find "$root" -mindepth 1 -maxdepth 1 ! -name .activity ! -name .locks -exec sh -ceu \'activity=$1; shift; for path do name=${path##*/}; kind=u; mtime=0; if [ -d "$path" ] && [ ! -L "$path" ] && printf "%s\\n" "$name" | grep -Eq "^[0-9a-f]{24}$"; then kind=d; marker="$activity/$name"; if [ -f "$marker" ] && [ ! -L "$marker" ]; then mtime=$(stat -c %Y -- "$marker"); else mtime=$(stat -c %Y -- "$path"); fi; elif [ -d "$path" ] && [ ! -L "$path" ] && printf "%s\\n" "$name" | grep -Eq "^\\.gc-[0-9a-f]{24}-[0-9a-f]{16}$"; then kind=q; fi; printf "%s\\0%s\\0%s\\0" "$kind" "$name" "$mtime"; done\' remote-runner-retention-entry "$activity" {} +',
         "remote-runner-retention-list",
         this.paths.profileRoot,
         this.activityRoot,
@@ -173,16 +191,12 @@ export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntim
       "workspace retention listing",
     );
     const records = decodeRecords(result.stdout);
+    const nowMs = parseSeconds(records[0]!);
     const entries: WorkspaceRetentionEntry[] = [];
-    for (let index = 0; index < records.length; index += 3) {
+    for (let index = 1; index < records.length; index += 3) {
       const kind = records[index]!;
       const name = records[index + 1]!;
-      const seconds = records[index + 2]!;
-      if (!/^(?:0|[1-9][0-9]*)$/u.test(seconds)) {
-        throw new Error("workspace retention listing returned an invalid timestamp");
-      }
-      const activityMs = Number(seconds) * 1000;
-      if (!Number.isSafeInteger(activityMs)) throw new Error("workspace retention timestamp is unsafe");
+      const activityMs = parseSeconds(records[index + 2]!);
       if (kind === "d" && IDENTITY.test(name)) {
         entries.push({ kind: "directory", identity: name, activityMs });
         continue;
@@ -194,7 +208,7 @@ export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntim
       }
       entries.push({ kind: "unsafe", identity: name, activityMs });
     }
-    return entries;
+    return { nowMs, entries };
   }
 
   async withQuarantine(
@@ -282,10 +296,9 @@ export async function pruneRemoteWorkspaces(
   runtime: WorkspaceRetentionRuntime,
   currentIdentity: string,
   policy: WorkspaceRetentionPolicy,
-  nowMs: number,
   createNonce: () => string,
 ): Promise<WorkspaceRetentionSummary> {
-  const entries = await runtime.list();
+  const { nowMs, entries } = await runtime.list();
   const directories = entries.filter(
     (entry): entry is WorkspaceActivity & { readonly kind: "directory" } =>
       entry.kind === "directory" && IDENTITY.test(entry.identity),

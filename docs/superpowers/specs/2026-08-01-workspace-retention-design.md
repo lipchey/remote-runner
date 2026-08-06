@@ -85,6 +85,12 @@ treats its mtime as the identity's activity time. A missing legacy marker falls 
 directory mtime. Identities inside the 60-minute grace window are never collected, which protects a
 concurrently preparing identity before its workload lock exists.
 
+Both the marker mtimes and the clock the grace window is measured against are read on the remote
+host, in the same listing call. A cutoff computed from the local clock would only hold while the two
+machines agree: local time running more than `graceMinutes` ahead puts every marker outside the
+window, so a preparing identity that has fallen outside `keep` is collected rather than protected.
+The remote re-check before quarantine cannot catch that, because it is handed the same cutoff.
+
 The collector also excludes the current identity unconditionally. Directory names must match the
 existing 24-character lowercase hexadecimal identity format, and candidates must be real
 directories directly below the exact consumer/profile root. Symlinks and special files are
@@ -95,7 +101,7 @@ ignored and reported rather than followed.
 Cleanup runs after every remotely started workload finishes, whether its exit code is zero or
 non-zero. It does not run when the remote child never started.
 
-1. Enumerate confined identity directories and read their activity timestamps.
+1. Enumerate confined identity directories and read their activity timestamps and the remote clock.
 2. Sort newest first, retain the current identity and enough newest identities to satisfy `keep`.
 3. Skip every remaining candidate inside `graceMinutes`.
 4. For each eligible candidate, acquire its remote lock non-blockingly and atomically rename the
