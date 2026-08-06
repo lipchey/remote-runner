@@ -612,6 +612,106 @@ describe("pilot service boundaries", () => {
     expect(serializedRequests.some((value) => value.includes("remote-runner-retention-list"))).toBe(true);
   });
 
+  /* Collection bounds each secret; only the frame bounds their total, so this is the one secrets
+     failure that first becomes visible at child start. Reported as the step that failed rather than
+     as a child that failed to start — and reported at all, where a throw here used to exit 75 with
+     nothing on stderr, in the runner log or on the outage channel. */
+  it("gives up with the secrets reason when the collected values cannot fit one frame", async () => {
+    const manySecrets = loadManifestText(
+      validManifest.replace("allow: [NEON_DEV_DATABASE_URL]", "allow: [FIRST_SECRET, SECOND_SECRET, THIRD_SECRET]"),
+    ).profiles[0]!;
+    const services = new NodeProfileServices(manySecrets, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      knownHostsPath: "/Users/admin/.local/state/remote-runner/known_hosts/managed",
+      launcherSource: new Uint8Array([1]),
+      streamProcess: async () => {
+        throw new Error("the frame must fail before anything is spawned");
+      },
+    });
+    Object.assign(services, {
+      remotePaths: resolveRemotePaths("/home/admin", manySecrets, worktreeIdentity(process.cwd())),
+      nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
+      uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
+    });
+    const value = "x".repeat(50 * 1024);
+
+    const result = await services.startRemote(
+      ["./verify"],
+      { FIRST_SECRET: value, SECOND_SECRET: value, THIRD_SECRET: value },
+      async () => undefined,
+    );
+
+    expect(result).toEqual({ kind: "not-started", reason: "secrets" });
+  });
+
+  /* The stderr line is the losable half of a report; the durable record behind it is not. A writer
+     that threw used to take that record down with it, leaving the give-up with no trace at all.
+     Both callers print before their durable half, so both are pinned here. */
+  it("still forwards the durable record when the operator's stderr writer throws", async () => {
+    const observed: string[] = [];
+    const fallbacks: string[] = [];
+    const services = new NodeProfileServices(profile, {
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      stderr: () => {
+        throw new Error("stderr is closed");
+      },
+      onUnavailable: (reason) => observed.push(reason),
+      recordFallback: async (reason) => {
+        fallbacks.push(reason);
+      },
+    });
+
+    services.reportUnavailable("child-start");
+    await services.recordFallback("child-start");
+
+    expect(observed).toEqual(["child-start"]);
+    expect(fallbacks).toEqual(["child-start"]);
+  });
+
+  /* The cleanup warning is written after the marker, so an inline writer that throws escapes
+     startRemote and the run gives up with 75 — losing the finished workload's exit code, the one
+     thing the warning says it is preserving. */
+  it("keeps the workload exit when retention cleanup and the stderr writer both fail", async () => {
+    const processes = {
+      async run() {
+        throw new Error("the workspace is unreachable after the run");
+      },
+      async isAlive() {
+        return false;
+      },
+    } as unknown as NodeProcessRuntime;
+    const services = new NodeProfileServices(retainedDataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      knownHostsPath: "/Users/admin/.local/state/remote-runner/known_hosts/managed",
+      launcherSource: new Uint8Array([1]),
+      processes,
+      streamProcess: async (request: StreamingProcessRequest) => {
+        await request.onMarker();
+        return { exitCode: 23, signal: null, markerSeen: true, spawned: true };
+      },
+      stderr: () => {
+        throw new Error("stderr is closed");
+      },
+    });
+    Object.assign(services, {
+      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, worktreeIdentity(process.cwd())),
+      nodeRoot: "/remote/node",
+      uvRoot: "/remote/uv",
+    });
+
+    const result = await services.startRemote(
+      ["./scripts/verify", "--full"],
+      { NEON_DEV_DATABASE_URL: "secret-canary" },
+      async () => undefined,
+    );
+
+    expect(result).toEqual({ kind: "completed", exitCode: 23 });
+  });
+
   it("reaps the Mutagen session of a deleted worktree after a workload, with no retention policy", async () => {
     const current = worktreeIdentity(process.cwd());
     const sandbox = await mkdtemp(join(tmpdir(), "remote-runner-sweep-"));

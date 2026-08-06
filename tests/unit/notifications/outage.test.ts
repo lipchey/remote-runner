@@ -9,6 +9,7 @@ import {
   type OutageRuntime,
   type OutageState,
 } from "../../../src/notifications/outage.js";
+import { LOCAL_RERUN_POINTLESS_REASONS } from "../../../src/run/run-profile.js";
 
 describe("outage reasons", () => {
   it("excludes the reasons that say nothing about the remote being reachable", () => {
@@ -20,6 +21,19 @@ describe("outage reasons", () => {
        is an outage reason, so dropping it from the closed set would restore the Telegram alert. */
     expect(isNotificationReason("consumer-setup")).toBe(true);
     expect(isOutageReason("not-a-reason")).toBe(false);
+  });
+
+  /* Two lists, two questions: this one asks whether a local rerun is pointless, `LOCAL_REASONS`
+     asks whether the remote is down. They insured each other until `failClosed` began running
+     unconditionally, leaving `isOutageReason` as the only barrier — so a reason skipping the local
+     run while still counting as an outage now pages the operator about a healthy remote.
+     Containment only, and true of today's members rather than a law: a future decision may
+     legitimately want a reason that is both, and should amend this deliberately. */
+  it("keeps every reason that skips the local run off the outage channel", () => {
+    for (const reason of LOCAL_RERUN_POINTLESS_REASONS) {
+      expect(isNotificationReason(reason), `${reason} is not a known reason`).toBe(true);
+      expect(isOutageReason(reason), `${reason} skips the local run but still alerts`).toBe(false);
+    }
   });
 });
 

@@ -57,18 +57,49 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
       return result;
     },
     async startRemote(command, secrets, onChildStarted) {
-      const result = await services.startRemote(command, secrets, async () => {
-        await onChildStarted();
-        pendingFallbackReason = undefined;
-        try {
-          await services.recordRemoteChildStarted();
-        } catch {
-          /* notification never blocks workload */
+      let started = false;
+      let result: RemoteExecutionResult;
+      try {
+        result = await services.startRemote(command, secrets, async () => {
+          /* First statement, mirroring run-profile's own `childStarted`: everything from here on
+             must be read as "the workload is running remotely", including a throw. */
+          started = true;
+          await onChildStarted();
+          pendingFallbackReason = undefined;
+          try {
+            await services.recordRemoteChildStarted();
+          } catch {
+            /* notification never blocks workload */
+          }
+        });
+      } catch (caught) {
+        if (started) {
+          /* The workload is already running remotely, so its result is unknown and a local rerun
+             would repeat side effects — no fallback, and runProfile keeps exit 75. Not
+             `connection-lost` though: what reaches here is a stream writer that threw and killed
+             the local ssh process, which says nothing about the remote being down, so the operator
+             gets the line and the log record without an outage alert. */
+          report(services, "unknown");
+          throw caught;
         }
-      });
+        /* The controller threw before any child started — an internal invariant (remote paths or a
+           toolchain root missing before their step ran), an invalid remote argument, a synchronous
+           spawn failure. Identical outcome to the not-started result the same call returns without
+           throwing, so it takes the same path instead of reaching runProfile's catch, which exits
+           75 having established no reason at all. One reason for all of them: unlike the returning
+           half, a throw carries no reason of its own, and inventing one per throw site would be a
+           guess. Known ceiling: the marker arrives on the remote child's spawn event, so a throw in
+           the window between that spawn and the marker reaching us falls back locally against a
+           workload that is already alive — the same window the shipped non-throwing `!markerSeen`
+           path already falls back through. */
+        result = { kind: "not-started", reason: "child-start" };
+      }
       if (result.kind === "not-started" && result.reason !== WORKLOAD_COMMAND_REASON) {
-        pendingFallbackReason = "child-start";
-        report(services, "child-start");
+        /* The reason belongs to the site that knows what failed; only the closed-set mapping is
+           applied here, so a secrets frame that could not be encoded stays `secrets`. */
+        const reason = stableReason(result.reason);
+        pendingFallbackReason = reason;
+        report(services, reason);
       }
       return result;
     },
