@@ -564,7 +564,7 @@ describe("pilot service boundaries", () => {
         requests.push(request);
         const serialized = JSON.stringify(request.args);
         const stdout = serialized.includes("remote-runner-retention-list")
-          ? `d\0${current}\0${2_000_000_000}\0d\0${stale}\0${1}\0`
+          ? `${2_000_000_000}\0d\0${current}\0${2_000_000_000}\0d\0${stale}\0${1}\0`
           : "";
         return {
           exitCode: 0,

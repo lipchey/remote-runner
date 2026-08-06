@@ -1,4 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterAll, describe, expect, it } from "vitest";
 
 import {
   planWorkspaceRetention,
@@ -13,6 +18,32 @@ const nowMs = 2_000_000_000_000;
 
 function identity(value: number): string {
   return value.toString(16).padStart(24, "0");
+}
+
+const temporaryRoots: string[] = [];
+
+afterAll(async () => {
+  await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
+
+/* Runs the listing argv for real instead of faking its stdout. Substring assertions on a generated
+   script survive any change that keeps the token and breaks the behaviour — dropping the clock
+   `printf`, moving it after `find`, or breaking its quoting all leave the spelling intact. */
+function localCommandPort(): WorkspaceRetentionCommandPort {
+  return {
+    async run(args) {
+      const [command, ...rest] = args;
+      const result = spawnSync(command!, rest, { maxBuffer: 1024 * 1024 });
+      return {
+        exitCode: result.status ?? 1,
+        stdout: new Uint8Array(result.stdout ?? []),
+        stderr: new Uint8Array(result.stderr ?? []),
+      };
+    },
+    async withLock() {
+      return "removed";
+    },
+  };
 }
 
 describe("planWorkspaceRetention", () => {
@@ -115,10 +146,13 @@ describe("pruneRemoteWorkspaces", () => {
     const runtime: WorkspaceRetentionRuntime = {
       async list() {
         calls.push("list");
-        return [
-          { kind: "directory", identity: current, activityMs: nowMs },
-          { kind: "directory", identity: stale, activityMs: nowMs - 61 * minute },
-        ];
+        return {
+          nowMs,
+          entries: [
+            { kind: "directory", identity: current, activityMs: nowMs },
+            { kind: "directory", identity: stale, activityMs: nowMs - 61 * minute },
+          ],
+        };
       },
       async withQuarantine(target, quarantine, existing, _graceCutoffMs, cleanup) {
         calls.push(`quarantine:${target}:${quarantine}:${existing}`);
@@ -147,7 +181,6 @@ describe("pruneRemoteWorkspaces", () => {
       runtime,
       current,
       { keep: 1, graceMinutes: 60 },
-      nowMs,
       () => "0123456789abcdef",
     );
 
@@ -176,15 +209,18 @@ describe("pruneRemoteWorkspaces", () => {
     const runtime: WorkspaceRetentionRuntime = {
       async list() {
         calls.push("list");
-        return [
-          { kind: "directory", identity: current, activityMs: nowMs },
-          { kind: "quarantine", identity: remnant, activityMs: 0, quarantineName: `.gc-${remnant}-aaaaaaaaaaaaaaaa` },
-          { kind: "directory", identity: locked, activityMs: nowMs - 61 * minute },
-          { kind: "directory", identity: failed, activityMs: nowMs - 62 * minute },
-          { kind: "directory", identity: removed, activityMs: nowMs - 63 * minute },
-          { kind: "directory", identity: refreshed, activityMs: nowMs - 64 * minute },
-          { kind: "unsafe", identity: "symlink", activityMs: 0 },
-        ];
+        return {
+          nowMs,
+          entries: [
+            { kind: "directory", identity: current, activityMs: nowMs },
+            { kind: "quarantine", identity: remnant, activityMs: 0, quarantineName: `.gc-${remnant}-aaaaaaaaaaaaaaaa` },
+            { kind: "directory", identity: locked, activityMs: nowMs - 61 * minute },
+            { kind: "directory", identity: failed, activityMs: nowMs - 62 * minute },
+            { kind: "directory", identity: removed, activityMs: nowMs - 63 * minute },
+            { kind: "directory", identity: refreshed, activityMs: nowMs - 64 * minute },
+            { kind: "unsafe", identity: "symlink", activityMs: 0 },
+          ],
+        };
       },
       async withQuarantine(target, _quarantine, existing, _graceCutoffMs, cleanup) {
         calls.push(`quarantine:${target}:${existing}`);
@@ -216,7 +252,6 @@ describe("pruneRemoteWorkspaces", () => {
       runtime,
       current,
       { keep: 1, graceMinutes: 60 },
-      nowMs,
       () => "bbbbbbbbbbbbbbbb",
     );
 
@@ -232,6 +267,43 @@ describe("pruneRemoteWorkspaces", () => {
       ]),
     );
     expect(result).toEqual({ retained: 1, graceProtected: 1, locked: 1, removed: 2, failed: 1, ignored: 1 });
+  });
+
+  it("derives the grace window from the listing clock, not the local one", async () => {
+    const current = identity(60);
+    const active = identity(61);
+    const stale = identity(62);
+    /* Deliberately unlike any local clock: an implementation reading Date.now() puts the cutoff
+       years ahead of every activity marker here, and collects the actively preparing workspace. */
+    const remoteNowMs = 1_600_000_000_000;
+    const quarantined: { identity: string; graceCutoffMs: number }[] = [];
+    const runtime: WorkspaceRetentionRuntime = {
+      async list() {
+        return {
+          nowMs: remoteNowMs,
+          entries: [
+            { kind: "directory", identity: current, activityMs: remoteNowMs },
+            { kind: "directory", identity: active, activityMs: remoteNowMs - 10 * minute },
+            { kind: "directory", identity: stale, activityMs: remoteNowMs - 61 * minute },
+          ],
+        };
+      },
+      async withQuarantine(target, _quarantine, _existing, graceCutoffMs, cleanup) {
+        quarantined.push({ identity: target, graceCutoffMs });
+        await cleanup();
+        return "removed";
+      },
+      async terminateOwnedSync() {},
+      async removeQuarantine() {},
+      async removeActivity() {},
+      async removeSetupState() {},
+      async removePrivateRef() {},
+    };
+
+    const result = await pruneRemoteWorkspaces(runtime, current, { keep: 1, graceMinutes: 60 }, () => "0".repeat(16));
+
+    expect(quarantined).toEqual([{ identity: stale, graceCutoffMs: remoteNowMs - 60 * minute }]);
+    expect(result).toEqual({ retained: 1, graceProtected: 1, locked: 0, removed: 1, failed: 0, ignored: 0 });
   });
 });
 
@@ -277,8 +349,9 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
     const remnant = identity(51);
     const commands: readonly string[][] = [] as string[][];
     const mutableCommands = commands as string[][];
+    const remoteClockSeconds = Math.floor(nowMs / 1000) + 7;
     const encoded = new TextEncoder().encode(
-      `d\0${current}\0${Math.floor(nowMs / 1000)}\0q\0.gc-${remnant}-cccccccccccccccc\0${0}\0u\0hostile\0${0}\0`,
+      `${remoteClockSeconds}\0d\0${current}\0${Math.floor(nowMs / 1000)}\0q\0.gc-${remnant}-cccccccccccccccc\0${0}\0u\0hostile\0${0}\0`,
     );
     const port: WorkspaceRetentionCommandPort = {
       async run(args) {
@@ -305,16 +378,19 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
       },
     );
 
-    expect(await runtime.list()).toEqual([
-      { kind: "directory", identity: current, activityMs: Math.floor(nowMs / 1000) * 1000 },
-      {
-        kind: "quarantine",
-        identity: remnant,
-        quarantineName: `.gc-${remnant}-cccccccccccccccc`,
-        activityMs: 0,
-      },
-      { kind: "unsafe", identity: "hostile", activityMs: 0 },
-    ]);
+    expect(await runtime.list()).toEqual({
+      nowMs: remoteClockSeconds * 1000,
+      entries: [
+        { kind: "directory", identity: current, activityMs: Math.floor(nowMs / 1000) * 1000 },
+        {
+          kind: "quarantine",
+          identity: remnant,
+          quarantineName: `.gc-${remnant}-cccccccccccccccc`,
+          activityMs: 0,
+        },
+        { kind: "unsafe", identity: "hostile", activityMs: 0 },
+      ],
+    });
     await runtime.withQuarantine(current, `.gc-${current}-dddddddddddddddd`, false, nowMs - minute, async () => {
       await runtime.terminateOwnedSync(current);
       await runtime.removePrivateRef(current);
@@ -325,6 +401,9 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
 
     expect(terminated).toEqual([current]);
     expect(commands[0]?.slice(0, 3)).toEqual(["sh", "-ceu", expect.any(String)]);
+    /* The clock record the parser consumes is emitted by this script and by nothing else, so
+       dropping it here turns every real listing into a partial-records failure. */
+    expect(commands[0]?.[2]).toContain('printf "%s\\0" "$(date +%s)"');
     expect(commands[0]).toContain("/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full");
     expect(commands[1]).toEqual(
       expect.arrayContaining([
@@ -353,6 +432,34 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
       "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/.mirror.git",
       `refs/remote-runner/ariadne/verify-full/${current}`,
     ]);
+  });
+
+  it("reads the clock from the listing script it actually runs", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "remote-runner-retention-")));
+    temporaryRoots.push(root);
+    const remnant = identity(70);
+    const quarantineName = `.gc-${remnant}-ffffffffffffffff`;
+    /* A quarantine entry, not an identity directory: the inner script reports it without calling
+       `stat -c %Y`, so this covers clock-then-entries ordering on a host without GNU coreutils. */
+    await mkdir(join(root, quarantineName), { recursive: true });
+    const runtime = new RemoteWorkspaceRetentionRuntime(
+      localCommandPort(),
+      {
+        profileRoot: root,
+        setupStateRoot: "/state/verify-full",
+        mirror: "/profiles/.mirror.git",
+        privateRefPrefix: "refs/remote-runner/ariadne/verify-full",
+      },
+      async () => undefined,
+    );
+
+    const before = Math.floor(Date.now() / 1000) * 1000;
+    const listing = await runtime.list();
+    const after = Math.ceil(Date.now() / 1000) * 1000;
+
+    expect(listing.nowMs).toBeGreaterThanOrEqual(before);
+    expect(listing.nowMs).toBeLessThanOrEqual(after);
+    expect(listing.entries).toEqual([{ kind: "quarantine", identity: remnant, quarantineName, activityMs: 0 }]);
   });
 
   it("rejects a private ref prefix that is not exactly consumer and profile", async () => {

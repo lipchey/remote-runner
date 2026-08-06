@@ -530,7 +530,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
           }),
       );
       try {
-        await pruneRemoteWorkspaces(runtime, this.identity, policy, Date.now(), () =>
+        await pruneRemoteWorkspaces(runtime, this.identity, policy, () =>
           randomUUID().replaceAll("-", "").slice(0, 16),
         );
       } catch (caught) {
