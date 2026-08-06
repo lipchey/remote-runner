@@ -1,0 +1,5 @@
+#!/bin/sh
+# Enabled per clone by: git config core.hooksPath .githooks
+set -u
+
+exec "$(dirname "$0")/install-freshness.sh" ORIG_HEAD HEAD

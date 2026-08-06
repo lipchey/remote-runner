@@ -1,0 +1,7 @@
+#!/bin/sh
+# Enabled per clone by: git config core.hooksPath .githooks
+# $3 is 1 for a branch checkout and 0 for a file checkout; only the former can change what main holds.
+set -u
+
+[ "${3:-0}" = "1" ] || exit 0
+exec "$(dirname "$0")/install-freshness.sh" "$1" "$2"

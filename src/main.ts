@@ -6,8 +6,13 @@ import { createNodeCliDependencies, installedMutagenPath } from "./app/default-d
 import { runCli, type CliDependencies, type CliIo } from "./cli.js";
 import { runController } from "./node/controller.js";
 import { ensureManagedSshTransport } from "./node/managed-ssh.js";
-import { formatInstallVersion, readInstalledReceipt, type InstallReceipt } from "./node/install-receipt.js";
-import { installCurrentApplication } from "./node/local-install.js";
+import {
+  formatInstallReceipt,
+  formatInstallVersion,
+  readInstalledReceipt,
+  type InstallReceipt,
+} from "./node/install-receipt.js";
+import { applicationIdentity, installCurrentApplication } from "./node/local-install.js";
 import type { PrewarmRequest } from "./prewarm/queue.js";
 
 export interface MainDependencies {
@@ -17,6 +22,7 @@ export interface MainDependencies {
     readonly appIdentity: string;
   }>;
   readInstallReceipt?(): Promise<InstallReceipt>;
+  identifyLocal?(sourceRoot: string): Promise<InstallReceipt>;
   createCliDependencies?(sourceRoot: string): Promise<CliDependencies>;
   runController?(runPrewarm: (request: PrewarmRequest) => Promise<number>): Promise<number>;
 }
@@ -24,6 +30,7 @@ export interface MainDependencies {
 const DEFAULT_MAIN_DEPENDENCIES: MainDependencies = {
   installLocal: (sourceRoot) => installCurrentApplication(process.env.HOME ?? "", sourceRoot),
   readInstallReceipt: () => readInstalledReceipt(import.meta.url),
+  identifyLocal: (sourceRoot) => applicationIdentity(sourceRoot),
   createCliDependencies: (sourceRoot) => createNodeCliDependencies({ sourceRoot }),
   async runController(runPrewarm) {
     const home = process.env.HOME ?? "";
@@ -58,6 +65,29 @@ export async function runMain(
     }
   }
   if (argv[0] === "install") {
+    /* Reads the receipt beside the RUNNING main.js, so this answers "is the command every consumer
+       resolves the one this checkout builds" only when invoked through the installed
+       `remote-runner`. A build writes no receipt into `dist`, so `node dist/src/main.js
+       install --check` cannot answer it at all and exits 70 on the missing receipt. */
+    if (argv.length === 2 && argv[1] === "--check") {
+      try {
+        const identify = mainDependencies.identifyLocal ?? DEFAULT_MAIN_DEPENDENCIES.identifyLocal!;
+        const readReceipt = mainDependencies.readInstallReceipt ?? DEFAULT_MAIN_DEPENDENCIES.readInstallReceipt!;
+        const [checkout, installed] = await Promise.all([identify(process.cwd()), readReceipt()]);
+        if (formatInstallReceipt(checkout) === formatInstallReceipt(installed)) {
+          io.stdout(`current ${formatInstallVersion(installed)}`);
+          return 0;
+        }
+        io.stdout(
+          `stale: installed ${formatInstallVersion(installed)}, checkout builds ${formatInstallVersion(checkout)}`,
+        );
+        io.stdout("run: pnpm install && pnpm verify && node dist/src/main.js install");
+        return 1;
+      } catch (error) {
+        io.stderr(`remote-runner install --check failed: ${boundedCause(error)}`);
+        return 70;
+      }
+    }
     if (argv.length !== 1) {
       io.stderr("remote-runner install does not accept arguments");
       return 2;

@@ -12,6 +12,7 @@ pnpm install
 pnpm verify
 node dist/src/main.js install
 remote-runner --version
+git config core.hooksPath .githooks
 ```
 
 The first installation, and the first upgrade from a runner that predates checkout-selected
@@ -21,6 +22,25 @@ immutable self-contained application plus a closed receipt, and updates the stab
 `~/.local/bin/remote-runner` command and login LaunchAgent. `remote-runner --version` reports the
 installed package version and immutable application identity. That one installation is shared by
 every consumer project; projects do not copy or link runner source files into their repositories.
+
+Merging upstream does not upgrade that installation. `remote-runner install --check` compares the
+application identity of the command consumers actually resolve with the identity the current
+checkout builds, writes nothing, and exits 1 when they differ. Invoke it through the installed
+`remote-runner`: a build writes no receipt into `dist`, so `node dist/src/main.js install --check`
+has no installed identity to read and exits 70. Either invocation rejects a `dist/src` older than
+`src` rather than answering from an unbuilt tree, so run `pnpm build` first — a stale `dist` would
+otherwise report `current` for the very drift being looked for. So does `install` itself, which can
+therefore never publish a previous build under the current checkout's name.
+
+The identity is exact because `pnpm build` clears `dist` first — `tsc` leaves the compiled output of
+deleted sources behind, so an unclean `dist` both drifts the identity and ships dead files into the
+published application.
+
+The `core.hooksPath` line above runs that comparison after a merge or a branch checkout that leaves
+the clone on `main` and changed `src`, `tsconfig.json`, `package.json` or the lockfile; it rebuilds
+first and warns, never installs. Arrivals through other routes (`git fetch && git reset --hard`) run
+no hook — check by hand there. Note that `core.hooksPath` replaces `.git/hooks` wholesale: any local
+hook already in that clone stops firing once it is set.
 
 ## Development
 
