@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 import { DIAGNOSTIC_PROBES } from "../../src/diagnostics/doctor.js";
+import { NOTIFICATION_REASONS } from "../../src/notifications/outage.js";
 
 describe("remote-runner operations guide", () => {
   it("documents every stable reason with its read-only doctor command", async () => {
@@ -17,7 +18,22 @@ describe("remote-runner operations guide", () => {
     }
   });
 
-  it("covers every required symptom and puts dry-run before every apply example", async () => {
+  it("keeps a read-only diagnosis for every reason the runner can report, probe or not", async () => {
+    const runbook = await readFile(
+      new URL("../../docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md", import.meta.url),
+      "utf8",
+    );
+
+    /* The probe table is a strict subset of the reason set: a reason with no implementable read-only
+       check has no probe, so the runbook row is the only next step its operator gets. Keyed on the
+       reason set rather than on the probes, because the reasons that need this most are exactly the
+       ones no probe iterates. */
+    for (const reason of NOTIFICATION_REASONS) {
+      expect(runbook).toContain(`| \`${reason}\``);
+    }
+  });
+
+  it("covers every required symptom", async () => {
     const runbook = await readFile(
       new URL("../../docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md", import.meta.url),
       "utf8",
@@ -39,15 +55,5 @@ describe("remote-runner operations guide", () => {
       "Sync canary",
     ])
       expect(runbook).toContain(topic);
-
-    const lines = runbook.split("\n");
-    for (const [index, line] of lines.entries()) {
-      if (!line.includes("remote-runner repair") || !line.includes("--apply")) continue;
-      expect(
-        lines
-          .slice(Math.max(0, index - 8), index)
-          .some((candidate) => candidate.includes("remote-runner repair") && candidate.includes("--dry-run")),
-      ).toBe(true);
-    }
   });
 });

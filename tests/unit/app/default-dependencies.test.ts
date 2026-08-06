@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createNodeCliDependencies, type NodeCliDependencies } from "../../../src/app/default-dependencies.js";
+import { DIAGNOSTIC_PROBES } from "../../../src/diagnostics/doctor.js";
 import { inspectPrewarmRequest } from "../../../src/prewarm/queue.js";
 import { worktreeIdentity } from "../../../src/runtime/identity.js";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../../src/ssh/client.js";
@@ -153,9 +154,30 @@ describe("concrete Node CLI dependencies", () => {
       /^verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear$/u,
     );
     const report = (await dependencies.doctorProfile?.("verify-full"))![0]!.report;
-    expect(report.checks).toHaveLength(17);
+    expect(report.checks).toHaveLength(DIAGNOSTIC_PROBES.length);
     expect(await dependencies.logsProfile?.("verify-full")).toEqual(["older", "current"]);
     expect(processes.requests.every((request) => request.command !== "sh" && request.command !== "bash")).toBe(true);
+  });
+
+  it("lets no probe report a status it did not earn from a command", async () => {
+    const paths = await fixture();
+    const failing = new FakeProcesses();
+    /* A probe that returns a constant still feeds the doctor exit code, so `ok` from a machine where
+       every command fails is a check that never ran — the shape three removed probes had. */
+    failing.run = async (request: BoundedProcessRequest) => {
+      failing.requests.push(request);
+      return result("", 1);
+    };
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: failing,
+    });
+
+    const report = (await dependencies.doctorProfile?.("verify-full"))![0]!.report;
+    expect(report.checks).toHaveLength(DIAGNOSTIC_PROBES.length);
+    expect(report.checks.filter((check) => check.status === "ok")).toEqual([]);
   });
 
   it("uses an absolute generated root and reports an exact stale worktree registration", async () => {
@@ -360,39 +382,6 @@ describe("concrete Node CLI dependencies", () => {
     await writeFile(join(workspacePath(provisioned), ".env"), "SECRET=1\n");
     expect(exitCode(secretsProbe, provisioned)).not.toBe(0);
     expect(exitCode(secretsProbe, provisioned)).not.toBe(79);
-  });
-
-  it("keeps repair actions inside one profile identity and requires its exact dry-run receipt", async () => {
-    const paths = await fixture();
-    const dependencies = await createNodeCliDependencies({
-      ...paths,
-      launcherSource: new Uint8Array([1]),
-      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
-      processes: new FakeProcesses(),
-      now: () => "2026-07-31T12:34:56.000Z",
-    });
-    const profileRoot = join(
-      paths.home,
-      ".local",
-      "state",
-      "remote-runner",
-      "profiles",
-      "ariadne",
-      "verify-full",
-      dependencies.identity,
-    );
-    const corruptPath = join(profileRoot, "outage.json.corrupt-evidence");
-    await mkdir(profileRoot, { recursive: true });
-    await writeFile(corruptPath, "retained evidence");
-
-    const preview = (await dependencies.repairProfile?.("verify-full", false)) as {
-      actions: Array<{ target: string }>;
-    };
-    expect(preview.actions).toEqual([expect.objectContaining({ target: corruptPath })]);
-    expect(await readFile(corruptPath, "utf8")).toBe("retained evidence");
-
-    await dependencies.repairProfile?.("verify-full", true);
-    await expect(readFile(corruptPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("executes every validated benchmark argv locally and remotely and writes both receipts", async () => {
@@ -654,7 +643,7 @@ describe("concrete Node CLI dependencies", () => {
     expect(finishes[1]).toContain('"provider":"remote"');
   });
 
-  it("refuses symlinked repair receipts and benchmark output directories", async () => {
+  it("refuses a symlinked benchmark output directory", async () => {
     const paths = await fixture();
     const outside = join(paths.root, "outside");
     await mkdir(outside);
@@ -666,24 +655,6 @@ describe("concrete Node CLI dependencies", () => {
       now: () => "2026-07-31T12:34:56.000Z",
       executeProfile: async () => 0,
     });
-    const profileRoot = join(
-      paths.home,
-      ".local",
-      "state",
-      "remote-runner",
-      "profiles",
-      "ariadne",
-      "verify-full",
-      dependencies.identity,
-    );
-    await mkdir(profileRoot, { recursive: true });
-    const outsideReceipt = join(outside, "repair.json");
-    await writeFile(outsideReceipt, "sentinel");
-    await symlink(outsideReceipt, join(profileRoot, "repair-dry-run.json"));
-
-    await expect(dependencies.repairProfile?.("verify-full", false)).rejects.toThrow(/symlink/u);
-    await expect(readFile(outsideReceipt, "utf8")).resolves.toBe("sentinel");
-
     await symlink(outside, join(paths.sourceRoot, "benchmark"));
     const profile = (await dependencies.loadManifest()).profiles[0]!;
     await expect(dependencies.benchmarkProfile?.(profile)).rejects.toThrow(/escapes source root/u);

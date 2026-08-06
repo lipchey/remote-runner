@@ -16,14 +16,15 @@ builds, benchmarks, static analysis, corpus processing, and other CPU-intensive 
 The first release is not a distributed scheduler, multi-host orchestrator, or remote editor.
 
 Normal operation requires no manual daemon, session, dependency, workspace, or machine-selection
-management. Diagnostic and repair commands exist only for exceptional investigation.
+management. Diagnostic commands exist only for exceptional investigation; there is no repair
+command — quarantine and reaping of corrupt state belong to the run that acquires the lock.
 
 ## 2. Ownership boundary
 
 This repository owns lifecycle and login startup, SSH trust and connectivity, Mutagen sessions,
 Git-backed remote workspaces, native remote bootstrap, dependency fingerprints, command streaming,
-fallback state, ephemeral secret transport, Telegram notification, diagnostics, logs, repairs,
-runbook, generic tests, live acceptance, and benchmark collection.
+fallback state, ephemeral secret transport, Telegram notification, diagnostics, logs, self-repair of
+its own state, runbook, generic tests, live acceptance, and benchmark collection.
 
 A consuming repository owns only:
 
@@ -67,7 +68,6 @@ The product path is `run`. Exceptional investigation uses:
 - `status [profile]` for concise lifecycle/session/workspace state;
 - `doctor [profile]` for read-only checks with stable reason codes;
 - `logs [profile]` for bounded recent logs;
-- `repair <profile> --dry-run` before `repair <profile> --apply`;
 - `benchmark <profile>` for the declared performance matrix.
 
 These commands support the runbook and are not part of daily management.
@@ -257,7 +257,6 @@ copy-paste-safe procedures for:
   fingerprint, and notification state;
 - reading bounded logs and interpreting every reason code;
 - validating synchronization with a harmless canary;
-- previewing and applying repair for one profile/worktree;
 - recreating one session or generated workspace without touching other state;
 - reinstalling one user-scoped remote environment;
 - validating Telegram config without printing it;
@@ -276,7 +275,7 @@ and profile inputs. They cover schema validation, execution modes, child-start b
 signal propagation, controller-down self-healing, concurrent serialization, path confinement, Git
 refs, reconcile/flush/setup ordering, ignore rules, checksum and atomic promotion, fingerprint
 invalidation, framed secrets, outage/recovery state, redaction, corrupt state, log rotation, login
-installation, diagnostics, and repair dry runs.
+installation, and diagnostics.
 
 Live acceptance proves:
 
@@ -295,7 +294,7 @@ Live acceptance proves:
 12. controller termination is repaired by the next invocation;
 13. secret canaries are absent from argv, repositories, persistent remote files, logs, and
     diagnostics;
-14. every runbook diagnosis and confined repair works against a broken fixture.
+14. every runbook diagnosis works against a broken fixture.
 
 Outage fixtures never disable the only connection needed for recovery.
 
@@ -334,6 +333,6 @@ The Ariadne adapter supplies its concrete test, fast-verification, and full-veri
 The first release is complete only when core tests and live acceptance pass; login and invocation
 self-healing survive controller termination and workstation reboot; the Ariadne adapter preserves
 full-verification semantics; Telegram outage/recovery is proven without leakage; the
-laptop-versus-workstation benchmark is recorded; the runbook covers every reason code and repair;
-install, upgrade, diagnostics, repair, and uninstall are verified on exact owned paths; and both
+laptop-versus-workstation benchmark is recorded; the runbook covers every reason code;
+install, upgrade, diagnostics, and uninstall are verified on exact owned paths; and both
 repositories record acceptance evidence before ready-for-review pull requests.

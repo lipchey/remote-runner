@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { arch, homedir } from "node:os";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import process from "node:process";
@@ -16,7 +16,6 @@ import {
   type DiagnosticStatus,
   type DoctorProfileReport,
 } from "../diagnostics/doctor.js";
-import { repair, type RepairAction, type RepairReceipt } from "../diagnostics/repair.js";
 import { mutagenDarwinArchitecture } from "../install/mutagen.js";
 import { createNodeNotificationCallbacks } from "../node/notifications.js";
 import { ensureNodeController, NodeControllerRuntime } from "../node/controller.js";
@@ -256,12 +255,10 @@ async function inspectProbe(
     readonly processes: NodeProcessRuntime;
   },
 ): Promise<{ readonly status: DiagnosticStatus; readonly detail?: string }> {
-  if (probe.id === "profile.validation") return { status: "ok" };
   if (probe.id === "controller.health") {
     const state = await new NodeControllerRuntime(options.home, options.processes).inspect();
     return { status: state.loaded && state.running && state.compatible ? "ok" : "fail" };
   }
-  if (probe.id === "runtime.unknown") return { status: "ok" };
 
   let command: string;
   let args: readonly string[];
@@ -303,9 +300,6 @@ async function inspectProbe(
       ...(betaRoot === undefined ? {} : { betaRoot }),
       ignores: profile.sync.ignores,
     });
-  } else if (probe.id === "workload.child-start") {
-    command = "tail";
-    args = ["-n", "50", join(profileRoot(options.home, profile, identity), "runner.log")];
   } else {
     const remoteArguments =
       probe.id === "remote.capacity"
@@ -632,79 +626,6 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         lines.push(...(profileId === undefined ? profileLines.map((line) => `${profile.id} ${line}`) : profileLines));
       }
       return lines;
-    },
-    async repairProfile(profileId, apply) {
-      const profile = selectedProfiles(await loadManifest(), profileId)[0]!;
-      const root = profileRoot(home, profile, identity);
-      const receiptPath = join(root, "repair-dry-run.json");
-      return repair(
-        {
-          identity,
-          identityRoot: root,
-          async inspect() {
-            let entries: string[];
-            try {
-              entries = await readdir(root);
-            } catch (caught) {
-              if (errorCode(caught) === "ENOENT") return [];
-              throw caught;
-            }
-            const actions: RepairAction[] = [];
-            for (const entry of entries.sort()) {
-              if (!entry.includes(".corrupt-")) continue;
-              const target = join(root, entry);
-              const metadata = await lstat(target);
-              if (metadata.isSymbolicLink() || (!metadata.isFile() && !metadata.isDirectory())) continue;
-              actions.push({ id: `remove-corrupt-${actions.length + 1}`, target, destructive: true });
-            }
-            return actions;
-          },
-          async readDryRun() {
-            let metadata;
-            try {
-              metadata = await lstat(receiptPath);
-            } catch (caught) {
-              if (errorCode(caught) === "ENOENT") return undefined;
-              throw caught;
-            }
-            if (metadata.isSymbolicLink()) throw new Error("repair receipt must not be a symlink");
-            if (!metadata.isFile()) throw new Error("repair receipt must be a regular file");
-            const contents = await readOptionalUtf8(receiptPath);
-            if (contents === undefined) return undefined;
-            try {
-              return JSON.parse(contents) as RepairReceipt;
-            } catch {
-              return undefined;
-            }
-          },
-          async writeDryRun(receipt) {
-            await mkdir(root, { recursive: true, mode: 0o700 });
-            try {
-              const metadata = await lstat(receiptPath);
-              if (metadata.isSymbolicLink()) throw new Error("repair receipt must not be a symlink");
-              if (!metadata.isFile()) throw new Error("repair receipt must be a regular file");
-            } catch (caught) {
-              if (errorCode(caught) !== "ENOENT") throw caught;
-            }
-            const temporary = join(root, `.repair-dry-run.tmp-${randomUUID()}`);
-            try {
-              await writeFile(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-              await rename(temporary, receiptPath);
-            } catch (caught) {
-              await rm(temporary, { force: true }).catch(() => undefined);
-              throw caught;
-            }
-          },
-          async apply(action) {
-            const metadata = await lstat(action.target);
-            if (metadata.isSymbolicLink()) throw new Error("refusing to repair through a symlink");
-            await rm(action.target, { recursive: metadata.isDirectory(), force: false });
-          },
-          now: options.now ?? (() => new Date().toISOString()),
-        },
-        profile.id,
-        { apply },
-      );
     },
     async benchmarkProfile(profile) {
       await ensureNodeController(home);

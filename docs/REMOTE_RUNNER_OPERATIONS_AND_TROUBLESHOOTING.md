@@ -167,9 +167,8 @@ a disconnected session — or that a home-relative `workspace.generatedRoot` lef
 unverified.
 
 A missing or paused owned session needs no repair — the next run creates or resumes it, and manifest
-ignore drift is repaired by recreating the session. The confined repair flow below acts only on
-paths under the profile identity root and never on a Mutagen session, so an endpoint or mode
-mismatch, or a conflicted session, is an operator decision: confirm which session is legitimate,
+ignore drift is repaired by recreating the session. Nothing the runner does on its own touches a
+Mutagen session, so an endpoint or mode mismatch, or a conflicted session, is an operator decision: confirm which session is legitimate,
 then terminate the owned one with the installed
 `~/.local/share/remote-runner/bin/<mutagen>/mutagen sync terminate <session>`. Do not create an
 ad-hoc bidirectional session. Mutagen SSH is isolated from `~/.ssh/known_hosts`: managed `ssh`/`scp`
@@ -180,8 +179,8 @@ starting the daemon. Do not bypass these wrappers to accept a prompt interactive
 ## Workspace
 
 For `workspace`, use the read-only remote `git status` command in the index. The generated workstation
-checkout is disposable runner state, but the laptop worktree is authoritative and must never be reset
-by a repair. `workspace.generatedRoot` accepts the exact legacy
+checkout is disposable runner state, but the laptop worktree is authoritative and is never reset by
+the runner. `workspace.generatedRoot` accepts the exact legacy
 `~/.cache/remote-runner/workspaces` literal or a canonical absolute non-root POSIX path. Do not use a
 symlink as the generated root: the capacity probe requires `realpath` to equal the configured path.
 
@@ -322,22 +321,11 @@ instead — otherwise the controller would replay the same failing request on ev
 
 ## Corrupt state
 
-Keep `.corrupt-*` evidence inside the owned state directory. Do not hand-edit JSON state. Use the
-confined preview/apply sequence below for the affected profile.
-
-## Confined repair procedure
-
-Preview first and check that every target contains only the selected worktree identity:
-
-```sh
-remote-runner repair <profile> --dry-run
-```
-
-Only if that exact preview is correct, apply it; a changed plan is rejected and requires a new preview:
-
-```sh
-remote-runner repair <profile> --apply
-```
+Keep `.corrupt-*` evidence where the runner quarantined it and do not hand-edit JSON state. There is
+no repair command: quarantine and reaping are the acquiring run's own job. Lock state that fails its
+own guard is renamed aside under `~/.local/state/remote-runner/locks/` and a later acquisition sweeps
+what has gone at least 24 hours without a change. If you must intervene, inspect first with `ls -ld <lock-root>` and delete
+only paths whose name carries the selected worktree identity.
 
 ## Upgrade
 

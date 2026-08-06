@@ -19,7 +19,7 @@ describe("runCli", () => {
     expect(stdout.join("\n")).toContain("status [profile]");
     expect(stdout.join("\n")).toContain("doctor [profile]");
     expect(stdout.join("\n")).toContain("logs [profile]");
-    expect(stdout.join("\n")).toContain("repair <profile> --dry-run|--apply");
+    expect(stdout.join("\n")).not.toContain("repair");
     expect(stdout.join("\n")).toContain("benchmark <profile>");
   });
 
@@ -332,35 +332,12 @@ describe("runCli", () => {
     ]);
   });
 
-  it("requires an exact dry-run before routing repair apply", async () => {
-    const calls: string[] = [];
+  it("routes a retired repair invocation to the unknown-command exit code", async () => {
     const errors: string[] = [];
-    const dependencies = {
-      readFile: async () => validManifest,
-      repairProfile: async (profile: string, apply: boolean) => {
-        calls.push(`${profile}:${apply ? "apply" : "dry-run"}`);
-        return { profile, identity: "worktree-abc123", planHash: "abc", actions: [] };
-      },
-    };
-    const io = {
-      stdout: (line: string) => calls.push(`output:${line}`),
-      stderr: (line: string) => errors.push(line),
-    };
+    const io = { stdout: () => undefined, stderr: (line: string) => errors.push(line) };
 
-    expect(await runCli(["repair", "verify-full", "--dry-run"], io, dependencies)).toBe(0);
-    expect(await runCli(["repair", "verify-full", "--apply"], io, dependencies)).toBe(0);
-    expect(await runCli(["repair", "verify-full"], io, dependencies)).toBe(2);
-    expect(await runCli(["repair", "verify-full", "--apply", "extra"], io, dependencies)).toBe(2);
-    expect(calls.slice(0, 4)).toEqual([
-      "verify-full:dry-run",
-      expect.stringContaining('output:{"profile":"verify-full"'),
-      "verify-full:apply",
-      expect.stringContaining('output:{"profile":"verify-full"'),
-    ]);
-    expect(errors).toEqual([
-      "repair requires <profile> --dry-run|--apply",
-      "repair requires <profile> --dry-run|--apply",
-    ]);
+    expect(await runCli(["repair", "verify-full", "--apply"], io, { readFile: async () => validManifest })).toBe(2);
+    expect(errors).toEqual(["unknown command: repair"]);
   });
 
   it("loads a validated profile before routing benchmark collection", async () => {
