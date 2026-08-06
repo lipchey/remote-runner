@@ -300,13 +300,17 @@ Outage fixtures never disable the only connection needed for recovery.
 
 ## 10. Benchmark
 
-The benchmark records synchronization, bootstrap/setup, and workload time separately. It compares
-identical source and versions with an untimed warm-up, at least three cold-cache and three
-warm-cache runs, wall time, status, cache hit ratio, CPU/load, peak memory when available, and
-transfer volume.
+The benchmark measures one honest dimension per (location × workload) pair: elapsed wall time and
+exit status, over an untimed warm-up and at least three measured runs (`RRM-B5`, 2026-08-06 — the
+prior draft promised sync/setup timing, cache hit ratio, CPU/load, peak memory, and transfer
+volume; nothing in the runner ever populated them, and the generic runner performs no cache
+eviction between runs, so a cold/warm split had nothing behind it either).
 
-Reports give median and range and state whether the remote materially reduces laptop CPU pressure.
-The Ariadne adapter supplies its concrete test, fast-verification, and full-verification commands.
+Elapsed time covers the whole profile run for that location end to end — on the remote leg that
+includes validation, locking, probing, sync, reconciliation, bootstrap, and secret collection, not
+just the workload itself. Reports give median and range per pair over its successful samples only;
+a pair with no successful sample reports no median or range. The Ariadne adapter supplies its
+concrete test, fast-verification, and full-verification commands.
 
 ## 11. Security constraints
 

@@ -402,7 +402,7 @@ describe("concrete Node CLI dependencies", () => {
 
     const report = (await dependencies.benchmarkProfile?.(profile)) as { receiptPaths: readonly string[] };
 
-    expect(executions).toHaveLength(14);
+    expect(executions).toHaveLength(8);
     expect(new Set(executions.map(({ mode }) => mode))).toEqual(new Set(["local", "remote"]));
     expect(executions.every(({ command }) => command.join("\0") === "./scripts/verify\0--full")).toBe(true);
     expect(report.receiptPaths).toEqual([
@@ -413,7 +413,7 @@ describe("concrete Node CLI dependencies", () => {
       '"profile": "verify-full"',
     );
     await expect(readFile(join(paths.sourceRoot, report.receiptPaths[1]!), "utf8")).resolves.toContain(
-      "| remote | full | warm |",
+      "| remote | full |",
     );
   });
 

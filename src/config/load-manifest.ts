@@ -52,9 +52,9 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[], label: s
   return value as T;
 }
 
-function boundedInteger(value: unknown, maximum: number, label: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > maximum) {
-    throw new Error(`${label} must be a positive integer no greater than ${maximum}`);
+function boundedInteger(value: unknown, maximum: number, label: string, minimum = 1): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${label} must be an integer between ${minimum} and ${maximum}`);
   }
   return value;
 }
@@ -318,7 +318,7 @@ function parseProfile(value: unknown): Profile {
       policy: literal(notifications.policy, "outage-recovery", "notification policy"),
     },
     benchmark: {
-      samples: boundedInteger(benchmark.samples, 1000, "benchmark samples"),
+      samples: boundedInteger(benchmark.samples, 1000, "benchmark samples", 3),
       workloads: benchmarkWorkloads,
     },
   };

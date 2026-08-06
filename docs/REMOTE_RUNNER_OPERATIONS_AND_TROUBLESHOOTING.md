@@ -286,11 +286,15 @@ untracked matching manifests and excludes Git-ignored generated dependencies.
 
 ## Benchmark
 
-`remote-runner benchmark <profile>` executes the manifest-declared workload matrix locally and
-remotely and writes confined JSON and Markdown receipts below the source root. The generic runner
-does not delete undeclared user caches: a workload that needs reproducible cold-cache eviction must
-declare and own that preparation itself. Review the full matrix before starting because full-tier
-profiles can intentionally take a long time.
+`remote-runner benchmark <profile>` runs each manifest-declared workload locally and remotely — one
+untimed warm-up plus the configured sample count — and writes confined JSON and Markdown receipts
+below the source root reporting median end-to-end elapsed wall time (over successful samples only)
+and status per (location × workload) pair; a pair with no successful sample reports no median or
+range. The generic runner does not delete undeclared user caches or otherwise vary conditions
+between runs: a workload that needs reproducible cache eviction must declare and own that
+preparation itself.
+Review the workload and sample counts before starting because full-tier profiles can intentionally
+take a long time.
 
 ## Telegram
 
