@@ -156,6 +156,37 @@ async function treeDigest(roots: readonly string[]): Promise<string> {
   return hash.digest("hex").slice(0, 24);
 }
 
+async function mtimeRange(
+  roots: readonly string[],
+): Promise<{ readonly oldest: number; readonly newest: number } | undefined> {
+  let oldest = Number.POSITIVE_INFINITY;
+  let newest = Number.NEGATIVE_INFINITY;
+  const visit = async (path: string): Promise<void> => {
+    const metadata = await lstat(path);
+    if (metadata.isDirectory()) {
+      for (const entry of await readdir(path)) await visit(join(path, entry));
+      return;
+    }
+    oldest = Math.min(oldest, metadata.mtimeMs);
+    newest = Math.max(newest, metadata.mtimeMs);
+  };
+  for (const root of roots) {
+    try {
+      await visit(root);
+    } catch (caught) {
+      if (!(
+        typeof caught === "object" &&
+        caught !== null &&
+        "code" in caught &&
+        (caught as { code?: unknown }).code === "ENOENT"
+      )) {
+        throw caught;
+      }
+    }
+  }
+  return newest === Number.NEGATIVE_INFINITY ? undefined : { oldest, newest };
+}
+
 async function atomicOwnedFile(
   path: string,
   contents: string,
@@ -211,24 +242,65 @@ function plist(executablePath: string): string {
 `;
 }
 
+async function applicationSources(sourceRoot: string): Promise<{
+  readonly version: string;
+  readonly digest: string;
+  readonly sources: {
+    readonly compiled: string;
+    readonly assets: string;
+    readonly yaml: string;
+    readonly package: string;
+  };
+}> {
+  assertAbsolute(sourceRoot, "install source root");
+  const compiled = join(sourceRoot, "dist", "src");
+  await access(join(compiled, "main.js")).catch((caught: unknown) => {
+    throw new Error("install source must contain built dist/src/main.js", { cause: caught });
+  });
+  /* An identity hashed from an unbuilt `dist` is a lie in the one direction that matters: merge new
+     sources, skip the build, and the digest still equals the installed receipt — so `install --check`
+     reports `current` for exactly the drift it exists to catch, and `install` publishes the previous
+     build under the current checkout's name. `mtimeRange` is checked BEFORE the digest so neither
+     path can produce an identity no build attested.
+     ponytail: mtimes, not a build-emitted content fingerprint — `touch` costs one needless rebuild
+     and nothing worse, and git stamps checked-out sources with the checkout time, so the dangerous
+     direction (new source looking older than the build) does not occur. Upgrade to a fingerprint
+     written by `build` if that ever bites. */
+  const built = await mtimeRange([compiled]);
+  const authored = await mtimeRange([join(sourceRoot, "src"), join(sourceRoot, "tsconfig.json")]);
+  if (built !== undefined && authored !== undefined && authored.newest > built.oldest) {
+    throw new Error("install source dist/src is older than src: run `pnpm build`");
+  }
+  const sourcePackage = join(sourceRoot, "package.json");
+  const version = packageVersion(await readFile(sourcePackage, "utf8"));
+  const sources = {
+    compiled,
+    assets: join(sourceRoot, "assets"),
+    yaml: join(sourceRoot, "node_modules", "yaml"),
+    package: sourcePackage,
+  };
+  return {
+    version,
+    sources,
+    digest: await treeDigest([sources.compiled, sources.assets, sources.yaml, sources.package]),
+  };
+}
+
+/* The installed identity is the digest of what a checkout BUILDS, so the same computation answers
+   "is the runner in ~/.local the one this checkout produces" without writing anything — the only
+   local signal that a merged fix never reached the machine, since merging upstream installs
+   nothing. It is exact only because `pnpm build` clears `dist` first: tsc leaves orphaned outputs
+   of deleted sources behind, and those would drift the digest away from the checkout. */
+export async function applicationIdentity(sourceRoot: string): Promise<InstallReceipt> {
+  const { version, digest } = await applicationSources(sourceRoot);
+  return { schemaVersion: 1, version, appIdentity: digest };
+}
+
 export async function installLocalApplication(options: LocalInstallOptions): Promise<LocalInstallResult> {
   assertAbsolute(options.home, "install home");
   assertAbsolute(options.sourceRoot, "install source root");
   assertAbsolute(options.nodePath, "install Node path");
-  const sourceCompiled = join(options.sourceRoot, "dist", "src");
-  await access(join(sourceCompiled, "main.js")).catch((caught: unknown) => {
-    throw new Error("install source must contain built dist/src/main.js", { cause: caught });
-  });
-  const sourcePackage = join(options.sourceRoot, "package.json");
-  const sourcePackageContents = await readFile(sourcePackage, "utf8");
-  const version = packageVersion(sourcePackageContents);
-  const sources = {
-    compiled: sourceCompiled,
-    assets: join(options.sourceRoot, "assets"),
-    yaml: join(options.sourceRoot, "node_modules", "yaml"),
-    package: sourcePackage,
-  };
-  const digest = await treeDigest([sources.compiled, sources.assets, sources.yaml, sources.package]);
+  const { version, sources, digest } = await applicationSources(options.sourceRoot);
   const receipt: InstallReceipt = { schemaVersion: 1, version, appIdentity: digest };
   const shareRoot = join(options.home, ".local", "share", "remote-runner");
   const appParent = join(shareRoot, "app");

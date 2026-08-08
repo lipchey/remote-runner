@@ -1,10 +1,15 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { installLocalApplication, SETTLE_POLLS, type LocalLaunchRuntime } from "../../../src/node/local-install.js";
+import {
+  applicationIdentity,
+  installLocalApplication,
+  SETTLE_POLLS,
+  type LocalLaunchRuntime,
+} from "../../../src/node/local-install.js";
 import { parseInstallReceipt } from "../../../src/node/install-receipt.js";
 
 const roots: string[] = [];
@@ -70,7 +75,62 @@ async function sourceFixture(): Promise<string> {
   return sourceRoot;
 }
 
+/* A checkout, unlike the install fixture, also carries the sources `dist` was compiled from — the
+   only place the build-attestation guard has anything to compare. */
+async function checkoutFixture(builtAfterSource: boolean): Promise<string> {
+  const sourceRoot = await sourceFixture();
+  await mkdir(join(sourceRoot, "src"), { recursive: true });
+  await writeFile(join(sourceRoot, "src/main.ts"), "export {};\n");
+  await writeFile(join(sourceRoot, "tsconfig.json"), "{}\n");
+  const source = new Date(builtAfterSource ? 1_000_000_000_000 : 2_000_000_000_000);
+  const built = new Date(builtAfterSource ? 2_000_000_000_000 : 1_000_000_000_000);
+  await Promise.all([
+    utimes(join(sourceRoot, "src/main.ts"), source, source),
+    utimes(join(sourceRoot, "tsconfig.json"), source, source),
+    utimes(join(sourceRoot, "dist/src/main.js"), built, built),
+  ]);
+  return sourceRoot;
+}
+
 describe("self-contained local macOS install", () => {
+  it("identifies a checkout with the same identity the install publishes", async () => {
+    const sourceRoot = await checkoutFixture(true);
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-install-identity-check-"));
+    roots.push(home);
+
+    const identity = await applicationIdentity(sourceRoot);
+    const installed = await installLocalApplication({
+      home,
+      sourceRoot,
+      nodePath: "/usr/bin/node",
+      launch: new FakeLaunch(),
+    });
+
+    expect(identity).toEqual({ schemaVersion: 1, version: "0.1.0", appIdentity: installed.appIdentity });
+  });
+
+  it("refuses to identify or install a checkout whose build is older than its sources", async () => {
+    const sourceRoot = await checkoutFixture(false);
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-install-stale-build-"));
+    roots.push(home);
+
+    await expect(applicationIdentity(sourceRoot)).rejects.toThrow("older than src");
+    await expect(
+      installLocalApplication({ home, sourceRoot, nodePath: "/usr/bin/node", launch: new FakeLaunch() }),
+    ).rejects.toThrow("older than src");
+  });
+
+  it("reports the source root before the Node path when both are invalid", async () => {
+    await expect(
+      installLocalApplication({
+        home: "/valid/home",
+        sourceRoot: "relative/source",
+        nodePath: "relative/node",
+        launch: new FakeLaunch(),
+      }),
+    ).rejects.toThrow("install source root");
+  });
+
   it("installs an immutable app, stable executable, and LaunchAgent idempotently", async () => {
     const sourceRoot = await sourceFixture();
     const home = await mkdtemp(join(tmpdir(), "remote-runner-install-home-"));

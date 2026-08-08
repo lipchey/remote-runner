@@ -97,6 +97,45 @@ describe("executable entrypoint", () => {
     expect(stderr).toEqual(["remote-runner install failed: built checkout required"]);
   });
 
+  it("reports install --check against the receipt of the running application", async () => {
+    const installed: InstallReceipt = { schemaVersion: 1, version: "0.1.0", appIdentity: "c".repeat(24) };
+    const dependencies = {
+      installLocal: async () => {
+        throw new Error("install must not run for a check");
+      },
+      readInstallReceipt: async () => installed,
+      identifyLocal: async (sourceRoot: string) => {
+        expect(sourceRoot).toBe(process.cwd());
+        return { schemaVersion: 1, version: "0.1.0", appIdentity: "d".repeat(24) } as const;
+      },
+    };
+
+    const stale: string[] = [];
+    expect(
+      await runMain(
+        ["install", "--check"],
+        { stdout: (line) => stale.push(line), stderr: () => undefined },
+        undefined,
+        dependencies,
+      ),
+    ).toBe(1);
+    expect(stale).toEqual([
+      `stale: installed remote-runner 0.1.0 (app ${"c".repeat(24)}), checkout builds remote-runner 0.1.0 (app ${"d".repeat(24)})`,
+      "run: pnpm install && pnpm verify && node dist/src/main.js install",
+    ]);
+
+    const current: string[] = [];
+    expect(
+      await runMain(
+        ["install", "--check"],
+        { stdout: (line) => current.push(line), stderr: () => undefined },
+        undefined,
+        { ...dependencies, identifyLocal: async () => installed },
+      ),
+    ).toBe(0);
+    expect(current).toEqual([`current remote-runner 0.1.0 (app ${"c".repeat(24)})`]);
+  });
+
   it("routes ordinary argv through the injected CLI dependencies", async () => {
     const stdout: string[] = [];
     const code = await runMain(

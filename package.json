@@ -11,7 +11,7 @@
   },
   "packageManager": "pnpm@11.9.0",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "format": "prettier . --write --ignore-unknown",
     "format:check": "prettier . --check --ignore-unknown",
     "lint": "eslint . --max-warnings=0",
