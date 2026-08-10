@@ -14,6 +14,7 @@ import { NodeProcessRuntime } from "./process.js";
 
 const LABEL = "com.lipchey.remote-runner";
 const OWNED_MARKER = "# remote-runner-owned:v1";
+const OWNED_NAME = ".remote-runner-owned";
 
 export interface LocalLaunchRuntime {
   status(): Promise<{ readonly loaded: boolean; readonly running: boolean }>;
@@ -296,6 +297,42 @@ export async function applicationIdentity(sourceRoot: string): Promise<InstallRe
   return { schemaVersion: 1, version, appIdentity: digest };
 }
 
+/* Every install publishes a new `app/<digest>` and repoints the shim at it; nothing ever removed the
+   one it replaced, so the directory accumulated one full copy of the application per install. Pruning
+   runs AFTER the launchd swap, so the controller is already executing out of the current application
+   when its predecessor disappears. What authorises a deletion is the marker this installer writes
+   inside every directory it creates, never the shape of the name: a `<digest>`-looking directory or a
+   `.tmp-` prefix proves nothing about who made it, and `appParent` may itself be a symlink into a
+   tree that is none of our business. An entry whose marker cannot be READ is skipped rather than
+   assumed unowned — EACCES/EIO mean "cannot tell", and a wrong answer here costs data, while the
+   wrong answer in the other direction costs disk.
+   ponytail: keeps the current digest and nothing else, and install takes no lock, so it inherits two
+   ceilings a keep-nothing policy makes destructive rather than merely wasteful — a `run` already
+   started from an older application fails with `remote launcher asset is missing` if it has not yet
+   reached `executionResources()` (that asset is read from the application directory on demand), and
+   two concurrent installs can each delete the other's published application, leaving the shim
+   pointing at nothing. Both recover by installing again; keep the N most recent, or serialize on the
+   runtime lock, if either ever bites. */
+async function pruneSupersededApplications(appParent: string, keep: string): Promise<void> {
+  /* Enumeration failing is not evidence that nothing is here, so it prunes nothing rather than
+     guessing — the same asymmetry the marker read below rests on. */
+  const entries = await readdir(appParent, { withFileTypes: true }).catch(() => []);
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory() && entry.name !== keep)
+      .map(async (entry) => {
+        const path = join(appParent, entry.name);
+        const marker = await readFile(join(path, OWNED_NAME), "utf8").catch(() => undefined);
+        /* Both shapes this installer creates carry a bare digest: the published `<digest>` directory
+           and the `.tmp-<digest>-<uuid>` staging a crashed install leaves behind. */
+        if (marker === undefined || !/^[0-9a-f]{24}\n$/u.test(marker)) return;
+        /* Best effort: a superseded copy that resists removal is disk to reclaim on the next install,
+           never a reason to fail an install that already succeeded. */
+        await rm(path, { recursive: true, force: true }).catch(() => undefined);
+      }),
+  );
+}
+
 export async function installLocalApplication(options: LocalInstallOptions): Promise<LocalInstallResult> {
   assertAbsolute(options.home, "install home");
   assertAbsolute(options.sourceRoot, "install source root");
@@ -313,7 +350,7 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
     mkdir(join(options.home, "Library", "LaunchAgents"), { recursive: true, mode: 0o700 }),
   ]);
   try {
-    const marker = await readFile(join(appRoot, ".remote-runner-owned"), "utf8");
+    const marker = await readFile(join(appRoot, OWNED_NAME), "utf8");
     if (marker !== `${digest}\n`) throw new Error("refusing to reuse a foreign install application");
     const existingReceipt = parseInstallReceipt(await readFile(join(appRoot, INSTALL_RECEIPT_NAME), "utf8"));
     if (formatInstallReceipt(existingReceipt) !== formatInstallReceipt(receipt)) {
@@ -330,6 +367,9 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
     const staging = join(appParent, `.tmp-${digest}-${randomUUID()}`);
     try {
       await mkdir(staging, { mode: 0o700 });
+      /* Written before the payload, not after it: the marker is what authorises pruning to delete a
+         staging directory, and a crash lands anywhere inside the copy that follows. */
+      await writeFile(join(staging, OWNED_NAME), `${digest}\n`, { mode: 0o600 });
       await Promise.all([
         cp(sources.compiled, join(staging, "src"), { recursive: true, dereference: true }),
         cp(sources.assets, join(staging, "assets"), { recursive: true, dereference: true }),
@@ -340,7 +380,6 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
         `${JSON.stringify({ private: true, type: "module", version })}\n`,
         { mode: 0o600 },
       );
-      await writeFile(join(staging, ".remote-runner-owned"), `${digest}\n`, { mode: 0o600 });
       await writeFile(join(staging, INSTALL_RECEIPT_NAME), formatInstallReceipt(receipt), { mode: 0o600 });
       await rename(staging, appRoot);
     } catch (error) {
@@ -375,6 +414,7 @@ export async function installLocalApplication(options: LocalInstallOptions): Pro
   } else if (!launch.running) {
     await options.launch.kickstart();
   }
+  await pruneSupersededApplications(appParent, digest);
   return { appRoot, appIdentity: digest, version, executablePath, plistPath };
 }
 
