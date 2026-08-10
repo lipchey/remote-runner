@@ -43,7 +43,9 @@ class FakeLaunch implements LocalLaunchRuntime {
     this.loaded = this.settling > 0;
     this.running = false;
   }
+  beforeBootstrap?: () => Promise<void>;
   async bootstrap(_plist: string) {
+    await this.beforeBootstrap?.();
     this.actions.push("bootstrap");
     if (this.loaded) throw new Error("Bootstrap failed: 5: Input/output error");
     if (this.bootstrapFailures > 0) {
@@ -175,6 +177,37 @@ describe("self-contained local macOS install", () => {
     expect(codeChanged.appIdentity).not.toBe(original.appIdentity);
     expect(versionChanged.appIdentity).not.toBe(codeChanged.appIdentity);
     expect(versionChanged.version).toBe("0.2.0");
+  });
+
+  it("removes marked superseded applications and staging, and only after the LaunchAgent swap", async () => {
+    const sourceRoot = await sourceFixture();
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-install-prune-"));
+    roots.push(home);
+    const launch = new FakeLaunch();
+
+    const superseded = await installLocalApplication({ home, sourceRoot, nodePath: "/usr/bin/node", launch });
+    const appParent = join(home, ".local/share/remote-runner/app");
+    const staging = join(appParent, `.tmp-${"a".repeat(24)}-9d1f0c3a-0000-4000-8000-000000000000`);
+    await mkdir(staging, { recursive: true });
+    await writeFile(join(staging, ".remote-runner-owned"), `${"a".repeat(24)}\n`);
+    /* Digest-shaped and staging-shaped names carrying no marker: whoever wrote them, it was not this
+       installer, so name shape alone must not authorise deleting them. */
+    const unmarked = [`.tmp-${"b".repeat(24)}-0000`, "c".repeat(24), "not-ours"];
+    await Promise.all(unmarked.map((name) => mkdir(join(appParent, name), { recursive: true })));
+    await writeFile(join(sourceRoot, "dist/src/main.js"), "#!/usr/bin/env node\nconsole.log('changed');\n");
+    /* The superseded application has to outlive the swap: until the LaunchAgent is running the new
+       one, the controller launchd is tearing down is still executing out of the old directory. */
+    launch.beforeBootstrap = async () => {
+      expect(await readdir(appParent)).toContain(superseded.appIdentity);
+    };
+    const current = await installLocalApplication({ home, sourceRoot, nodePath: "/usr/bin/node", launch });
+
+    expect(current.appIdentity).not.toBe(superseded.appIdentity);
+    expect((await readdir(appParent)).sort()).toEqual([current.appIdentity, ...unmarked].sort());
+    /* The pruned install is the one the shim now points at, so its payload has to survive intact —
+       "the old copy is gone" alone is equally true of an install that deleted everything. */
+    expect(await readFile(join(current.appRoot, "src/main.js"), "utf8")).toContain("changed");
+    expect(launch.actions).toContain("bootstrap");
   });
 
   it("refuses to overwrite a foreign stable executable", async () => {

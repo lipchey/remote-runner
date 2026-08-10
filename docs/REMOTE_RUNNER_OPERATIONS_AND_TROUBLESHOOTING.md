@@ -35,7 +35,13 @@ The installer writes an immutable self-contained application below
 `~/.local/share/remote-runner/app`, the stable `~/.local/bin/remote-runner` executable, and
 `~/Library/LaunchAgents/com.lipchey.remote-runner.plist`. Its closed receipt records the package
 version and application identity reported by `remote-runner --version`. It uses the current
-absolute Node runtime, requires no sudo, and starts or repairs the LaunchAgent.
+absolute Node runtime, requires no sudo, and starts or repairs the LaunchAgent. Once the LaunchAgent
+runs the new application, the installer deletes every directory below `app` that carries its own
+ownership marker except the current one, which covers the applications it supersedes and the staging
+a crashed install left behind; anything unmarked is left untouched. Roll back by building and
+installing the wanted checkout, never by pointing the executable at a retained directory. An
+application directory is not a lease: a `run` started before an install may lose the copy it was
+executing, and installs take no lock, so do not run two of them at once.
 
 Normal project integration needs only `remote-runner run <profile>` from the repository root. The
 runner loads the profile workload and `REMOTE_RUNNER_MODE=auto|local|remote` itself. A worktree hook
