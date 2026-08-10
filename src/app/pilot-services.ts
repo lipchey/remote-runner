@@ -978,7 +978,25 @@ export class NodeProfileServices implements ProfileExecutionServices {
     return { kind: "completed", exitCode: result.exitCode };
   }
 
-  async runLocal(command: readonly string[]): Promise<number> {
+  async runLocal(command: readonly string[], prepared?: Readonly<Record<string, string>>): Promise<number> {
+    /* The same allowlisted values the remote child would have carried: without them a fallback runs
+       a DIFFERENT workload than the remote leg, and whether that difference reads as a failure or
+       as a green depends on how each consumer's guards treat an absent value — a dependency this
+       runner must not have. `prepared` is the snapshot the preparation already collected for the
+       remote child, reused so the substituted run carries what the substituted-for one would have,
+       and so a provider with side effects is not invoked twice; only a run that never got that far
+       collects here. Values that cannot be collected fail the run closed rather than running a
+       workload the remote would not have run. Spread last, matching the remote launcher, which
+       merges them over an environment that already carries the markers. */
+    const secrets =
+      prepared ??
+      (await this.collectSecrets().catch((caught: unknown) => {
+        this.reportUnavailable("secrets", "the local run cannot carry the profile's secrets");
+        throw caught;
+      }));
+    /* After the collection, not before: this callback is the only thing that stamps the run record
+       with `provider: "local"`, and a record naming a leg whose workload never started is the same
+       lie the run-error path refuses to tell. */
     this.options.onLocalExecution?.();
     const result = await this.streamProcess({
       command: command[0]!,
@@ -988,6 +1006,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
         ...this.profile.workload.childEnvironment,
         REMOTE_RUNNER_CHILD: "1",
         REMOTE_RUNNER_PROVIDER: "local",
+        ...secrets,
       },
       marker: new TextEncoder().encode("\0REMOTE_RUNNER_UNUSED_MARKER\0"),
       onMarker: async () => undefined,

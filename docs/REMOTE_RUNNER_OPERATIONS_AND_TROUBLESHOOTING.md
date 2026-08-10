@@ -78,8 +78,12 @@ condition.
 | `timeout`                | `ssh -o ConnectTimeout=2 <remote> true`                                                                          |
 | `unknown`                | `remote-runner status <profile>`                                                                                 |
 
-`lock`, `validation` and `consumer-setup` never raise an outage notification: none says the remote is
-unreachable. `consumer-setup` is one of the profile's own `bootstrap.setup` / `bootstrap.ensure`
+`lock`, `validation`, `consumer-setup` and `secrets` never raise an outage notification: none says the
+remote is unreachable. `secrets` joined them on 2026-08-10 (`RRM-B9`): both halves of that RUN reason
+— reading the consumer's dotenv or provider, and encoding the frame — happen on this machine. (The
+`secrets` row in the index above belongs to the `doctor` probe, which is an ssh check for a plaintext
+dotenv left in the remote workspace; a run reporting `secrets` is a local failure and that command
+will not explain it.) `consumer-setup` is one of the profile's own `bootstrap.setup` / `bootstrap.ensure`
 commands: the remote ran it and it exited non-zero, which a local fallback would reproduce exactly,
 so the run exits `75` without one. The `detail=` on that line names the failing script or command and
 its exit code (`dependency setup ./scripts/ds-bootstrap.sh failed with exit code 3`); rerun that one
@@ -106,8 +110,10 @@ fallback: those runs alert too, then exit `75` with the same `run-unavailable` r
 log. A failure the second preparation attempt survives is not an outage on any profile — the run
 reached the remote, so only the stderr line and the log record mention it. The alert follows the
 reported reason, so the reasons listed above as the caller's own error stay off the channel. A
-give-up that has a reason of its own alerts under it — `secrets`, when the collected values cannot
-be encoded into one frame. A controller that throws before the child starts has none, and alerts
+give-up that has a reason of its own alerts under it, unless that reason is one of those four: a
+frame the collected values do not fit into reports `secrets`, and since `RRM-B9` that one takes the
+fallback silently — the local leg carries the values themselves and needs no frame. A controller
+that throws before the child starts has none, and alerts
 under `child-start`. A throw after the child started reports `unknown` with no alert and no local
 rerun: the workload is already running remotely, so its result is unknown and rerunning it would
 repeat side effects. What still exits `75` silently is a remote reported as completed without ever
@@ -129,6 +135,18 @@ offers the attempt again. `lock` and `consumer-setup` are the preparation failur
 back to a local run: running the workload locally while another run of the same workspace is doing it is the
 duplicate the wait exists to prevent, so exhausted contention exits `75` instead. Diagnose the
 holder with the index command before rerunning.
+
+A local run — the fallback, and `--mode local` — carries the profile's allowlisted secrets
+(`RRM-B9`, 2026-08-10); before that it carried none, so a fallback ran a materially different
+workload from the one it stood in for, and whether that showed up as a failure or as a pass depended
+on how the consumer's own guards treat an absent value — something this runner cannot know. A
+fallback reuses the values the preparation already collected for the remote child; a run that never
+got that far collects them itself, and if it cannot, exits `75` with
+`remote-runner: remote unavailable reason=secrets detail=the local run cannot carry the profile's
+secrets` rather than running the workload without them. The usual cause is a checkout whose
+gitignored dotenv was never written — decrypt or create it, then rerun. A collection failure during
+preparation still buys the fallback: nothing makes a second collection fail identically, and if it
+does, the local leg refuses on its own.
 
 `workspace` and `secrets` also appear as `warn` carrying the detail `remote workspace is not
 provisioned`, and `doctor` exits `0` on them. A workspace is a cache, so a checkout that only ever
