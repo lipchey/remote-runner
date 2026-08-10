@@ -58,8 +58,10 @@ class FakeServices implements ProfileExecutionServices {
     if (this.throwAt === "after-marker") throw new Error("stream writer failed mid-workload");
     return { kind: "completed" as const, exitCode: this.remoteExit };
   }
-  async runLocal() {
+  localSecrets: Readonly<Record<string, string>> | undefined;
+  async runLocal(_command: readonly string[], prepared?: Readonly<Record<string, string>>) {
     this.calls.push("local");
+    this.localSecrets = prepared;
     return 17;
   }
   /* Distinct labels: the two differ in production — recordFallback additionally prints
@@ -86,6 +88,20 @@ class FakeServices implements ProfileExecutionServices {
 const profile = { mode: "auto" as const, fallback: "local" as const };
 
 describe("profile runtime composition", () => {
+  it("forwards the prepared secrets to the local leg, and nothing when preparation never got there", async () => {
+    const started = new FakeServices();
+    started.notStartedReason = "child-start";
+
+    await expect(runProfile(createProfileRuntime(started), profile, ["./verify"])).resolves.toBe(17);
+    expect(started.localSecrets).toEqual({ SECRET: "secret-canary" });
+
+    const early = new FakeServices();
+    early.failProbe = true;
+
+    await expect(runProfile(createProfileRuntime(early), profile, ["./verify"])).resolves.toBe(17);
+    expect(early.localSecrets).toBeUndefined();
+  });
+
   it("records one stable outage before the automatic local fallback", async () => {
     const services = new FakeServices();
     services.failProbe = true;

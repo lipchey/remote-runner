@@ -11,6 +11,11 @@ const LOCK_REASON = "lock";
    too: it fails identically in a local run, so it neither spends a fallback nor claims the remote
    is unavailable. */
 const CONSUMER_SETUP_REASON = "consumer-setup";
+/* A secret collection failure is deliberately NOT in the set below. It looks like a caller error
+   that repeats, but nothing in the provider contract makes an immediate second collection fail the
+   same way, and since the local leg collects for itself it either recovers from a transient failure
+   or fails closed there with the same reason — so withholding the fallback only loses the case it
+   could have served. */
 /* Reasons whose local rerun cannot do anything the remote attempt did not already do: a busy lock
    means another run of THIS workspace is doing the work, and a consumer setup command that exited
    non-zero exits the same way locally. Exported so the invariant against `LOCAL_REASONS` in
@@ -32,7 +37,11 @@ export interface RunProfileRuntime {
     secrets: Readonly<Record<string, string>>,
     onChildStarted: () => Promise<void>,
   ): Promise<RemoteExecutionResult>;
-  runLocal(command: readonly string[]): Promise<number>;
+  /* `prepared` carries the secrets a completed preparation already collected for the remote child,
+     so the run that substitutes for it carries the same values rather than a second reading of a
+     source that may have moved — or failed — since. A run that never reached that step passes
+     nothing and the local leg collects for itself. */
+  runLocal(command: readonly string[], prepared?: Readonly<Record<string, string>>): Promise<number>;
   /* Announces the outage a fallback run would have announced. Without it the notification would
      ride on runLocal alone, so a profile declaring `fallback: fail` — or any run pinned to
      `mode: remote` — would exit 75 with the remote down and no alert anywhere. */
@@ -52,9 +61,13 @@ function validCommand(command: readonly string[]): boolean {
   );
 }
 
-async function runLocal(runtime: RunProfileRuntime, command: readonly string[]): Promise<number> {
+async function runLocal(
+  runtime: RunProfileRuntime,
+  command: readonly string[],
+  prepared?: Readonly<Record<string, string>>,
+): Promise<number> {
   try {
-    const code = await runtime.runLocal(command);
+    const code = await runtime.runLocal(command, prepared);
     return validExitCode(code) ? code : INFRASTRUCTURE_EXIT_CODE;
   } catch {
     return INFRASTRUCTURE_EXIT_CODE;
@@ -133,7 +146,7 @@ export async function runProfile(
     }
     if (childStarted) return INFRASTRUCTURE_EXIT_CODE;
     if (remote.reason === WORKLOAD_COMMAND_REASON) return WORKLOAD_COMMAND_EXIT_CODE;
-    return mayFallback(mode, profile) ? runLocal(runtime, command) : failClosed(runtime);
+    return mayFallback(mode, profile) ? runLocal(runtime, command, prepared.secrets) : failClosed(runtime);
   }
 
   if (!childStarted) {

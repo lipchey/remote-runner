@@ -17,6 +17,10 @@ class FakeRuntime implements RunProfileRuntime {
   notStartedReason = "spawn";
   marker = true;
   seenSecrets?: Readonly<Record<string, string>>;
+  /* Its own field, not a shared one with `seenSecrets`: what the fallback receives and what the
+     remote child received are the two values this unit exists to keep equal, and one recorder
+     cannot tell a swap between them. */
+  localSecrets: Readonly<Record<string, string>> | undefined;
 
   async prepareRemote() {
     this.calls.push("prepare");
@@ -24,8 +28,9 @@ class FakeRuntime implements RunProfileRuntime {
     if (!next) throw new Error("unexpected prepare");
     return next;
   }
-  async runLocal(command: readonly string[]) {
+  async runLocal(command: readonly string[], prepared?: Readonly<Record<string, string>>) {
     this.calls.push(`local:${command.join("|")}`);
+    this.localSecrets = prepared;
     return this.localExit;
   }
   async failClosed() {
@@ -108,6 +113,36 @@ describe("consumer setup failure", () => {
     expect(runtime.calls).toEqual(["prepare", "fail-closed"]);
   });
 });
+describe("secrets on the local leg", () => {
+  it("hands the fallback the snapshot prepared for the remote child, not a second collection", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [prepared(runtime)];
+    runtime.remoteKind = "not-started";
+
+    await expect(runProfile(runtime, { mode: "auto", fallback: "local" }, ["./verify"])).resolves.toBe(17);
+    expect(runtime.localSecrets).toEqual({ SECRET: "ephemeral-canary" });
+    expect(runtime.localSecrets).toEqual(runtime.seenSecrets);
+  });
+
+  it("leaves a run that never collected any to the local leg's own collection", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [failed("secrets", false)];
+
+    /* A collection failure still buys the fallback: it is not proof that an immediate second
+       collection fails too, and if it does the local leg refuses there. */
+    await expect(runProfile(runtime, { mode: "auto", fallback: "local" }, ["./verify"])).resolves.toBe(17);
+    expect(runtime.calls).toEqual(["prepare", "local:./verify"]);
+    expect(runtime.localSecrets).toBeUndefined();
+  });
+
+  it("passes nothing on a run pinned to local mode, which never prepared anything", async () => {
+    const runtime = new FakeRuntime();
+
+    await expect(runProfile(runtime, { mode: "auto", fallback: "local" }, ["./verify"], "local")).resolves.toBe(17);
+    expect(runtime.localSecrets).toBeUndefined();
+  });
+});
+
 const profile = { mode: "auto" as const, fallback: "local" as const };
 
 describe("run profile selection", () => {

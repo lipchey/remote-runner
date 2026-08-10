@@ -84,6 +84,12 @@ class FakeProcesses {
     if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-secrets")) {
       return result("", this.secretsProbeExitCode);
     }
+    /* The manifest's own secret provider, which both legs now run: the local one collects before it
+       spawns anything, so a fake that answers it with the default empty stdout fails every local
+       run with malformed JSON. */
+    if (request.command === "node" && request.args.at(-1)?.endsWith("remote-runner-env.mjs")) {
+      return result('{"NEON_DEV_DATABASE_URL":"ephemeral-canary"}');
+    }
     /* Keyed on the probe's own command, not on `remote-runner-workspace`: that name is a prefix of
        the registration probe's `$0`, and both arrive as one encoded remote command string. */
     if (request.command === "ssh" && request.args.at(-1)?.includes("status --short --branch")) {

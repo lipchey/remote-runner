@@ -8,7 +8,7 @@ export interface ProfileExecutionServices extends PreparationRuntime {
     secrets: Readonly<Record<string, string>>,
     onChildStarted: () => Promise<void>,
   ): Promise<RemoteExecutionResult>;
-  runLocal(command: readonly string[]): Promise<number>;
+  runLocal(command: readonly string[], prepared?: Readonly<Record<string, string>>): Promise<number>;
   recordFallback(reason: string): Promise<void>;
   recordOutage(reason: string): Promise<void>;
   recordRemoteChildStarted(): Promise<void>;
@@ -103,7 +103,7 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
       }
       return result;
     },
-    async runLocal(command) {
+    async runLocal(command, prepared) {
       const reason = pendingFallbackReason;
       pendingFallbackReason = undefined;
       if (reason !== undefined) {
@@ -113,7 +113,7 @@ export function createProfileRuntime(services: ProfileExecutionServices): RunPro
           /* notification never blocks fallback */
         }
       }
-      return services.runLocal(command);
+      return services.runLocal(command, prepared);
     },
     /* The outage is announced here rather than from prepareRemote so that a retryable failure the
        second attempt survives stays silent: the run reached the remote, so nothing was down for the

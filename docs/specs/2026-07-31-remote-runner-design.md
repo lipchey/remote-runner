@@ -179,6 +179,16 @@ For the common development case, the manifest may name a confined ignored dotenv
 parses it locally and retains only allowlisted keys. A bounded argv provider remains an alternative;
 exactly one source is required.
 
+Amended 2026-08-10 (`RRM-B9`): a local run — the fallback, and `mode: local` — carries the same
+allowlisted values in its child environment. A fallback reuses the snapshot the preparation already
+collected for the remote child, so the substituted run carries what the substituted-for one would
+have and a provider with side effects is invoked once; a run that never reached that step collects
+for itself. Until then the local leg received none, which made a fallback a materially different
+workload from the one it stood in for — whether that surfaces as a failure or as a pass depends on
+how each consumer's guards treat an absent value, which this runner cannot know and must not depend
+on. Values that cannot be collected now fail the local run closed rather than running a workload
+without them.
+
 ### 6.7 Notifications and durable state
 
 The first notifier uses Telegram `sendMessage` with `~/.claude/.telegram-ask.conf`. The config
@@ -187,10 +197,10 @@ chat ID. Values remain local.
 
 A run that gives up on a reported preparation or child-start failure sends one alert, whether or not
 it has a local fallback to take — the alert belongs to the reason, not to the fallback. Reasons that
-name the caller rather than the remote (`lock`, `validation`, `consumer-setup`) send none, and
+name the caller rather than the remote (`lock`, `validation`, `consumer-setup`, and since `RRM-B9`
+`secrets`, whose collection and framing both happen on this machine) send none, and
 neither does a failure a later preparation attempt survives. A give-up that returns its reason is
-announced under that reason — including a secret frame too large to encode, which reports
-`secrets`. A controller that THROWS before any child starts is announced the same way but always
+announced under that reason unless it is one of those. A controller that THROWS before any child starts is announced the same way but always
 under `child-start`: unlike the returning half, a throw carries no reason of its own. A throw AFTER
 the child started reaches the operator and the run log as an unknown outcome with no alert and no
 local rerun: the workload is already running remotely, and a stream writer that died says nothing
@@ -308,7 +318,9 @@ eviction between runs, so a cold/warm split had nothing behind it either).
 
 Elapsed time covers the whole profile run for that location end to end — on the remote leg that
 includes validation, locking, probing, sync, reconciliation, bootstrap, and secret collection, not
-just the workload itself. Reports give median and range per pair over its successful samples only;
+just the workload itself; since `RRM-B9` the local leg's samples include a secret collection of
+their own, so local medians recorded before 2026-08-10 measure a slightly smaller span than later
+ones. Reports give median and range per pair over its successful samples only;
 a pair with no successful sample reports no median or range. The Ariadne adapter supplies its
 concrete test, fast-verification, and full-verification commands.
 

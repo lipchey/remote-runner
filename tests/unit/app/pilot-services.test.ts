@@ -16,6 +16,7 @@ import {
   resolveRemotePaths,
 } from "../../../src/app/pilot-services.js";
 import { loadManifestText } from "../../../src/config/load-manifest.js";
+import type { Profile } from "../../../src/config/types.js";
 import type { NodeProcessRuntime, StreamingProcessRequest } from "../../../src/node/process.js";
 import { pathIdentity, worktreeIdentity } from "../../../src/runtime/identity.js";
 import type { BoundedProcessRequest } from "../../../src/ssh/client.js";
@@ -42,11 +43,23 @@ const ensureProfile = loadManifestText(
   ),
 ).profiles[0]!;
 
+/* The local leg collects secrets before it spawns anything, so every local-run case needs a source
+   that really answers. The fixture's own provider script does not exist in this repository. */
+const LOCAL_SECRET = "ephemeral-canary";
+const answeringProvider = [
+  process.execPath,
+  "-e",
+  `process.stdout.write(JSON.stringify({ NEON_DEV_DATABASE_URL: ${JSON.stringify(LOCAL_SECRET)} }))`,
+];
+function withSecretProvider(source: Profile, provider: string[] = answeringProvider): Profile {
+  return { ...source, secrets: { ...source.secrets, provider } };
+}
+
 describe("pilot service boundaries", () => {
   it("applies the manifest child environment to a local workload", async () => {
     const chunks: Uint8Array[] = [];
     const services = new NodeProfileServices(
-      {
+      withSecretProvider({
         ...profile,
         workload: {
           ...profile.workload,
@@ -55,7 +68,7 @@ describe("pilot service boundaries", () => {
             LOCAL_FALLBACK_CANARY: "manifest",
           },
         },
-      },
+      }),
       {
         home: "/tmp/remote-runner-test-home",
         sourceRoot: process.cwd(),
@@ -75,9 +88,113 @@ describe("pilot service boundaries", () => {
     expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("manifest|1|local");
   });
 
+  it("carries the allowlisted secrets into the local child, as the remote launcher does", async () => {
+    const chunks: Uint8Array[] = [];
+    const services = new NodeProfileServices(withSecretProvider(profile), {
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      stdout: (chunk) => chunks.push(chunk),
+      stderr: () => undefined,
+    });
+
+    const exitCode = await services.runLocal([
+      process.execPath,
+      "-e",
+      "process.stdout.write(String(process.env.NEON_DEV_DATABASE_URL))",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe(LOCAL_SECRET);
+  });
+
+  it("prefers the snapshot prepared for the remote child over a second collection", async () => {
+    const chunks: Uint8Array[] = [];
+    /* A provider that would answer differently: proving the snapshot is used, not merely that some
+       value arrives, needs the two sources to disagree. */
+    const services = new NodeProfileServices(
+      withSecretProvider(profile, [
+        process.execPath,
+        "-e",
+        'process.stdout.write(JSON.stringify({ NEON_DEV_DATABASE_URL: "collected-again" }))',
+      ]),
+      {
+        home: "/tmp/remote-runner-test-home",
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array(),
+        stdout: (chunk) => chunks.push(chunk),
+        stderr: () => undefined,
+      },
+    );
+
+    const exitCode = await services.runLocal(
+      [process.execPath, "-e", "process.stdout.write(String(process.env.NEON_DEV_DATABASE_URL))"],
+      { NEON_DEV_DATABASE_URL: "prepared-snapshot" },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("prepared-snapshot");
+  });
+
+  it("lets a secret override the provider markers, exactly as the remote launcher does", async () => {
+    const chunks: Uint8Array[] = [];
+    const overriding = withSecretProvider(profile, [
+      process.execPath,
+      "-e",
+      'process.stdout.write(JSON.stringify({ REMOTE_RUNNER_PROVIDER: "from-secret" }))',
+    ]);
+    const services = new NodeProfileServices(
+      { ...overriding, secrets: { ...overriding.secrets, allow: ["REMOTE_RUNNER_PROVIDER"] } },
+      {
+        home: "/tmp/remote-runner-test-home",
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array(),
+        stdout: (chunk) => chunks.push(chunk),
+        stderr: () => undefined,
+      },
+    );
+
+    await services.runLocal([
+      process.execPath,
+      "-e",
+      "process.stdout.write(String(process.env.REMOTE_RUNNER_PROVIDER))",
+    ]);
+
+    expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("from-secret");
+  });
+
+  it("refuses to run the workload locally when the secrets it would carry cannot be collected", async () => {
+    const chunks: Uint8Array[] = [];
+    const lines: string[] = [];
+    const observed: string[] = [];
+    let markedLocal = false;
+    const services = new NodeProfileServices(withSecretProvider(profile, [process.execPath, "-e", "process.exit(3)"]), {
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      stdout: (chunk) => chunks.push(chunk),
+      stderr: (chunk) => lines.push(new TextDecoder().decode(chunk)),
+      onUnavailable: (reason) => observed.push(reason),
+      onLocalExecution: () => {
+        markedLocal = true;
+      },
+    });
+
+    await expect(services.runLocal([process.execPath, "-e", 'process.stdout.write("workload ran")'])).rejects.toThrow(
+      "secret provider failed with exit code 3",
+    );
+
+    expect(chunks).toEqual([]);
+    expect(observed).toEqual(["secrets"]);
+    expect(lines.join("")).toContain("reason=secrets");
+    /* The callback that stamps the run record with `provider: "local"` must not fire for a leg
+       whose workload never started. */
+    expect(markedLocal).toBe(false);
+  });
+
   it("notifies onLocalExecution before running a local workload", async () => {
     let notified = false;
-    const services = new NodeProfileServices(profile, {
+    const services = new NodeProfileServices(withSecretProvider(profile), {
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),
