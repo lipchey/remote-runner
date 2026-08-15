@@ -31,6 +31,7 @@ import { ensureManagedKnownHost, mutagenSshEnvironment } from "../node/managed-s
 import { RemoteToolchainRuntime } from "../node/remote-toolchain.js";
 import { acquireProfileLock, LockTimeoutError } from "../runtime/lock.js";
 import { worktreeIdentity } from "../runtime/identity.js";
+import type { RunPhase, RunTelemetry } from "../runtime/telemetry.js";
 import { PreparationError } from "../run/prepare.js";
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
 import { INFRASTRUCTURE_EXIT_CODE, WORKLOAD_COMMAND_REASON } from "../run/run-profile.js";
@@ -384,6 +385,24 @@ export async function listLocalFingerprintFiles(
   return [...new Set(available.filter((path) => !deleted.has(path)))].sort();
 }
 
+/* The aggregate follows the services instance, so a controller connection or a concurrent run — each
+   with its own instance — never lands in it. */
+function timedSshProcesses(processes: NodeProcessRuntime, telemetry: RunTelemetry): NodeProcessRuntime {
+  return {
+    run: (request) =>
+      request.command === "ssh" ? telemetry.measureSsh(() => processes.run(request)) : processes.run(request),
+    isAlive: (pid) => processes.isAlive(pid),
+  };
+}
+
+function timedSshStream(
+  streamProcess: typeof runStreamingProcess,
+  telemetry: RunTelemetry,
+): typeof runStreamingProcess {
+  return (request) =>
+    request.command === "ssh" ? telemetry.measureSsh(() => streamProcess(request)) : streamProcess(request);
+}
+
 export interface NodeProfileServicesOptions {
   readonly home: string;
   readonly sourceRoot: string;
@@ -399,6 +418,7 @@ export interface NodeProfileServicesOptions {
   readonly recordRemoteChildStarted?: () => Promise<void>;
   readonly onLocalExecution?: () => void;
   readonly onUnavailable?: (reason: string, detail?: string) => void;
+  readonly telemetry?: RunTelemetry;
 }
 
 export class NodeProfileServices implements ProfileExecutionServices {
@@ -420,8 +440,11 @@ export class NodeProfileServices implements ProfileExecutionServices {
   ) {
     canonicalRemotePath(options.home, "local home");
     if (!join(options.sourceRoot).startsWith("/")) throw new Error("source root must be absolute");
-    this.processes = options.processes ?? new NodeProcessRuntime();
-    this.streamProcess = options.streamProcess ?? runStreamingProcess;
+    const processes = options.processes ?? new NodeProcessRuntime();
+    const streamProcess = options.streamProcess ?? runStreamingProcess;
+    const telemetry = options.telemetry;
+    this.processes = telemetry === undefined ? processes : timedSshProcesses(processes, telemetry);
+    this.streamProcess = telemetry === undefined ? streamProcess : timedSshStream(streamProcess, telemetry);
     this.identity = worktreeIdentity(options.sourceRoot);
     this.stateRoot = join(options.home, ".local", "state", "remote-runner");
     this.lockRoot = join(this.stateRoot, "locks");
@@ -673,6 +696,11 @@ export class NodeProfileServices implements ProfileExecutionServices {
     return this.remotePaths;
   }
 
+  private span<T>(phase: RunPhase, run: () => Promise<T>): Promise<T> {
+    const telemetry = this.options.telemetry;
+    return telemetry === undefined ? run() : telemetry.measure(phase, run);
+  }
+
   private async touchActivity(): Promise<void> {
     const paths = this.paths();
     const marker = paths.activityMarker;
@@ -729,7 +757,10 @@ export class NodeProfileServices implements ProfileExecutionServices {
     if (this.pausedSession === undefined) throw new Error("Mutagen session was not paused");
     const descriptor = this.pausedSession;
     this.pausedSession = undefined;
-    await this.mutagen.resumeAndFlush(descriptor);
+    const { flushDurationMs } = await this.mutagen.resumeAndFlush(descriptor);
+    /* Moved out of `sync-resume`, not added beside it — that span already covers the flush's time. */
+    this.options.telemetry?.add("sync-flush", flushDurationMs);
+    this.options.telemetry?.add("sync-resume", -flushDurationMs);
   }
 
   private async writeRemoteState(path: string, state: HealthySetupState): Promise<void> {
@@ -889,6 +920,9 @@ export class NodeProfileServices implements ProfileExecutionServices {
     secrets: Readonly<Record<string, string>>,
     onChildStarted: () => Promise<void>,
   ): Promise<RemoteExecutionResult> {
+    const telemetry = this.options.telemetry;
+    const stopChildStart = telemetry?.start("child-start");
+    let stopWorkload: (() => void) | undefined;
     const paths = this.paths();
     if (this.nodeRoot === undefined) throw new Error("remote Node is unavailable before bootstrap");
     if (this.uvRoot === undefined) throw new Error("remote uv is unavailable before bootstrap");
@@ -908,6 +942,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
          so what still fails here is chiefly the aggregate frame limit no single-value check sees.
          That is the same preparation step failing, not a child that failed to start, so it carries
          the reason the collection half already uses. */
+      stopChildStart?.();
       return { kind: "not-started", reason: "secrets" };
     }
     const result = await this.streamProcess({
@@ -928,7 +963,11 @@ export class NodeProfileServices implements ProfileExecutionServices {
       ),
       stdin: frame.stdin,
       marker: CHILD_MARKER,
-      onMarker: onChildStarted,
+      onMarker: async () => {
+        stopChildStart?.();
+        stopWorkload = telemetry?.start("workload");
+        await onChildStarted();
+      },
       stdout:
         this.options.stdout ??
         ((chunk) => {
@@ -939,14 +978,18 @@ export class NodeProfileServices implements ProfileExecutionServices {
         ((chunk) => {
           process.stderr.write(chunk);
         }),
+    }).finally(() => {
+      /* Also on a rejected stream, which is where the workload the spans describe really ended. */
+      stopChildStart?.();
+      stopWorkload?.();
     });
     if (!result.spawned || !result.markerSeen) {
       const workloadCommand = result.spawned && result.exitCode === WORKLOAD_SPAWN_EXIT_CODE;
       return { kind: "not-started", reason: workloadCommand ? WORKLOAD_COMMAND_REASON : "child-start" };
     }
     try {
-      await this.touchActivity();
-      await this.pruneRetention();
+      await this.span("post-activity", () => this.touchActivity());
+      await this.span("retention", () => this.pruneRetention());
     } catch {
       /* Through `write`, because this line runs AFTER the marker: an inline writer that throws here
          escapes startRemote, and the run gives up with exit 75 — losing the very workload exit this

@@ -19,6 +19,7 @@ import { loadManifestText } from "../../../src/config/load-manifest.js";
 import type { Profile } from "../../../src/config/types.js";
 import type { NodeProcessRuntime, StreamingProcessRequest } from "../../../src/node/process.js";
 import { pathIdentity, worktreeIdentity } from "../../../src/runtime/identity.js";
+import { RunTelemetry } from "../../../src/runtime/telemetry.js";
 import type { BoundedProcessRequest } from "../../../src/ssh/client.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
@@ -1355,5 +1356,100 @@ describe("pilot service boundaries", () => {
         ["**/package.json"],
       ),
     ).rejects.toThrow(/Git inspection/u);
+  });
+
+  it("splits a dispatch into child-start, workload and post-workload spans and counts only ssh", async () => {
+    const current = worktreeIdentity(process.cwd());
+    let elapsed = 0;
+    const telemetry = new RunTelemetry(() => elapsed);
+    const requests: BoundedProcessRequest[] = [];
+    const processes = {
+      async run(request: BoundedProcessRequest) {
+        requests.push(request);
+        elapsed += 5;
+        const serialized = JSON.stringify(request.args);
+        const stdout = serialized.includes("remote-runner-retention-list")
+          ? `${2_000_000_000}\0d\0${current}\0${1}\0`
+          : "";
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode(stdout),
+          stderr: new Uint8Array(),
+          outputTruncated: false,
+          spawned: true,
+        };
+      },
+      async isAlive() {
+        return false;
+      },
+    } as NodeProcessRuntime;
+    const streamRequests: StreamingProcessRequest[] = [];
+    /* Only the workload stream advances the fake clock, so the arithmetic below stays readable
+       regardless of what this listing quarantines. */
+    const streamProcess = async (request: StreamingProcessRequest) => {
+      const workload = streamRequests.push(request) === 1;
+      if (workload) elapsed += 100;
+      await request.onMarker();
+      if (workload) elapsed += 1000;
+      return { exitCode: 0, signal: null, markerSeen: true, spawned: true };
+    };
+    const services = new NodeProfileServices(retainedDataAiProfile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      knownHostsPath: "/Users/admin/.local/state/remote-runner/known_hosts/managed",
+      launcherSource: new Uint8Array([1]),
+      processes,
+      streamProcess,
+      stderr: () => undefined,
+      telemetry,
+    });
+    Object.assign(services, {
+      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current),
+      nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
+      uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
+    });
+
+    const result = await services.startRemote(["./verify"], { NEON_DEV_DATABASE_URL: "canary" }, async () => undefined);
+
+    expect(result).toEqual({ kind: "completed", exitCode: 0 });
+    const { phases, ssh } = telemetry.snapshot();
+    expect(phases["child-start"]).toBe(100);
+    expect(phases["workload"]).toBe(1000);
+    expect(phases["post-activity"]).toBe(5);
+    expect(phases["retention"]).toBeGreaterThan(0);
+    /* Mutagen shares this process port and the fake clock, so counting it would shift all three ssh
+       figures. */
+    const sshRequests = requests.filter((request) => request.command === "ssh");
+    expect(sshRequests.length).toBeGreaterThan(0);
+    expect(sshRequests.length).toBeLessThan(requests.length);
+    expect(ssh).toEqual({
+      count: sshRequests.length + streamRequests.length,
+      totalMs: 5 * sshRequests.length + 1100,
+      maxMs: 1100,
+    });
+  });
+
+  it("moves Mutagen's own flush duration out of the resume span", async () => {
+    const telemetry = new RunTelemetry(() => 0);
+    const services = new NodeProfileServices(profile, {
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      telemetry,
+    });
+    Object.assign(services, {
+      pausedSession: {},
+      mutagen: {
+        async resumeAndFlush() {
+          return { session: {}, flushDurationMs: 27 };
+        },
+      },
+    });
+    /* What the preparation facade measures around this call: the flush is inside it. */
+    telemetry.add("sync-resume", 100);
+
+    await services.resumeAndFlush();
+
+    expect(telemetry.snapshot().phases).toEqual({ "sync-resume": 73, "sync-flush": 27 });
   });
 });

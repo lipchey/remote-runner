@@ -1,4 +1,5 @@
 import { stableReason } from "../notifications/outage.js";
+import type { RunTelemetry } from "../runtime/telemetry.js";
 import { prepareRemote, type PreparationRuntime } from "../run/prepare.js";
 import { WORKLOAD_COMMAND_REASON, type RemoteExecutionResult, type RunProfileRuntime } from "../run/run-profile.js";
 
@@ -27,13 +28,29 @@ function report(services: ProfileExecutionServices, reason: string, detail?: str
   }
 }
 
-export function createProfileRuntime(services: ProfileExecutionServices): RunProfileRuntime {
+/* Times each step here, not inside the service bodies, so a step retried by the prepare loop just
+   adds to its own span. */
+function timedPreparation(services: ProfileExecutionServices, telemetry: RunTelemetry): PreparationRuntime {
+  return {
+    validate: () => telemetry.measure("validate", () => services.validate()),
+    acquireLock: () => telemetry.measure("lock", () => services.acquireLock()),
+    probe: () => telemetry.measure("probe", () => services.probe()),
+    pauseSync: () => telemetry.measure("sync-pause", () => services.pauseSync()),
+    reconcileWorkspace: () => telemetry.measure("git-workspace", () => services.reconcileWorkspace()),
+    resumeAndFlush: () => telemetry.measure("sync-resume", () => services.resumeAndFlush()),
+    bootstrap: () => telemetry.measure("bootstrap", () => services.bootstrap()),
+    collectSecrets: () => telemetry.measure("secrets", () => services.collectSecrets()),
+  };
+}
+
+export function createProfileRuntime(services: ProfileExecutionServices, telemetry?: RunTelemetry): RunProfileRuntime {
   let pendingFallbackReason: string | undefined;
   let reportedReason: string | undefined;
   let reportedDetail: string | undefined;
+  const preparation = telemetry === undefined ? services : timedPreparation(services, telemetry);
   return {
     async prepareRemote() {
-      const result = await prepareRemote(services);
+      const result = await prepareRemote(preparation);
       if (result.ok) {
         pendingFallbackReason = undefined;
         reportedReason = undefined;

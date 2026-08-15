@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createProfileRuntime, type ProfileExecutionServices } from "../../../src/app/profile-runtime.js";
 import { DependencyCommandError } from "../../../src/bootstrap/dependencies.js";
 import { DiagnosableError } from "../../../src/runtime/diagnostic.js";
+import { RunTelemetry } from "../../../src/runtime/telemetry.js";
 import { PreparationError, RetryablePreparationError } from "../../../src/run/prepare.js";
 import { INFRASTRUCTURE_EXIT_CODE, WORKLOAD_COMMAND_REASON, runProfile } from "../../../src/run/run-profile.js";
 
@@ -413,5 +414,75 @@ describe("profile runtime composition", () => {
 
     expect(await runProfile(createProfileRuntime(services), profile, ["./verify"], "local")).toBe(17);
     expect(services.calls).toEqual(["local"]);
+  });
+
+  /* Distinct costs per step — equal ones would keep the test green even if two spans swapped
+     names. */
+  it("times each preparation step under its own phase name", async () => {
+    let elapsed = 0;
+    const telemetry = new RunTelemetry(() => elapsed);
+    class TimedServices extends FakeServices {
+      override async validate() {
+        elapsed += 1;
+        return super.validate();
+      }
+      override async acquireLock() {
+        elapsed += 2;
+        return super.acquireLock();
+      }
+      override async probe() {
+        elapsed += 4;
+        return super.probe();
+      }
+      override async pauseSync() {
+        elapsed += 8;
+        return super.pauseSync();
+      }
+      override async reconcileWorkspace() {
+        elapsed += 16;
+        return super.reconcileWorkspace();
+      }
+      override async resumeAndFlush() {
+        elapsed += 32;
+        return super.resumeAndFlush();
+      }
+      override async bootstrap() {
+        elapsed += 64;
+        return super.bootstrap();
+      }
+      override async collectSecrets() {
+        elapsed += 128;
+        return super.collectSecrets();
+      }
+    }
+
+    const prepared = await createProfileRuntime(new TimedServices(), telemetry).prepareRemote();
+
+    expect(prepared.ok).toBe(true);
+    expect(telemetry.snapshot().phases).toEqual({
+      validate: 1,
+      lock: 2,
+      probe: 4,
+      "sync-pause": 8,
+      "git-workspace": 16,
+      "sync-resume": 32,
+      bootstrap: 64,
+      secrets: 128,
+    });
+  });
+
+  it("leaves an unprepared run's later phases out of the record", async () => {
+    let elapsed = 0;
+    const telemetry = new RunTelemetry(() => elapsed);
+    const services = new FakeServices();
+    services.probe = async () => {
+      elapsed += 9;
+      throw new DiagnosableError("offline");
+    };
+
+    await createProfileRuntime(services, telemetry).prepareRemote();
+
+    expect(Object.keys(telemetry.snapshot().phases)).toEqual(["validate", "lock", "probe"]);
+    expect(telemetry.snapshot().phases["probe"]).toBe(9);
   });
 });
