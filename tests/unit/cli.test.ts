@@ -129,6 +129,29 @@ describe("runCli", () => {
     ]);
   });
 
+  /* Only the CLI can measure the repair, since it runs before the runner's clock starts; a local
+     run reports no measurement, not a false zero. */
+  it("hands the run what the controller repair cost, and nothing when it is skipped", async () => {
+    const measured: (number | undefined)[] = [];
+    const dependencies: CliDependencies = {
+      readFile: async () => validManifest,
+      ensureController: async () => undefined,
+      runProfile: async (_profile, _command, _mode, controllerEnsureMs) => {
+        measured.push(controllerEnsureMs);
+        return 0;
+      },
+    };
+    const io = { stdout: () => undefined, stderr: () => undefined };
+
+    expect(await runCli(["run", "verify-full", "--mode", "remote"], io, dependencies)).toBe(0);
+    expect(await runCli(["run", "verify-full", "--mode", "local"], io, dependencies)).toBe(0);
+
+    expect(measured).toHaveLength(2);
+    expect(Number.isInteger(measured[0])).toBe(true);
+    expect(measured[0]).toBeGreaterThanOrEqual(0);
+    expect(measured[1]).toBeUndefined();
+  });
+
   it("uses the manifest workload and environment mode when command and mode argv are omitted", async () => {
     const calls: unknown[] = [];
     const code = await runCli(

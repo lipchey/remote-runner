@@ -54,6 +54,9 @@ interface RunRecord {
   readonly reason?: string;
   readonly error?: string;
   readonly durationMs?: number;
+  readonly phases?: Readonly<Record<string, number>>;
+  readonly ssh?: { readonly count: number; readonly totalMs: number; readonly maxMs: number };
+  readonly controllerEnsureMs?: number;
 }
 
 async function runRecords(dependencies: NodeCliDependencies): Promise<RunRecord[]> {
@@ -667,5 +670,110 @@ describe("concrete Node CLI dependencies", () => {
     await expect(readFile(join(outside, "20260731T123456Z-verify-full.json"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("attributes a real dispatch's phases and ssh connections in the terminal record", async () => {
+    const hostKey = new TextEncoder().encode("pop-os-host-key");
+    const paths = await fixture(
+      validManifest.replace(
+        'hostKeySha256: "SHA256:trusted"',
+        `hostKeySha256: "SHA256:${createHash("sha256").update(hostKey).digest("base64").replace(/=+$/u, "")}"`,
+      ),
+    );
+    await mkdir(dirname(paths.knownHostsPath), { recursive: true });
+    await writeFile(paths.knownHostsPath, `pop-os ssh-ed25519 ${Buffer.from(hostKey).toString("base64")}\n`, {
+      mode: 0o600,
+    });
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+      now: () => "2026-07-31T12:34:56.000Z",
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote", 812)).resolves.toBe(75);
+
+    const finish = (await runRecords(dependencies)).at(-1)!;
+    expect(finish.event).toBe("run-finish");
+    /* Preparation stops at the probe, so later phases are absent, not a zero that would read as
+       instant work. */
+    expect(Object.keys(finish.phases ?? {})).toEqual(["validate", "lock", "probe"]);
+    expect(Object.values(finish.phases ?? {}).every((value) => Number.isInteger(value) && value >= 0)).toBe(true);
+    expect(finish.ssh?.count).toBeGreaterThanOrEqual(1);
+    expect(finish.ssh?.maxMs).toBeLessThanOrEqual(finish.ssh!.totalMs);
+    /* Outside `phases`: the repair precedes the run, so its cost can't join the sum that explains
+       `durationMs`. */
+    expect(finish.controllerEnsureMs).toBe(812);
+    expect(finish.phases).not.toHaveProperty("controllerEnsureMs");
+  });
+
+  it("carries the controller measurement and empty spans on a run that never reached the remote", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+      now: () => "2026-07-31T12:34:56.000Z",
+      executeProfile: async () => {
+        throw new Error("resource setup failed");
+      },
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote", 640)).rejects.toThrow(
+      "resource setup failed",
+    );
+
+    const records = await runRecords(dependencies);
+    expect(records.map(({ event }) => event)).toEqual(["run-start", "run-error"]);
+    expect(records[1]).toMatchObject({ controllerEnsureMs: 640, phases: {}, ssh: { count: 0, totalMs: 0, maxMs: 0 } });
+    expect(records[0]!.controllerEnsureMs).toBeUndefined();
+  });
+
+  it("keeps reading a runner log written before the phase fields existed", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+      now: () => "2026-07-31T12:34:56.000Z",
+      executeProfile: async () => 0,
+    });
+    const profileRoot = join(
+      paths.home,
+      ".local",
+      "state",
+      "remote-runner",
+      "profiles",
+      "ariadne",
+      "verify-full",
+      dependencies.identity,
+    );
+    await mkdir(profileRoot, { recursive: true });
+    const legacy = {
+      at: "2026-07-30T00:00:00.000Z",
+      event: "run-finish",
+      runId: "00112233445566cc",
+      pid: 1,
+      profile: "verify-full",
+      mode: "remote",
+      status: 0,
+      provider: "remote",
+      durationMs: 12,
+    };
+    await writeFile(join(profileRoot, "runner.log"), `${JSON.stringify(legacy)}\n`);
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).resolves.toBe(0);
+
+    const records = await runRecords(dependencies);
+    expect(records.map(({ event }) => event)).toEqual(["run-finish", "run-start", "run-finish"]);
+    expect(records[0]).toEqual(legacy);
+    expect(records.at(-1)).toMatchObject({ phases: {}, ssh: { count: 0, totalMs: 0, maxMs: 0 } });
+    expect(records.at(-1)!.controllerEnsureMs).toBeUndefined();
   });
 });

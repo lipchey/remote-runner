@@ -24,6 +24,7 @@ import { NodeProcessRuntime } from "../node/process.js";
 import { errorCode } from "../runtime/errno.js";
 import { worktreeIdentity } from "../runtime/identity.js";
 import { createJsonlLogger } from "../runtime/log.js";
+import { RunTelemetry } from "../runtime/telemetry.js";
 import { inspectPrewarmRequest, publishPrewarmRequest } from "../prewarm/queue.js";
 import { runProfile } from "../run/run-profile.js";
 import { runSsh, type SshProcessRuntime } from "../ssh/client.js";
@@ -417,6 +418,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     command: readonly string[],
     mode: RunMode,
     onUnavailable: (reason: string, detail?: string) => void,
+    telemetry: RunTelemetry,
   ) => Promise<{ readonly status: number; readonly provider: "remote" | "local" }> =
     options.executeProfile !== undefined
       ? async (profile, command, mode) => ({
@@ -428,6 +430,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
           command: readonly string[],
           mode: RunMode,
           onUnavailable: (reason: string, detail?: string) => void,
+          telemetry: RunTelemetry,
         ) => {
           const resources = await executionResources();
           const notifications = createNodeNotificationCallbacks({
@@ -454,12 +457,18 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
               provider = "local";
             },
             onUnavailable,
+            telemetry,
           });
-          const status = await runProfile(createProfileRuntime(services), profile, command, mode);
+          const status = await runProfile(createProfileRuntime(services, telemetry), profile, command, mode);
           return { status, provider };
         };
 
-  const executeProfile = async (profile: Profile, command: readonly string[], mode: RunMode): Promise<number> => {
+  const executeProfile = async (
+    profile: Profile,
+    command: readonly string[],
+    mode: RunMode,
+    controllerEnsureMs?: number,
+  ): Promise<number> => {
     const root = profileRoot(home, profile, identity);
     const logger = createJsonlLogger(
       {
@@ -484,6 +493,12 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     const runId = (options.createRunId ?? (() => randomUUID().replaceAll("-", "").slice(0, 16)))();
     /* Monotonic: a wall clock corrected backwards mid-run would otherwise report a negative run. */
     const startedMs = performance.now();
+    const telemetry = new RunTelemetry();
+    /* Stays outside `phases`: it precedes `startedMs`, so folding it in would over-explain the phase-sum duration. */
+    const measurements = (): Record<string, unknown> => ({
+      ...telemetry.snapshot(),
+      ...(controllerEnsureMs === undefined ? {} : { controllerEnsureMs }),
+    });
     /* The unavailable callback fires mid-run: chaining it keeps its record ahead of the terminal
        one without the workload ever waiting on a diagnostic write. */
     let unavailable: Promise<void> = Promise.resolve();
@@ -496,20 +511,26 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       mode,
     });
     try {
-      const { status, provider } = await executeWorkload(profile, command, mode, (reason, detail) => {
-        unavailable = unavailable.then(() =>
-          writeLog({
-            at: now(),
-            event: "run-unavailable",
-            runId,
-            pid: process.pid,
-            profile: profile.id,
-            mode,
-            reason,
-            ...(detail === undefined ? {} : { detail }),
-          }),
-        );
-      });
+      const { status, provider } = await executeWorkload(
+        profile,
+        command,
+        mode,
+        (reason, detail) => {
+          unavailable = unavailable.then(() =>
+            writeLog({
+              at: now(),
+              event: "run-unavailable",
+              runId,
+              pid: process.pid,
+              profile: profile.id,
+              mode,
+              reason,
+              ...(detail === undefined ? {} : { detail }),
+            }),
+          );
+        },
+        telemetry,
+      );
       await unavailable;
       await writeLog({
         at: now(),
@@ -521,6 +542,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         status,
         provider,
         durationMs: Math.round(performance.now() - startedMs),
+        ...measurements(),
       });
       return status;
     } catch (caught) {
@@ -534,6 +556,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         mode,
         error: caught instanceof Error ? caught.name : "UnknownError",
         durationMs: Math.round(performance.now() - startedMs),
+        ...measurements(),
         /* Deliberately no provider field: a throw reaches here only from resource setup, before
            either path ran (runProfile absorbs execution failures into a status code), so any
            value would name a path that was never attempted. */
@@ -548,7 +571,8 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     loadManifest,
     readFile: async (path) => readFile(path),
     ensureController: () => ensureNodeController(home),
-    runProfile: (profile, command, mode) => executeProfile(profile, command, mode ?? profile.mode),
+    runProfile: (profile, command, mode, controllerEnsureMs) =>
+      executeProfile(profile, command, mode ?? profile.mode, controllerEnsureMs),
     async enqueuePrewarm(profile, manifestPath) {
       await ensureNodeController(home);
       const controller = await new NodeControllerRuntime(home, processes).inspect();

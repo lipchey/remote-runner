@@ -14,7 +14,12 @@ export interface CliDependencies {
   readFile(path: string): Promise<string | Uint8Array>;
   readonly environment?: Readonly<Record<string, string | undefined>>;
   ensureController?(): Promise<void>;
-  runProfile?(profile: Profile, command: readonly string[], mode?: RunMode): Promise<number>;
+  runProfile?(
+    profile: Profile,
+    command: readonly string[],
+    mode?: RunMode,
+    controllerEnsureMs?: number,
+  ): Promise<number>;
   enqueuePrewarm?(profile: Profile, manifestPath: string): Promise<"published" | "coalesced">;
   statusProfile?(profile?: string): Promise<string>;
   doctorProfile?(profile?: string): Promise<readonly DoctorProfileReport[]>;
@@ -261,7 +266,11 @@ async function runSelectedProfile(argv: readonly string[], io: CliIo, dependenci
     return 70;
   }
   const effectiveMode = mode ?? profile.mode;
+  /* Measured here because the repair runs before the runner's own clock starts, and a slow one is
+     dispatch time the run record would otherwise carry nowhere. */
+  let controllerEnsureMs: number | undefined;
   if (effectiveMode !== "local") {
+    const startedMs = performance.now();
     try {
       await dependencies.ensureController();
     } catch {
@@ -271,9 +280,10 @@ async function runSelectedProfile(argv: readonly string[], io: CliIo, dependenci
       }
       io.stderr("remote-runner controller unavailable; continuing automatic fallback policy");
     }
+    controllerEnsureMs = Math.round(performance.now() - startedMs);
   }
   try {
-    return await dependencies.runProfile(profile, command, effectiveMode);
+    return await dependencies.runProfile(profile, command, effectiveMode, controllerEnsureMs);
   } catch {
     io.stderr("remote-runner execution failed");
     return 70;
