@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -163,6 +163,9 @@ describe("pruneRemoteWorkspaces", () => {
       async terminateOwnedSync(target) {
         calls.push(`terminate:${target}`);
       },
+      async isIdentityDead() {
+        return true;
+      },
       async removeQuarantine(quarantine) {
         calls.push(`remove-quarantine:${quarantine}`);
       },
@@ -234,6 +237,10 @@ describe("pruneRemoteWorkspaces", () => {
       async terminateOwnedSync(target) {
         calls.push(`terminate:${target}`);
       },
+      async isIdentityDead(target) {
+        calls.push(`liveness:${target}`);
+        return true;
+      },
       async removeQuarantine(quarantine) {
         calls.push(`remove-quarantine:${quarantine}`);
       },
@@ -294,6 +301,9 @@ describe("pruneRemoteWorkspaces", () => {
         return "removed";
       },
       async terminateOwnedSync() {},
+      async isIdentityDead() {
+        return true;
+      },
       async removeQuarantine() {},
       async removeActivity() {},
       async removeSetupState() {},
@@ -305,10 +315,77 @@ describe("pruneRemoteWorkspaces", () => {
     expect(quarantined).toEqual([{ identity: stale, graceCutoffMs: remoteNowMs - 60 * minute }]);
     expect(result).toEqual({ retained: 1, graceProtected: 1, locked: 0, removed: 1, failed: 0, ignored: 0 });
   });
+
+  it("reclaims a live identity's own quarantine and leaves its identity-scoped state alone", async () => {
+    const current = identity(70);
+    const revived = identity(71);
+    const calls: string[] = [];
+    const runtime: WorkspaceRetentionRuntime = {
+      async list() {
+        return {
+          nowMs,
+          entries: [
+            { kind: "directory", identity: current, activityMs: nowMs },
+            {
+              kind: "quarantine",
+              identity: current,
+              activityMs: 0,
+              quarantineName: `.gc-${current}-aaaaaaaaaaaaaaaa`,
+            },
+            { kind: "directory", identity: revived, activityMs: nowMs - 61 * minute },
+            {
+              kind: "quarantine",
+              identity: revived,
+              activityMs: 0,
+              quarantineName: `.gc-${revived}-bbbbbbbbbbbbbbbb`,
+            },
+          ],
+        };
+      },
+      async withQuarantine(target, quarantine, existing, _graceCutoffMs, cleanup) {
+        calls.push(`quarantine:${target}:${quarantine}:${existing}`);
+        await cleanup();
+        return "removed";
+      },
+      async terminateOwnedSync(target) {
+        calls.push(`terminate:${target}`);
+      },
+      /* The listing said the workspace was gone; this later answer is what must decide, or a
+         resurrected identity loses the state it is using right now. */
+      async isIdentityDead(target) {
+        calls.push(`liveness:${target}`);
+        return false;
+      },
+      async removeQuarantine(quarantine) {
+        calls.push(`remove-quarantine:${quarantine}`);
+      },
+      async removeActivity(target) {
+        calls.push(`remove-activity:${target}`);
+      },
+      async removeSetupState(target) {
+        calls.push(`remove-setup:${target}`);
+      },
+      async removePrivateRef(target) {
+        calls.push(`remove-ref:${target}`);
+      },
+    };
+
+    const result = await pruneRemoteWorkspaces(runtime, current, { keep: 2, graceMinutes: 60 }, () => "0".repeat(16));
+
+    expect(calls).toEqual([
+      `quarantine:${current}:.gc-${current}-aaaaaaaaaaaaaaaa:true`,
+      `liveness:${current}`,
+      `remove-quarantine:.gc-${current}-aaaaaaaaaaaaaaaa`,
+      `quarantine:${revived}:.gc-${revived}-bbbbbbbbbbbbbbbb:true`,
+      `liveness:${revived}`,
+      `remove-quarantine:.gc-${revived}-bbbbbbbbbbbbbbbb`,
+    ]);
+    expect(result).toEqual({ retained: 2, graceProtected: 0, locked: 0, removed: 2, failed: 0, ignored: 0 });
+  });
 });
 
 describe("RemoteWorkspaceRetentionRuntime", () => {
-  it("rechecks fresh activity before resuming an existing quarantine", async () => {
+  it("refuses fresh activity when creating a quarantine and exempts the resume path from that refusal", async () => {
     const target = identity(49);
     let command: readonly string[] | undefined;
     let cleaned = false;
@@ -333,15 +410,95 @@ describe("RemoteWorkspaceRetentionRuntime", () => {
     );
 
     await expect(
-      runtime.withQuarantine(target, `.gc-${target}-eeeeeeeeeeeeeeee`, true, nowMs - minute, async () => {
+      runtime.withQuarantine(target, `.gc-${target}-eeeeeeeeeeeeeeee`, false, nowMs - minute, async () => {
         cleaned = true;
       }),
     ).resolves.toBe("refreshed");
 
     const script = command?.[2] ?? "";
-    expect(script.indexOf('stat -c %Y -- "$activity"')).toBeGreaterThan(-1);
+    /* Without the `existing` gate a leftover quarantine of an identity that still dispatches is
+       refused on every pass and no run ever reclaims it. */
+    expect(script).toContain('if [ "$existing" != 1 ] && [ -f "$activity" ]');
     expect(script.indexOf('stat -c %Y -- "$activity"')).toBeLessThan(script.indexOf('if [ "$existing" = 1 ]'));
     expect(cleaned).toBe(false);
+  });
+
+  it("reads liveness under the lock and calls anything it cannot classify alive", async () => {
+    const target = identity(52);
+    const commands: string[][] = [];
+    let exitCode = 0;
+    const port: WorkspaceRetentionCommandPort = {
+      async run(args) {
+        commands.push([...args]);
+        return { exitCode, stdout: new Uint8Array(), stderr: new Uint8Array() };
+      },
+      async withLock() {
+        return "removed";
+      },
+    };
+    const runtime = new RemoteWorkspaceRetentionRuntime(
+      port,
+      {
+        profileRoot: "/profiles/verify-full",
+        setupStateRoot: "/state/verify-full",
+        mirror: "/profiles/.mirror.git",
+        privateRefPrefix: "refs/remote-runner/ariadne/verify-full",
+      },
+      async () => undefined,
+    );
+
+    await expect(runtime.isIdentityDead(target, nowMs - minute)).resolves.toBe(true);
+    exitCode = 1;
+    await expect(runtime.isIdentityDead(target, nowMs - minute)).resolves.toBe(false);
+    exitCode = 127;
+    await expect(runtime.isIdentityDead(target, nowMs - minute)).resolves.toBe(false);
+    await expect(runtime.isIdentityDead("../escape", nowMs)).rejects.toThrow(/identity/iu);
+
+    expect(commands[0]?.slice(0, 3)).toEqual(["sh", "-ceu", expect.any(String)]);
+    expect(commands[0]).toEqual(
+      expect.arrayContaining([
+        `/profiles/verify-full/${target}`,
+        `/profiles/verify-full/.activity/${target}`,
+        String(Math.floor((nowMs - minute) / 1000)),
+      ]),
+    );
+    expect(commands[0]?.[2]).toContain('[ ! -e "$workspace" ] && [ ! -L "$workspace" ]');
+  });
+
+  it("runs the liveness script for real and calls every unclassifiable path alive", async () => {
+    const profileRoot = await realpath(await mkdtemp(join(tmpdir(), "retention-liveness-")));
+    temporaryRoots.push(profileRoot);
+    const runtime = new RemoteWorkspaceRetentionRuntime(
+      localCommandPort(),
+      {
+        profileRoot,
+        setupStateRoot: profileRoot,
+        mirror: `${profileRoot}/.mirror.git`,
+        privateRefPrefix: "refs/remote-runner/ariadne/verify-full",
+      },
+      async () => undefined,
+    );
+    const cutoff = nowMs - minute;
+    const dead = identity(80);
+    const present = identity(81);
+    const dangling = identity(82);
+    const danglingMarker = identity(83);
+    const linkedMarker = identity(84);
+
+    await mkdir(join(profileRoot, present));
+    await mkdir(join(profileRoot, ".activity"));
+    await writeFile(join(profileRoot, "elsewhere"), "");
+    spawnSync("ln", ["-s", join(profileRoot, "nowhere"), join(profileRoot, dangling)]);
+    spawnSync("ln", ["-s", join(profileRoot, "nowhere"), join(profileRoot, ".activity", danglingMarker)]);
+    spawnSync("ln", ["-s", join(profileRoot, "elsewhere"), join(profileRoot, ".activity", linkedMarker)]);
+
+    await expect(runtime.isIdentityDead(dead, cutoff)).resolves.toBe(true);
+    await expect(runtime.isIdentityDead(present, cutoff)).resolves.toBe(false);
+    /* `-e` alone answers false for a dangling link, and "dead" is the answer that authorises
+       deleting the identity's Mutagen session, private ref, marker and setup state. */
+    await expect(runtime.isIdentityDead(dangling, cutoff)).resolves.toBe(false);
+    await expect(runtime.isIdentityDead(danglingMarker, cutoff)).resolves.toBe(false);
+    await expect(runtime.isIdentityDead(linkedMarker, cutoff)).resolves.toBe(false);
   });
 
   it("uses confined fixed-argv commands and parses only bounded NUL records", async () => {

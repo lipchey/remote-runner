@@ -216,9 +216,20 @@ lock is busy. Temporary `.gc-<identity>-<nonce>` quarantines are resumable after
 Symlinks and special entries are reported but never followed or removed.
 
 Activity refresh takes the same identity lock as quarantine. Retention rechecks the marker under
-that lock immediately before moving a workspace or resuming an existing `.gc-*` cleanup, so a
-candidate selected from an older listing but refreshed by concurrent preparation is kept as
-grace-protected.
+that lock immediately before moving a workspace, so a candidate selected from an older listing but
+refreshed by concurrent preparation is kept as grace-protected.
+
+Resuming an existing `.gc-*` is deliberately exempt from that refusal. The directory is already
+detached, so a fresh marker says nothing about it — while the refusal applied, an identity that kept
+dispatching kept its own leftovers forever, and so did every other run, which saw the same fresh
+marker. The resumed pass re-reads liveness under the lock: it always removes the quarantine
+directory, and removes the identity-scoped resources — owned Mutagen session, private ref, activity
+marker, setup state — only for an identity whose workspace is proven absent and whose marker is
+absent or stale. Any state the check cannot classify counts as alive. A quarantine removed this way
+is not recoverable; installing an older runner stops further reclamation but restores nothing.
+
+Identity lock files under `.locks/` are never unlinked. Removing one drops the inode a concurrent
+holder is already locked on, and the next arrival then creates a fresh inode and enters alongside it.
 
 `remote-runner doctor <profile>` reports `workspace-registration` when the exact generated
 workspace directory is missing but the consumer's bare mirror still lists it as a registered Git

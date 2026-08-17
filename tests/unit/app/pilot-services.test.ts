@@ -728,6 +728,9 @@ describe("pilot service boundaries", () => {
     const serializedRequests = requests.map((request) => JSON.stringify(request.args));
     expect(serializedRequests.filter((value) => value.includes("activity")).length).toBeGreaterThanOrEqual(1);
     expect(serializedRequests.some((value) => value.includes("remote-runner-retention-list"))).toBe(true);
+    /* An identity lock file must outlive its holder: unlinking it drops the inode a concurrent
+       holder is locked on, and the next arrival then locks a fresh one and runs alongside it. */
+    expect(serializedRequests.filter((value) => /rm -[a-z]* -- \S*\/\.locks\//u.test(value))).toEqual([]);
   });
 
   /* Collection bounds each secret; only the frame bounds their total, so this is the one secrets

@@ -44,6 +44,10 @@ export interface WorkspaceRetentionRuntime {
     cleanup: () => Promise<void>,
   ): Promise<WorkspaceQuarantineResult>;
   terminateOwnedSync(identity: string): Promise<void>;
+  /* Re-read under the caller's lock, because `list()` runs before it and an identity can start
+     preparing in between. Fails closed: anything but a proven-absent workspace with an
+     absent-or-stale marker answers false. */
+  isIdentityDead(identity: string, graceCutoffMs: number): Promise<boolean>;
   removeQuarantine(quarantineName: string): Promise<void>;
   removeActivity(identity: string): Promise<void>;
   removeSetupState(identity: string): Promise<void>;
@@ -230,7 +234,7 @@ export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntim
       [
         "sh",
         "-ceu",
-        'umask 077; existing=$1; lock=$2; workspace=$3; quarantine=$4; activity=$5; cutoff=$6; mkdir -p -- "$(dirname -- "$lock")"; exec 9>"$lock"; flock -n 9 || exit 75; if [ -f "$activity" ] && [ ! -L "$activity" ] && [ "$(stat -c %Y -- "$activity")" -ge "$cutoff" ]; then exit 78; fi; if [ "$existing" = 1 ]; then [ -d "$quarantine" ] || exit 76; [ ! -L "$quarantine" ] || exit 77; else [ -d "$workspace" ] || exit 76; [ ! -L "$workspace" ] || exit 77; [ ! -e "$quarantine" ] || exit 77; mv -- "$workspace" "$quarantine"; fi; printf "\\0REMOTE_RUNNER_RETENTION_LOCKED\\0" >&2; IFS= read -r release; [ "$release" = release ]',
+        'umask 077; existing=$1; lock=$2; workspace=$3; quarantine=$4; activity=$5; cutoff=$6; mkdir -p -- "$(dirname -- "$lock")"; exec 9>"$lock"; flock -n 9 || exit 75; if [ "$existing" != 1 ] && [ -f "$activity" ] && [ ! -L "$activity" ] && [ "$(stat -c %Y -- "$activity")" -ge "$cutoff" ]; then exit 78; fi; if [ "$existing" = 1 ]; then [ -d "$quarantine" ] || exit 76; [ ! -L "$quarantine" ] || exit 77; else [ -d "$workspace" ] || exit 76; [ ! -L "$workspace" ] || exit 77; [ ! -e "$quarantine" ] || exit 77; mv -- "$workspace" "$quarantine"; fi; printf "\\0REMOTE_RUNNER_RETENTION_LOCKED\\0" >&2; IFS= read -r release; [ "$release" = release ]',
         "remote-runner-retention-lock",
         existing ? "1" : "0",
         lock,
@@ -246,6 +250,24 @@ export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntim
   async terminateOwnedSync(identity: string): Promise<void> {
     if (!IDENTITY.test(identity)) throw new Error("workspace retention identity is invalid");
     await this.terminateSync(identity);
+  }
+
+  async isIdentityDead(identity: string, graceCutoffMs: number): Promise<boolean> {
+    if (!IDENTITY.test(identity)) throw new Error("workspace retention identity is invalid");
+    requireSafeInteger(graceCutoffMs, "workspace retention grace cutoff");
+    /* `-L` beside every `-e`: `-e` follows the link, so a dangling symlink at either path reads as
+       absent and would answer "dead" — the one answer that authorises deleting live state. Anything
+       that is not a plain missing path, or not a regular marker file, has to read as alive. */
+    const result = await this.commands.run([
+      "sh",
+      "-ceu",
+      'workspace=$1; activity=$2; cutoff=$3; { [ ! -e "$workspace" ] && [ ! -L "$workspace" ]; } || exit 1; if [ -e "$activity" ] || [ -L "$activity" ]; then { [ -f "$activity" ] && [ ! -L "$activity" ]; } || exit 1; [ "$(stat -c %Y -- "$activity")" -lt "$cutoff" ] || exit 1; fi',
+      "remote-runner-retention-liveness",
+      posix.join(this.paths.profileRoot, identity),
+      posix.join(this.activityRoot, identity),
+      String(Math.floor(graceCutoffMs / 1000)),
+    ]);
+    return result.exitCode === 0;
   }
 
   async removeQuarantine(quarantineName: string): Promise<void> {
@@ -314,13 +336,21 @@ export async function pruneRemoteWorkspaces(
   const cleanup = async (identity: string, quarantineName: string, existing: boolean): Promise<void> => {
     try {
       const result = await runtime.withQuarantine(identity, quarantineName, existing, graceCutoffMs, async () => {
-        await runtime.terminateOwnedSync(identity);
-        /* Before the quarantine goes: a failed ref deletion then leaves the quarantine directory
-           for the next pass to resume, instead of orphaning the ref with nothing left to retry. */
-        await runtime.removePrivateRef(identity);
+        /* A resumed quarantine is already detached, so it is garbage whatever the identity is doing
+           now — but the identity-scoped resources below belong to the LIVE workspace, and an
+           identity that has come back to life since the `mv` still needs them. */
+        const scoped = !existing || (await runtime.isIdentityDead(identity, graceCutoffMs));
+        if (scoped) {
+          await runtime.terminateOwnedSync(identity);
+          /* Before the quarantine goes: a failed ref deletion then leaves the quarantine directory
+             for the next pass to resume, instead of orphaning the ref with nothing left to retry. */
+          await runtime.removePrivateRef(identity);
+        }
         await runtime.removeQuarantine(quarantineName);
-        await runtime.removeActivity(identity);
-        await runtime.removeSetupState(identity);
+        if (scoped) {
+          await runtime.removeActivity(identity);
+          await runtime.removeSetupState(identity);
+        }
       });
       if (result === "removed") removed += 1;
       else if (result === "locked") locked += 1;
@@ -338,7 +368,7 @@ export async function pruneRemoteWorkspaces(
     const nonce = entry.quarantineName.startsWith(expectedPrefix)
       ? entry.quarantineName.slice(expectedPrefix.length)
       : "";
-    if (!NONCE.test(nonce) || seenQuarantines.has(entry.quarantineName) || entry.identity === currentIdentity) {
+    if (!NONCE.test(nonce) || seenQuarantines.has(entry.quarantineName)) {
       ignored += 1;
       continue;
     }

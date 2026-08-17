@@ -489,42 +489,35 @@ export class NodeProfileServices implements ProfileExecutionServices {
         const lock = args[5];
         if (lock === undefined) throw new Error("workspace retention lock command is malformed");
         canonicalRemotePath(lock, "workspace retention lock");
-        let owned = false;
-        try {
-          const release = new TextEncoder().encode("release\n");
-          const result = await this.streamProcess({
-            command: "ssh",
-            args: sshArguments(
-              this.profile.remote.target,
-              args,
-              this.profile.probes.connectTimeoutSeconds,
-              this.knownHostsPath,
-            ),
-            marker: new TextEncoder().encode("\0REMOTE_RUNNER_RETENTION_LOCKED\0"),
-            releaseAfterMarker: release,
-            onMarker: async () => {
-              owned = true;
-              await cleanup();
-            },
-            stdout: () => undefined,
-            stderr: this.options.stderr ?? (() => undefined),
-          });
-          if (!result.spawned) throw new Error("workspace retention SSH did not start");
-          if (result.markerSeen) {
-            if (result.exitCode !== 0) throw new Error(`workspace retention lock exited ${result.exitCode}`);
-            return "removed";
-          }
-          if (result.exitCode === 75) return "locked";
-          if (result.exitCode === 76) return "missing";
-          if (result.exitCode === 77) return "unsafe";
-          if (result.exitCode === 78) return "refreshed";
-          throw new Error(`workspace retention lock failed with exit code ${result.exitCode}`);
-        } finally {
-          if (owned) {
-            const removal = await this.remote().run(["rm", "-f", "--", lock]);
-            if (removal.exitCode !== 0) throw new Error("workspace retention lock removal failed");
-          }
+        const release = new TextEncoder().encode("release\n");
+        /* The lock file outlives every holder on purpose. Unlinking it after a cleanup unlinks the
+           inode a concurrent holder is already locked on, and the next arrival then creates a fresh
+           inode and enters at the same time — two runs, two locks, no mutual exclusion. It is also
+           the inode `touchActivity` fences the activity marker with. */
+        const result = await this.streamProcess({
+          command: "ssh",
+          args: sshArguments(
+            this.profile.remote.target,
+            args,
+            this.profile.probes.connectTimeoutSeconds,
+            this.knownHostsPath,
+          ),
+          marker: new TextEncoder().encode("\0REMOTE_RUNNER_RETENTION_LOCKED\0"),
+          releaseAfterMarker: release,
+          onMarker: cleanup,
+          stdout: () => undefined,
+          stderr: this.options.stderr ?? (() => undefined),
+        });
+        if (!result.spawned) throw new Error("workspace retention SSH did not start");
+        if (result.markerSeen) {
+          if (result.exitCode !== 0) throw new Error(`workspace retention lock exited ${result.exitCode}`);
+          return "removed";
         }
+        if (result.exitCode === 75) return "locked";
+        if (result.exitCode === 76) return "missing";
+        if (result.exitCode === 77) return "unsafe";
+        if (result.exitCode === 78) return "refreshed";
+        throw new Error(`workspace retention lock failed with exit code ${result.exitCode}`);
       },
     };
   }
