@@ -81,7 +81,10 @@ explicit diagnostic override. `prewarm` validates the profile, coalesces an equi
 the controller-owned durable queue, and returns after that handoff; synchronization, setup, and the
 remote workload continue in the background. A handoff failure remains fail-soft so a worktree
 creation hook never fails, and the first ordinary `run` retries everything. `status` reports
-`prewarm=idle|queued|running|unknown`; `logs` records the eventual lifecycle verdict. `doctor`
+`prewarm=queued|running` while a request is in flight, `prewarm=ok@<instant>` or
+`prewarm=failed(<status>)@<instant>` for the last request that finished, `prewarm=idle` when none
+ever ran for this worktree, and `prewarm=unknown` when the state cannot be read; `logs` records the
+lifecycle verdict of every run. `doctor`
 exits 0 when no check failed, 1 when at least one check is `fail`, 70 on a runtime error, and 2 on
 a usage error; a `warn` check keeps the exit code 0.
 

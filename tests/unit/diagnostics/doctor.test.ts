@@ -122,6 +122,24 @@ describe("status formatting", () => {
       "verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear",
     );
   });
+
+  it("prints the last prewarm outcome and when it finished", () => {
+    const snapshot = {
+      profile: "verify-full",
+      controller: "running",
+      session: "watching",
+      workspace: "ready",
+      fingerprint: "current",
+      outage: "clear",
+    } as const;
+
+    expect(
+      formatStatus({ ...snapshot, prewarm: { outcome: "failed", status: 1, at: "2026-08-17T17:04:05.825Z" } }),
+    ).toContain("prewarm=failed(1)@2026-08-17T17:04:05.825Z ");
+    expect(
+      formatStatus({ ...snapshot, prewarm: { outcome: "ok", status: 0, at: "2026-08-17T17:23:23.879Z" } }),
+    ).toContain("prewarm=ok@2026-08-17T17:23:23.879Z ");
+  });
 });
 
 describe("bounded log tail", () => {
