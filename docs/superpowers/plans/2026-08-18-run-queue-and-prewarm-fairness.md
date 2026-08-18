@@ -25,15 +25,15 @@ order guarantee, because only there is unfairness stable.
 Issue #22 and its two comments carry three premises that the code and the
 consumer corpus contradict. The plan is built on the corrected ones.
 
-| Premise in the issue | What the source says |
-| --- | --- |
-| runs time out on a 120 s lock wait | the local profile lock budget is **15 min** (`LOCK_WAIT_MS`, `src/app/pilot-services.ts:260`). `120_000` is `leaseDurationMs` (`src/app/pilot-services.ts:622`), and the lease is **not enforced** — `src/runtime/lock.ts:382-389` reclaims on pid liveness only |
-| the 75s are host over-subscription | 36 of 36 corpus runs in the 119–123 s cluster started while **another run of the same identity** was in flight; only 12 of 36 had any cross-identity run in flight |
+| Premise in the issue                         | What the source says                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| runs time out on a 120 s lock wait           | the local profile lock budget is **15 min** (`LOCK_WAIT_MS`, `src/app/pilot-services.ts:260`). `120_000` is `leaseDurationMs` (`src/app/pilot-services.ts:622`), and the lease is **not enforced** — `src/runtime/lock.ts:382-389` reclaims on pid liveness only                                                                                                     |
+| the 75s are host over-subscription           | 36 of 36 corpus runs in the 119–123 s cluster started while **another run of the same identity** was in flight; only 12 of 36 had any cross-identity run in flight                                                                                                                                                                                                   |
 | `.locks/<consumer>.lock` guards provisioning | three distinct locks exist: local profile lock keyed by identity (`pilot-services.ts:449-450,620`), remote git lock per consumer (`src/workspace/git-workspace.ts:296`), remote workload lock per identity (`pilot-services.ts:104`). The ssh workload runs **outside** the local lock — it is released at the child-start marker (`src/run/run-profile.ts:118-129`) |
 
 **The 120 s mechanism, confirmed end to end.** `pauseSync()` calls
 `touchActivity()` first (`src/app/pilot-services.ts:715-717`), which runs
-`flock -w 60 9 || exit 75` on the *workload* lock (`pilot-services.ts:706`). The
+`flock -w 60 9 || exit 75` on the _workload_ lock (`pilot-services.ts:706`). The
 workload lock is held for the whole run by the remote child
 (`flock -x 9`, unbounded, `pilot-services.ts:172-173`), so a second run of the
 same worktree waits 60 s, gets exit 75, and raises
@@ -76,16 +76,16 @@ carries the accepted ones.
 
 **Rejected, with the reason:**
 
-- *"`link()` does not make mtime the enqueue instant — the premise is false."*
+- _"`link()` does not make mtime the enqueue instant — the premise is false."_
   It does: `writeFile` stamps the generation inode and `link()` changes ctime and
   link count, not mtime, which is what the plan claims. The finding's usable
   core — the write→link window and equal-timestamp ties — is accepted and
   written into Task 2 as a downgrade of the guarantee to best-effort.
-- *"Keep `remote.concurrency` as an optional lowering bound."* A second knob that
+- _"Keep `remote.concurrency` as an optional lowering bound."_ A second knob that
   can only ever agree with the first. Add it when a consumer actually wants to
   be more conservative than its host.
-- *"Older releases reject a manifest carrying the new closed key, so document a
-  downgrade path."* Moot — the manifest key was removed when the cap moved
+- _"Older releases reject a manifest carrying the new closed key, so document a
+  downgrade path."_ Moot — the manifest key was removed when the cap moved
   host-side.
 
 ### Task 1: Make same-identity contention a visible wait, not a 120 s failure
@@ -149,6 +149,7 @@ carries the accepted ones.
     `pilot-services.ts:516` conflates the same two things (`exitCode === 75`
     → `"locked"`). Fix both sites in this step — one distinguishable signal for
     every remote script that reports "busy", not a second special case;
+
   - on the busy signal, throw
     `new PreparationError("lock", false)` — the full budget was already spent, so
     a second identical wait can only double the delay. This one word is what
@@ -183,7 +184,7 @@ carries the accepted ones.
 
   Without a span the wait keeps being billed to `sync-pause` and the fix cannot
   be measured against the corpus, which is the only acceptance evidence
-  available. But a span *inside* `touchActivity` would double-count: `pauseSync`
+  available. But a span _inside_ `touchActivity` would double-count: `pauseSync`
   is already wrapped whole (`src/app/profile-runtime.ts:38`), and
   `src/runtime/telemetry.ts:1-2` states the invariant this breaks — "the analysis
   subtracts the phase sum from the run's `durationMs` and reads the remainder as
@@ -320,7 +321,7 @@ carries the accepted ones.
   existing states stay parseable:
 
   ```
-  ariadne controller=running prewarm=queued(2/5,4m12s) session=... 
+  ariadne controller=running prewarm=queued(2/5,4m12s) session=...
   ariadne controller=running prewarm=running(0/3,11m02s) session=...
   ariadne controller=running prewarm=idle session=...
   ```
@@ -364,7 +365,7 @@ carries the accepted ones.
   **Keep `entryKind` for the state, use `ownedEntries` only for the numbers.**
   The two disagree on purpose: `entryKind` returns `unknown` for anything that
   is not a plain file (`src/prewarm/queue.ts:94`), while `ownedEntries` filters
-  `isFile() || isSymbolicLink()` (`:151`) and so *accepts* symlinks. Deriving
+  `isFile() || isSymbolicLink()` (`:151`) and so _accepts_ symlinks. Deriving
   the state from `ownedEntries` would report a symlinked `<basename>.json` as
   `queued`, and `publishPrewarmRequest` — which self-checks through this same
   function (`:121-123`) and throws `"prewarm queue entry is unsafe"` on
@@ -428,7 +429,7 @@ footgun permanently. It is also the smaller diff: no config type, no validator,
 no `closed()` whitelist entry, no manifest tests.
 
 Fable would additionally keep `remote.concurrency` in the manifest as an
-optional *lowering* bound (`effective = min(host, consumer)`). Not built: no
+optional _lowering_ bound (`effective = min(host, consumer)`). Not built: no
 consumer needs to lower it today, and a second knob that can only ever agree
 with the first is a config for a value that never changes. Add it the day a
 consumer actually wants to be more conservative than its host.
@@ -505,7 +506,7 @@ consumer actually wants to be more conservative than its host.
   2. the scan writes a marker file the client stats after a 75;
   3. a bounded pre-flight ssh call that waits for a free slot, then a `flock -n`
      in the child that is expected to succeed — racy, but the race degrades to
-     one extra sweep, and the *wait* is then observed exactly where
+     one extra sweep, and the _wait_ is then observed exactly where
      `touchActivity` already observes one.
 
   Option 1 is the smallest thing that works and reuses a stream the client
@@ -573,7 +574,7 @@ only a cancellation path; the user's run then takes the lock immediately, and
 nothing of value is discarded.
 
 Not built now, and deliberately preferred over the heavier alternative of
-*adopting* the in-flight run's result, which would need a durable replayable
+_adopting_ the in-flight run's result, which would need a durable replayable
 result and exit-code contract — too much machinery for one consumer on one host.
 
 **Trigger to build it:** the wait span added in Task 1 Step 5. If the median
@@ -586,7 +587,7 @@ nobody is watching for a number.
 
 - **ETA.** Owner decision 3. Position plus wait age answers "is it moving?";
   a duration model is only worth building if that turns out not to.
-- **FIFO on the run path.** Only the prewarm queue had a *stable* bias. A flock
+- **FIFO on the run path.** Only the prewarm queue had a _stable_ bias. A flock
   scramble re-races every sweep, so no run is starved indefinitely.
 - **`enqueuedAt` in `PrewarmRequest`.** Owner decision 2 — mtime carries it.
   Add it the next time the schema is touched for any other reason (optional

@@ -52,6 +52,9 @@ interface RunRecord {
   readonly status?: number;
   readonly provider?: string;
   readonly reason?: string;
+  readonly detail?: string;
+  readonly unavailableReason?: string;
+  readonly remoteChildStarted?: boolean;
   readonly error?: string;
   readonly durationMs?: number;
   readonly phases?: Readonly<Record<string, number>>;
@@ -61,6 +64,26 @@ interface RunRecord {
 
 async function runRecords(dependencies: NodeCliDependencies): Promise<RunRecord[]> {
   return ((await dependencies.logsProfile?.("verify-full")) ?? []).map((line) => JSON.parse(line) as RunRecord);
+}
+
+interface WorkloadHooks {
+  readonly onUnavailable: (reason: string, detail?: string) => void;
+  readonly onRemoteChildStarted: () => void;
+}
+
+/* Replaces the reporters only: each case still drives the real callback pair and the real JSONL
+   writer under test. */
+async function withInjectedWorkload(workload: (hooks: WorkloadHooks) => Promise<number>) {
+  const paths = await fixture();
+  const dependencies = await createNodeCliDependencies({
+    ...paths,
+    launcherSource: new Uint8Array([1]),
+    managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+    processes: new FakeProcesses(),
+    now: () => "2026-07-31T12:34:56.000Z",
+    executeProfile: async (_profile, _command, _mode, hooks) => workload(hooks),
+  });
+  return { dependencies, profile: (await dependencies.loadManifest()).profiles[0]! };
 }
 
 class FakeProcesses {
@@ -553,7 +576,144 @@ describe("concrete Node CLI dependencies", () => {
     expect(unavailable[0]!.reason).toBe("remote-shell");
     /* Exact keys: a fabricated or dropped `detail` field is the failure this record shape hides. */
     expect(Object.keys(unavailable[0]!)).toEqual(["at", "event", "runId", "pid", "profile", "mode", "reason"]);
-    expect(records.at(-1)).toMatchObject({ event: "run-finish", status: 75, provider: "remote" });
+    expect(records.at(-1)).toMatchObject({
+      event: "run-finish",
+      status: 75,
+      provider: "remote",
+      unavailableReason: "remote-shell",
+      remoteChildStarted: false,
+    });
+  });
+
+  it("names the reported reason on the terminal record of a run that exits 75", async () => {
+    const { dependencies, profile } = await withInjectedWorkload(async (hooks) => {
+      hooks.onUnavailable("secrets", "provider exited 1");
+      return 75;
+    });
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).resolves.toBe(75);
+
+    const records = await runRecords(dependencies);
+    expect(records.map(({ event }) => event)).toEqual(["run-start", "run-unavailable", "run-finish"]);
+    expect(records[1]).toMatchObject({ reason: "secrets", detail: "provider exited 1" });
+    expect(records[2]).toMatchObject({ status: 75, unavailableReason: "secrets", remoteChildStarted: false });
+    /* The unbounded operator text stays on the paired record alone. */
+    expect(records[2]!.detail).toBeUndefined();
+  });
+
+  it("omits the reason from a run that exits 75 without reporting one", async () => {
+    const { dependencies, profile } = await withInjectedWorkload(async () => 75);
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).resolves.toBe(75);
+
+    const records = await runRecords(dependencies);
+    expect(records.map(({ event }) => event)).toEqual(["run-start", "run-finish"]);
+    expect(records[1]).toMatchObject({ status: 75 });
+    expect(Object.keys(records[1]!)).not.toContain("unavailableReason");
+  });
+
+  it("leaves a green remote run's terminal record without a reason", async () => {
+    const { dependencies, profile } = await withInjectedWorkload(async (hooks) => {
+      hooks.onRemoteChildStarted();
+      return 0;
+    });
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).resolves.toBe(0);
+
+    const records = await runRecords(dependencies);
+    expect(records.map(({ event }) => event)).toEqual(["run-start", "run-finish"]);
+    expect(records[1]).toMatchObject({ status: 0, provider: "remote", remoteChildStarted: true });
+    expect(Object.keys(records[1]!)).not.toContain("unavailableReason");
+  });
+
+  it("keeps the last of several reasons reported by one run", async () => {
+    const { dependencies, profile } = await withInjectedWorkload(async (hooks) => {
+      hooks.onUnavailable("sync");
+      hooks.onUnavailable("transport");
+      return 75;
+    });
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).resolves.toBe(75);
+
+    const records = await runRecords(dependencies);
+    expect(records.filter(({ event }) => event === "run-unavailable").map(({ reason }) => reason)).toEqual([
+      "sync",
+      "transport",
+    ]);
+    expect(records.at(-1)).toMatchObject({ unavailableReason: "transport" });
+  });
+
+  /* The workload's own exit 75 must not inherit the reason of a preparation that recovered. */
+  it("drops a reported reason once the remote child starts", async () => {
+    const { dependencies, profile } = await withInjectedWorkload(async (hooks) => {
+      hooks.onUnavailable("sync");
+      hooks.onRemoteChildStarted();
+      return 75;
+    });
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).resolves.toBe(75);
+
+    const records = await runRecords(dependencies);
+    expect(records.filter(({ event }) => event === "run-unavailable")).toHaveLength(1);
+    expect(records.at(-1)).toMatchObject({ status: 75, remoteChildStarted: true });
+    expect(Object.keys(records.at(-1)!)).not.toContain("unavailableReason");
+  });
+
+  it("names the reported reason on the error record of a run that threw", async () => {
+    const { dependencies, profile } = await withInjectedWorkload(async (hooks) => {
+      hooks.onUnavailable("controller");
+      throw new Error("resource setup failed");
+    });
+
+    await expect(dependencies.runProfile!(profile, ["ignored"], "remote")).rejects.toThrow("resource setup failed");
+
+    expect((await runRecords(dependencies)).at(-1)).toMatchObject({
+      event: "run-error",
+      unavailableReason: "controller",
+    });
+  });
+
+  it("carries the fallback reason on a locally successful run", async () => {
+    const hostKey = new TextEncoder().encode("pop-os-host-key");
+    const paths = await fixture(
+      validManifest.replace(
+        'hostKeySha256: "SHA256:trusted"',
+        `hostKeySha256: "SHA256:${createHash("sha256").update(hostKey).digest("base64").replace(/=+$/u, "")}"`,
+      ),
+    );
+    await mkdir(dirname(paths.knownHostsPath), { recursive: true });
+    await writeFile(paths.knownHostsPath, `pop-os ssh-ed25519 ${Buffer.from(hostKey).toString("base64")}\n`, {
+      mode: 0o600,
+    });
+    /* A non-zero home probe classifies as a RETRYABLE remote-shell failure, the one shape that
+       spends the profile's local fallback instead of failing closed on 75. */
+    class UnreachableHomeProcesses extends FakeProcesses {
+      async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+        const actual = await super.run(request);
+        if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-home-probe")) {
+          return result("", 1);
+        }
+        return actual;
+      }
+    }
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new UnreachableHomeProcesses(),
+      now: () => "2026-07-31T12:34:56.000Z",
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await expect(dependencies.runProfile!(profile, [process.execPath, "-e", ""], "auto")).resolves.toBe(0);
+
+    expect((await runRecords(dependencies)).at(-1)).toMatchObject({
+      event: "run-finish",
+      status: 0,
+      provider: "local",
+      remoteChildStarted: false,
+      unavailableReason: "remote-shell",
+    });
   });
 
   it("marks a genuinely local run-finish record with provider local", async () => {
