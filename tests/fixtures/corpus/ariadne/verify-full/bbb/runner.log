@@ -1,0 +1,2 @@
+{"event":"run-finish","at":"2026-08-02T12:00:00Z","runId":"r5","provider":"local","status":0,"durationMs":5000}
+{"event":"run-finish","at":"2026-08-02T13:00:00Z","runId":"r6","status":2,"durationMs":100}

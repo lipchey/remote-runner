@@ -3,6 +3,7 @@ import process from "node:process";
 
 import { loadManifestText } from "./config/load-manifest.js";
 import type { Profile, RunMode } from "./config/types.js";
+import { corpusJson, formatCorpus, type CorpusOptions, type CorpusReport } from "./diagnostics/corpus.js";
 import type { DoctorProfileReport } from "./diagnostics/doctor.js";
 
 export interface CliIo {
@@ -24,6 +25,7 @@ export interface CliDependencies {
   statusProfile?(profile?: string): Promise<string>;
   doctorProfile?(profile?: string): Promise<readonly DoctorProfileReport[]>;
   logsProfile?(profile?: string): Promise<readonly string[]>;
+  readLogCorpus?(options: CorpusOptions): Promise<CorpusReport>;
   benchmarkProfile?(profile: Profile): Promise<unknown>;
 }
 
@@ -39,6 +41,7 @@ const HELP = [
   "remote-runner status [profile]",
   "remote-runner doctor [profile]",
   "remote-runner logs [profile]",
+  "remote-runner logs --all [--json] [--since <date>] [--cold-threshold-ms <n>]",
   "remote-runner benchmark <profile>",
 ].join("\n");
 
@@ -64,8 +67,12 @@ export async function runCli(
     return enqueueSelectedPrewarm(argv.slice(1), io, dependencies);
   }
 
-  if (argv[0] === "status" || argv[0] === "doctor" || argv[0] === "logs") {
+  if (argv[0] === "status" || argv[0] === "doctor") {
     return runReadOnlyDiagnostic(argv[0], argv.slice(1), io, dependencies);
+  }
+
+  if (argv[0] === "logs") {
+    return runLogsCommand(argv.slice(1), io, dependencies);
   }
 
   if (argv[0] === "benchmark") {
@@ -115,8 +122,130 @@ async function runBenchmarkCommand(argv: readonly string[], io: CliIo, dependenc
   }
 }
 
+/* The cut is a string compare against ISO timestamps, so an impossible value compares perfectly well
+   and silently selects a range no reader intended: `2026-02-30` needs a calendar round-trip, and
+   `2026-08-17T99:99Z` sorts above every real timestamp that day. Every component is range-checked. */
+function isUtcDatePrefix(value: string): boolean {
+  const parts = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2})(?::(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?)?Z?)?$/u.exec(value);
+  if (parts === null) return false;
+  const [, day, hour, minute, second] = parts;
+  if (day === undefined || !new Date(`${day}T00:00:00Z`).toISOString().startsWith(day)) return false;
+  return (
+    (hour === undefined || Number(hour) <= 23) &&
+    (minute === undefined || Number(minute) <= 59) &&
+    (second === undefined || Number(second) <= 59)
+  );
+}
+
+async function runLogsCommand(argv: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
+  let all = false;
+  let json = false;
+  let since: string | undefined;
+  let coldThresholdMs: number | undefined;
+  let profileId: string | undefined;
+  const seen = new Set<string>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index] ?? "";
+    if (!argument.startsWith("-")) {
+      if (profileId !== undefined) {
+        io.stderr("logs accepts at most one profile");
+        return 2;
+      }
+      profileId = argument;
+      continue;
+    }
+    if (seen.has(argument)) {
+      io.stderr(`duplicate logs argument: ${argument}`);
+      return 2;
+    }
+    seen.add(argument);
+    if (argument === "--all") {
+      all = true;
+      continue;
+    }
+    if (argument === "--json") {
+      json = true;
+      continue;
+    }
+    if (argument !== "--since" && argument !== "--cold-threshold-ms") {
+      io.stderr(`unknown logs argument: ${argument}`);
+      return 2;
+    }
+    const value = argv[index + 1];
+    index += 1;
+    if (value === undefined || value.startsWith("--")) {
+      io.stderr(`logs requires a value after ${argument}`);
+      return 2;
+    }
+    if (argument === "--since") {
+      if (!isUtcDatePrefix(value)) {
+        io.stderr("logs --since takes a real UTC date or ISO prefix, e.g. 2026-08-17");
+        return 2;
+      }
+      since = value;
+      continue;
+    }
+    const threshold = Number(value);
+    /* Safe, not merely integral: a value past 2^53 is silently rounded, so the threshold echoed back
+       in the envelope would not be the one the caller asked for. */
+    if (!Number.isSafeInteger(threshold) || threshold <= 0) {
+      io.stderr("logs --cold-threshold-ms takes a positive integer");
+      return 2;
+    }
+    coldThresholdMs = threshold;
+  }
+
+  if (!all) {
+    if (json || since !== undefined || coldThresholdMs !== undefined) {
+      io.stderr("logs --json, --since and --cold-threshold-ms only apply to --all");
+      return 2;
+    }
+    return tailOneProfile(profileId, io, dependencies);
+  }
+  if (profileId !== undefined) {
+    io.stderr("logs --all reads every profile and takes no profile argument");
+    return 2;
+  }
+  if (dependencies.readLogCorpus === undefined) {
+    io.stderr("remote-runner logs runtime is not configured");
+    return 70;
+  }
+  let report: CorpusReport;
+  try {
+    report = await dependencies.readLogCorpus({
+      ...(since === undefined ? {} : { since }),
+      ...(coldThresholdMs === undefined ? {} : { coldThresholdMs }),
+    });
+  } catch {
+    io.stderr("remote-runner logs failed");
+    return 70;
+  }
+  io.stdout(json ? JSON.stringify(corpusJson(report.provenance, report.summary)) : formatCorpus(report));
+  /* The exit code answers "did the read work", never "did the lane pass": a corpus of failures is
+     exactly what this command exists to print. */
+  return 0;
+}
+
+async function tailOneProfile(
+  profileId: string | undefined,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<number> {
+  if (dependencies.logsProfile === undefined) {
+    io.stderr("remote-runner logs runtime is not configured");
+    return 70;
+  }
+  try {
+    for (const line of await dependencies.logsProfile(profileId)) io.stdout(line);
+  } catch {
+    io.stderr("remote-runner logs failed");
+    return 70;
+  }
+  return 0;
+}
+
 async function runReadOnlyDiagnostic(
-  command: "status" | "doctor" | "logs",
+  command: "status" | "doctor",
   argv: readonly string[],
   io: CliIo,
   dependencies: CliDependencies,
@@ -137,10 +266,6 @@ async function runReadOnlyDiagnostic(
          the wrapper for every profile — so only the exit code carries the new signal. */
       io.stdout(JSON.stringify(profile === undefined ? { profiles: reports } : reports[0]!.report));
       return reports.some(({ report }) => report.checks.some((check) => check.status === "fail")) ? 1 : 0;
-    }
-    if (command === "logs" && dependencies.logsProfile !== undefined) {
-      for (const line of await dependencies.logsProfile(profile)) io.stdout(line);
-      return 0;
     }
   } catch {
     io.stderr(`remote-runner ${command} failed`);
