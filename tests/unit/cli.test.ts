@@ -1,8 +1,43 @@
 import { describe, expect, it } from "vitest";
 
-import { runCli, type CliDependencies } from "../../src/cli.js";
+import { runCli, type CliDependencies, type CliIo } from "../../src/cli.js";
+import { summarizeCorpus, type CorpusOptions, type CorpusRecord } from "../../src/diagnostics/corpus.js";
 import type { DiagnosticStatus } from "../../src/diagnostics/doctor.js";
 import { validManifest } from "./config/manifest-fixture.js";
+
+function collect(stdout: string[]): CliIo {
+  return { stdout: (line) => stdout.push(line), stderr: () => undefined };
+}
+
+function remoteFinish(at: string, extra: Partial<CorpusRecord> = {}): CorpusRecord {
+  return {
+    event: "run-finish",
+    at,
+    status: 0,
+    provider: "remote",
+    durationMs: 1000,
+    consumer: "ariadne",
+    profile: "verify-full",
+    identity: "aaa",
+    ...extra,
+  };
+}
+
+function corpusDependencies(
+  seenOptions: CorpusOptions[],
+  records: readonly CorpusRecord[] = [remoteFinish("2026-08-01T00:00:00Z")],
+): CliDependencies {
+  return {
+    readFile: async () => validManifest,
+    readLogCorpus: async (options) => {
+      seenOptions.push(options);
+      return {
+        provenance: { source: "/state/profiles", files: 1, unparsed: 0, runner: "remote-runner 9.9.9" },
+        summary: summarizeCorpus(records, options),
+      };
+    },
+  };
+}
 
 describe("runCli", () => {
   it("prints stable top-level commands without touching the system", async () => {
@@ -387,5 +422,110 @@ describe("runCli", () => {
       ["benchmark", "verify-full", 3],
     ]);
     expect(stdout).toEqual(['{"profile":"verify-full","rows":[],"receiptPaths":["one.json","one.md"]}']);
+  });
+
+  it("reads every identity for logs --all and renders the text report", async () => {
+    const stdout: string[] = [];
+    const options: CorpusOptions[] = [];
+    const code = await runCli(["logs", "--all"], collect(stdout), corpusDependencies(options));
+
+    expect(code).toBe(0);
+    expect(options).toEqual([{}]);
+    expect(stdout.join("\n")).toContain("source     /state/profiles");
+    expect(stdout.join("\n")).toContain("dispatched 1 run-finish");
+  });
+
+  it("prints the corpus as a single JSON line for logs --all --json", async () => {
+    const stdout: string[] = [];
+    const code = await runCli(["logs", "--all", "--json"], collect(stdout), corpusDependencies([]));
+
+    expect(code).toBe(0);
+    expect(stdout).toHaveLength(1);
+    expect(JSON.parse(stdout[0] ?? "")).toMatchObject({ schemaVersion: 1, source: "/state/profiles" });
+  });
+
+  /* A non-zero exit here would mean the read failed. Lanes fail all the time and the report exists to
+     show them, so letting failures set the exit code makes every honest report look like a broken
+     command. */
+  it("exits zero when the corpus it read is full of failed runs", async () => {
+    const stdout: string[] = [];
+    const dependencies = corpusDependencies([], [{ ...remoteFinish("2026-08-01T00:00:00Z"), status: 1 }]);
+
+    expect(await runCli(["logs", "--all"], collect(stdout), dependencies)).toBe(0);
+    expect(stdout.join("\n")).toContain("failures   1 non-zero");
+  });
+
+  it("passes --since and --cold-threshold-ms through to the corpus read", async () => {
+    const options: CorpusOptions[] = [];
+    const code = await runCli(
+      ["logs", "--all", "--since", "2026-08-17", "--cold-threshold-ms", "3000"],
+      collect([]),
+      corpusDependencies(options),
+    );
+
+    expect(code).toBe(0);
+    expect(options).toEqual([{ since: "2026-08-17", coldThresholdMs: 3000 }]);
+  });
+
+  it.each([
+    ["a profile alongside --all", ["logs", "--all", "verify-full"]],
+    ["--json without --all", ["logs", "--json"]],
+    ["--since without --all", ["logs", "--since", "2026-08-17"]],
+    ["--cold-threshold-ms without --all", ["logs", "--cold-threshold-ms", "3000"]],
+    ["a zero cold threshold", ["logs", "--all", "--cold-threshold-ms", "0"]],
+    ["a negative cold threshold", ["logs", "--all", "--cold-threshold-ms", "-1"]],
+    ["a fractional cold threshold", ["logs", "--all", "--cold-threshold-ms", "2.5"]],
+    ["a non-numeric cold threshold", ["logs", "--all", "--cold-threshold-ms", "soon"]],
+    /* A string compare against ISO timestamps accepts an impossible date happily and silently
+       selects a range no reader intended. */
+    ["an impossible calendar date", ["logs", "--all", "--since", "2026-02-30"]],
+    ["a --since that is not a date", ["logs", "--all", "--since", "yesterday"]],
+    ["--since with no value", ["logs", "--all", "--since"]],
+    ["a repeated --since", ["logs", "--all", "--since", "2026-08-17", "--since", "2026-08-18"]],
+    ["an unknown flag", ["logs", "--all", "--failures", "3"]],
+  ])("rejects %s with a usage exit code", async (_case, argv) => {
+    const stderr: string[] = [];
+    const options: CorpusOptions[] = [];
+    const code = await runCli(
+      argv,
+      { stdout: () => undefined, stderr: (line) => stderr.push(line) },
+      corpusDependencies(options),
+    );
+
+    expect(code).toBe(2);
+    expect(stderr).toHaveLength(1);
+    expect(options).toEqual([]);
+  });
+
+  it("keeps rejecting flags for status and doctor", async () => {
+    const stderr: string[] = [];
+    const io = { stdout: () => undefined, stderr: (line: string) => stderr.push(line) };
+    const dependencies: CliDependencies = {
+      readFile: async () => validManifest,
+      statusProfile: async () => "unreachable",
+      doctorProfile: async () => [{ profile: "verify-full", report: { checks: [] } }],
+    };
+
+    expect(await runCli(["status", "--all"], io, dependencies)).toBe(2);
+    expect(await runCli(["doctor", "--json"], io, dependencies)).toBe(2);
+  });
+
+  it("reports an unconfigured corpus runtime rather than an empty corpus", async () => {
+    const stderr: string[] = [];
+    const code = await runCli(
+      ["logs", "--all"],
+      { stdout: () => undefined, stderr: (line) => stderr.push(line) },
+      { readFile: async () => validManifest },
+    );
+
+    expect(code).toBe(70);
+    expect(stderr.join("\n")).toContain("runtime is not configured");
+  });
+
+  it("lists the cross-identity form in the help text", async () => {
+    const stdout: string[] = [];
+    await runCli(["--help"], collect(stdout), { readFile: async () => validManifest });
+
+    expect(stdout.join("\n")).toContain("--all [--json]");
   });
 });
