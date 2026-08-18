@@ -84,7 +84,11 @@ creation hook never fails, and the first ordinary `run` retries everything. `sta
 `prewarm=queued|running` while a request is in flight, `prewarm=ok@<instant>` or
 `prewarm=failed(<status>)@<instant>` for the last request that finished, `prewarm=idle` when none
 ever ran for this worktree, and `prewarm=unknown` when the state cannot be read; `logs` records the
-lifecycle verdict of every run. `doctor`
+lifecycle verdict of every run. `logs --all [--json] [--since <date>] [--cold-threshold-ms <n>]`
+reads every identity under the state root instead of this worktree's own log, so a lane's history
+survives the removal of the worktrees that produced it, and works from any directory because it
+never consults a manifest. It exits 0 whenever the read succeeded, however many failed runs the
+corpus holds. `doctor`
 exits 0 when no check failed, 1 when at least one check is `fail`, 70 on a runtime error, and 2 on
 a usage error; a `warn` check keeps the exit code 0.
 

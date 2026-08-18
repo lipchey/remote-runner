@@ -343,6 +343,41 @@ workspace with the same managed toolchain `PATH`; do not create bundles manually
 package paths to a fingerprint list. Pattern discovery already includes tracked and non-ignored
 untracked matching manifests and excludes Git-ignored generated dependencies.
 
+## Lane report
+
+`remote-runner logs --all [--json] [--since <date>] [--cold-threshold-ms <n>]` joins every
+`runner.log` under the state root, rotations included, across every consumer, profile and identity.
+It needs no manifest and no worktree, so it still answers after the worktrees that produced the runs
+are gone. Attribution comes from the directory a log was found in, never from a record's own
+`profile` or `consumer` field. The exit code says whether the read worked, never whether the lane
+passed.
+
+Read the figures as follows.
+
+- `dispatched` is the `provider=remote` slice of `run-finish` records, and its `status` map is that
+  slice alone. `undispatched` counts the remaining finishes — both those that never reached a
+  provider and those that ran locally.
+- `deferred` counts `run-unavailable` records by reason. These are waits, not outcomes: a deferred
+  run can still go on to finish green, so reading this line as a failure count overstates breakage.
+- Lock contention appears here as `deferred.lock`. It is **not** `status 75`, which is the runner's
+  general fail-closed infrastructure status returned from several unrelated sites; a 75 in the status
+  map licenses no diagnosis on its own — read that run's records.
+- `returningCold`, not `cold`, is the retention signal. A first-ever dispatch has no workspace to
+  reuse, so it is cold by construction and says nothing about retention. Even `returningCold` is
+  consistent with a reclaimed workspace rather than proof of one: the log records no deletion event,
+  and a failed fingerprint or `ensure` check produces the same span.
+- A non-zero `unparsed`, or a `runner` version other than the one you expect, means the reader may
+  no longer match the format that wrote the logs. Check that before trusting any figure above it.
+
+Two caveats the numbers cannot carry themselves.
+
+- `coldThresholdMs` defaults to 5000 because bootstrap on one workstation splits into two clusters
+  with an empty band between them, and the cut sits in that gap. That is one machine's measurement,
+  which is why it is a flag and why the sorted `measuredMs` distribution ships with the counts —
+  re-cut it for different hardware instead of trusting the default.
+- `returning` means first-in-retained-corpus. Logs rotate at a size cap, so an identity whose first
+  dispatch has rotated out reads as a newcomer and drops out of the returning counts.
+
 ## Benchmark
 
 `remote-runner benchmark <profile>` runs each manifest-declared workload locally and remotely — one
