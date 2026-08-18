@@ -7,7 +7,14 @@ import { errorCode } from "../runtime/errno.js";
 const COMPONENT = /^[a-z][a-z0-9-]{0,62}$/u;
 const IDENTITY = /^[0-9a-f]{24}$/u;
 const MAX_REQUEST_BYTES = 16 * 1024;
+const MAX_RESULT_BYTES = 512;
 const MAX_QUEUE_ENTRIES = 1_024;
+/* What the run threw is not an exit code, and runControllerLoop swallows the throw — so without a
+   status of its own that failure has no trace at all. */
+const RUN_ERROR_STATUS = 70;
+/* Consumers parse the status line as space-separated `key=value`, so an instant read back from disk
+   may only reach the renderer if it cannot contain a space. */
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
 export interface PrewarmRequest {
   readonly schemaVersion: 1;
@@ -17,6 +24,14 @@ export interface PrewarmRequest {
   readonly sourceRoot: string;
   readonly manifestPath: string;
 }
+
+export interface PrewarmOutcome {
+  readonly outcome: "ok" | "failed";
+  readonly status: number;
+  readonly at: string;
+}
+
+export type PrewarmState = "idle" | "queued" | "running" | "unknown" | PrewarmOutcome;
 
 function queueRoot(home: string): string {
   if (!isAbsolute(home) || resolve(home) !== home) throw new Error("home must be an absolute path");
@@ -49,7 +64,11 @@ function requestBasename(request: Pick<PrewarmRequest, "consumer" | "profile" | 
   if (!COMPONENT.test(request.consumer)) throw new Error("prewarm consumer is invalid");
   if (!COMPONENT.test(request.profile)) throw new Error("prewarm profile is invalid");
   if (!IDENTITY.test(request.identity)) throw new Error("prewarm identity is invalid");
-  return `${request.consumer}-${request.profile}-${request.identity}`;
+  /* `_` is outside COMPONENT and IDENTITY; `-` is not, so joining with it gave `a-b`/`c` and
+     `a`/`b-c` one key — coalescing away a request for a profile the queue never held, and later
+     answering it with the other's outcome. A pre-`_` entry no longer matches the payload it
+     holds, and the claim path discards it. */
+  return `${request.consumer}_${request.profile}_${request.identity}`;
 }
 
 async function validateRequest(value: unknown): Promise<PrewarmRequest> {
@@ -98,12 +117,7 @@ async function entryKind(path: string): Promise<"missing" | "file" | "unknown"> 
   }
 }
 
-export async function inspectPrewarmRequest(
-  home: string,
-  request: Pick<PrewarmRequest, "consumer" | "profile" | "identity">,
-): Promise<"idle" | "queued" | "running" | "unknown"> {
-  const root = await verifiedQueueRoot(home, false);
-  const basename = requestBasename(request);
+async function inspectQueueState(root: string, basename: string): Promise<"idle" | "queued" | "running" | "unknown"> {
   const running = await entryKind(join(root, `${basename}.running`));
   if (running === "file") return "running";
   if (running === "unknown") return "unknown";
@@ -112,13 +126,101 @@ export async function inspectPrewarmRequest(
   return pending === "unknown" ? "unknown" : "idle";
 }
 
+/* One level down because `ownedEntries` caps the queue root at MAX_QUEUE_ENTRIES *before* it
+   filters by suffix: siblings would wedge the controller once enough identities accumulate. The
+   directory itself spends one of those slots. */
+function resultsRoot(root: string): string {
+  return join(root, "results");
+}
+
+async function verifiedResultsRoot(root: string, create: boolean): Promise<string | "missing" | "unsafe"> {
+  const directory = resultsRoot(root);
+  if (create) {
+    try {
+      await mkdir(directory, { mode: 0o700 });
+    } catch (caught) {
+      if (errorCode(caught) !== "EEXIST") throw caught;
+    }
+  }
+  try {
+    const status = await lstat(directory);
+    return status.isDirectory() && !status.isSymbolicLink() ? directory : "unsafe";
+  } catch (caught) {
+    if (errorCode(caught) === "ENOENT") return "missing";
+    throw caught;
+  }
+}
+
+async function readPrewarmResult(root: string, basename: string): Promise<PrewarmOutcome | "unknown" | undefined> {
+  let contents: Buffer;
+  try {
+    const directory = await verifiedResultsRoot(root, false);
+    if (directory === "missing") return undefined;
+    if (directory === "unsafe") return "unknown";
+    const path = join(directory, `${basename}.json`);
+    const status = await lstat(path);
+    if (!status.isFile() || status.isSymbolicLink() || status.size > MAX_RESULT_BYTES) return "unknown";
+    contents = await readFile(path);
+  } catch (caught) {
+    if (errorCode(caught) === "ENOENT") return undefined;
+    return "unknown";
+  }
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(contents));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return "unknown";
+    const candidate = parsed as Partial<Record<"schemaVersion" | "status" | "at", unknown>>;
+    if (candidate.schemaVersion !== 1) return "unknown";
+    if (typeof candidate.at !== "string" || !INSTANT.test(candidate.at)) return "unknown";
+    if (new Date(candidate.at).toISOString() !== candidate.at) return "unknown";
+    /* The claim marker: this request started and nothing terminal replaced it, so the previous
+       run's outcome must not answer for it. */
+    if (candidate.status === null) return "unknown";
+    if (typeof candidate.status !== "number" || !Number.isSafeInteger(candidate.status)) return "unknown";
+    return { outcome: candidate.status === 0 ? "ok" : "failed", status: candidate.status, at: candidate.at };
+  } catch {
+    return "unknown";
+  }
+}
+
+/* Best effort: a prewarm that ran must not be reported as failed, or replayed, because its
+   outcome could not be written down. */
+async function recordPrewarmResult(root: string, basename: string, status: number | null, at: string): Promise<void> {
+  try {
+    const directory = await verifiedResultsRoot(root, true);
+    if (directory === "missing" || directory === "unsafe") return;
+    const generationPath = join(directory, `${basename}.generation-${randomUUID()}`);
+    const contents = new TextEncoder().encode(JSON.stringify({ schemaVersion: 1, status, at }));
+    await writeFile(generationPath, contents, { flag: "wx", mode: 0o600 });
+    try {
+      await rename(generationPath, join(directory, `${basename}.json`));
+    } finally {
+      await rm(generationPath, { force: true });
+    }
+  } catch {
+    /* A claim that cannot be marked must not leave the last run's outcome readable as this one's. */
+    if (status === null) await rm(join(resultsRoot(root), `${basename}.json`), { force: true }).catch(() => undefined);
+  }
+}
+
+export async function inspectPrewarmRequest(
+  home: string,
+  request: Pick<PrewarmRequest, "consumer" | "profile" | "identity">,
+): Promise<PrewarmState> {
+  const root = await verifiedQueueRoot(home, false);
+  const basename = requestBasename(request);
+  const queued = await inspectQueueState(root, basename);
+  if (queued !== "idle") return queued;
+  return (await readPrewarmResult(root, basename)) ?? "idle";
+}
+
 export async function publishPrewarmRequest(home: string, value: PrewarmRequest): Promise<"published" | "coalesced"> {
   const request = await validateRequest(value);
   const root = await verifiedQueueRoot(home, true);
   const basename = requestBasename(request);
   const pendingPath = join(root, `${basename}.json`);
   const runningPath = join(root, `${basename}.running`);
-  const current = await inspectPrewarmRequest(home, request);
+  /* The queue state only — a retained result must never be able to refuse a new request. */
+  const current = await inspectQueueState(root, basename);
   if (current === "queued" || current === "running") return "coalesced";
   if (current === "unknown") throw new Error("prewarm queue entry is unsafe");
 
@@ -197,8 +299,13 @@ export async function consumeNextPrewarmRequest(
       await rm(runningPath, { force: true });
       return "discarded";
     }
+    await recordPrewarmResult(root, claimedBasename, null, new Date().toISOString());
     try {
-      await run(request);
+      const status = await run(request);
+      await recordPrewarmResult(root, claimedBasename, status, new Date().toISOString());
+    } catch (caught) {
+      await recordPrewarmResult(root, claimedBasename, RUN_ERROR_STATUS, new Date().toISOString());
+      throw caught;
     } finally {
       /* Without this the claim survives the failure, and because .running entries are claimed
          first the controller re-runs that same request every pass, forever. */

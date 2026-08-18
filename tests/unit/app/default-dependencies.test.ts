@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createNodeCliDependencies, type NodeCliDependencies } from "../../../src/app/default-dependencies.js";
 import { DIAGNOSTIC_PROBES } from "../../../src/diagnostics/doctor.js";
-import { inspectPrewarmRequest } from "../../../src/prewarm/queue.js";
+import { consumeNextPrewarmRequest, inspectPrewarmRequest } from "../../../src/prewarm/queue.js";
 import { worktreeIdentity } from "../../../src/runtime/identity.js";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../../src/ssh/client.js";
 import { compileIgnores, mutagenSessionName } from "../../../src/sync/mutagen.js";
@@ -166,6 +166,23 @@ describe("concrete Node CLI dependencies", () => {
     expect(report.checks).toHaveLength(DIAGNOSTIC_PROBES.length);
     expect(await dependencies.logsProfile?.("verify-full")).toEqual(["older", "current"]);
     expect(processes.requests.every((request) => request.command !== "sh" && request.command !== "bash")).toBe(true);
+  });
+
+  it("reports the last prewarm's terminal outcome on the status line", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+    await dependencies.enqueuePrewarm?.(profile, ".remote-runner.yaml");
+    await expect(consumeNextPrewarmRequest(paths.home, async () => 1)).resolves.toBe("processed");
+
+    await expect(dependencies.statusProfile?.("verify-full")).resolves.toMatch(
+      /^verify-full controller=running prewarm=failed\(1\)@\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z session=watching /u,
+    );
   });
 
   it("lets no probe report a status it did not earn from a command", async () => {

@@ -49,13 +49,20 @@ may call `remote-runner prewarm <profile>`; failure is printed but intentionally
 and the first normal run retries preparation. A successful call means the controller accepted a
 durable, coalesced request; it does not mean synchronization, setup, or the workload finished.
 `remote-runner status <profile>` reports `prewarm=queued` before claim, `prewarm=running` while the
-controller owns the request, and `prewarm=idle` after completion. The final status is recorded in
-`remote-runner logs <profile>`. Do not poll this state from a worktree-creation hook or add
+controller owns the request, and after completion the terminal outcome of that request —
+`prewarm=ok@<instant>` or `prewarm=failed(<status>)@<instant>`, where the status is the run's exit
+code and `70` means the run threw instead of exiting. Outcomes are scoped to one consumer, profile
+and worktree identity: `prewarm=idle` means no request has ever finished for that triple —
+including any that ran before the runner recorded outcomes — not that the last one succeeded, and
+`prewarm=unknown` means the recorded outcome could not be read. A parser
+of this line must accept all six forms. Do not poll this state from a worktree-creation hook or add
 project-local adapters for mode selection, dotenv parsing, fallback, notification, or prewarm
 policy.
 
-Every log record of one run carries the same `runId` and the writing `pid`, so a prewarm and a
-manual run interleaved in one file stay separable; `run-finish` and `run-error` add `durationMs`.
+Every log record of one run carries the same `runId` and the writing `pid`, so two runs interleaved
+in one file stay separable — though no record says which of them the controller started, which is
+why the prewarm verdict lives on the status line and not here; `run-finish` and `run-error` add
+`durationMs`.
 A `run-unavailable` record names the stable reason the remote could not be prepared, with the
 operator detail when the failure carried one — read it before treating an exit code 75 as a single
 condition.
