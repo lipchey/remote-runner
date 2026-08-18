@@ -1,13 +1,19 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createNodeCliDependencies, type NodeCliDependencies } from "../../../src/app/default-dependencies.js";
+import {
+  createNodeCliDependencies,
+  INSTALLED_MAIN_MODULE_URL,
+  type NodeCliDependencies,
+} from "../../../src/app/default-dependencies.js";
 import { DIAGNOSTIC_PROBES } from "../../../src/diagnostics/doctor.js";
+import { formatInstallReceipt } from "../../../src/node/install-receipt.js";
 import { consumeNextPrewarmRequest, inspectPrewarmRequest } from "../../../src/prewarm/queue.js";
 import { worktreeIdentity } from "../../../src/runtime/identity.js";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../../src/ssh/client.js";
@@ -31,6 +37,18 @@ async function fixture(manifest = validManifest) {
   await mkdir(sourceRoot, { recursive: true });
   await writeFile(join(sourceRoot, ".remote-runner.yaml"), manifest);
   return { root, sourceRoot, home, managedSshPath, knownHostsPath };
+}
+
+function finishLine(at: string, bootstrapMs: number): string {
+  return JSON.stringify({
+    event: "run-finish",
+    at,
+    runId: "r1",
+    provider: "remote",
+    status: 0,
+    durationMs: 1000,
+    phases: { bootstrap: bootstrapMs },
+  });
 }
 
 function result(stdout = "", exitCode = 0): BoundedProcessResult {
@@ -464,6 +482,164 @@ describe("concrete Node CLI dependencies", () => {
     await expect(readFile(join(paths.sourceRoot, report.receiptPaths[1]!), "utf8")).resolves.toContain(
       "| remote | full |",
     );
+  });
+
+  it("reads every identity under the state root, rotations included", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+    });
+    const corpusRoot = join(paths.home, ".local", "state", "remote-runner", "profiles");
+    const first = join(corpusRoot, "ariadne", "verify-full", "aaa");
+    const second = join(corpusRoot, "ariadne", "telegram-live", "bbb");
+    await mkdir(first, { recursive: true });
+    await mkdir(second, { recursive: true });
+    await writeFile(join(first, "runner.log.1"), `${finishLine("2026-08-01T00:00:00Z", 2000)}\n`);
+    await writeFile(join(first, "runner.log"), `${finishLine("2026-08-02T00:00:00Z", 9000)}\n`);
+    await writeFile(join(second, "runner.log"), `${finishLine("2026-08-03T00:00:00Z", 1500)}\n`);
+
+    const report = await dependencies.readLogCorpus!({});
+
+    expect(report.provenance.source).toBe(corpusRoot);
+    expect(report.provenance.files).toBe(3);
+    expect(report.provenance.unparsed).toBe(0);
+    expect(report.summary.identities).toBe(2);
+    expect(report.summary.profiles).toEqual(["ariadne/telegram-live", "ariadne/verify-full"]);
+    expect(report.summary.bootstrap.measuredMs).toEqual([1500, 2000, 9000]);
+  });
+
+  it("reports an unreadable state root instead of an empty corpus", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+    });
+    const consumerRoot = join(paths.home, ".local", "state", "remote-runner", "profiles", "ariadne");
+    await mkdir(join(consumerRoot, "verify-full"), { recursive: true });
+    /* Only ENOENT may be read as "nothing dispatched here": any other failure reported as an empty
+       corpus reads as a clean lane. */
+    await chmod(consumerRoot, 0o000);
+    try {
+      await expect(dependencies.readLogCorpus!({})).rejects.toThrow(/EACCES/u);
+    } finally {
+      await chmod(consumerRoot, 0o700);
+    }
+  });
+
+  /* The receipt sits one directory ABOVE the main module, so resolving it from this module's own URL
+     would look one level too deep and degrade every real invocation to "unknown" — a version report
+     no gate would catch. */
+  it("resolves the install receipt from the layout the installer writes", async () => {
+    const paths = await fixture();
+    const appRoot = join(paths.root, "app");
+    await mkdir(join(appRoot, "src"), { recursive: true });
+    await writeFile(
+      join(appRoot, ".remote-runner-receipt.json"),
+      formatInstallReceipt({ schemaVersion: 1, version: "9.9.9", appIdentity: "f71f95d0a1b2c3d4e5f60718" }),
+    );
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+      mainModuleUrl: pathToFileURL(join(appRoot, "src", "main.js")).href,
+    });
+
+    const report = await dependencies.readLogCorpus!({});
+
+    expect(report.provenance.runner).toContain("9.9.9");
+    expect(INSTALLED_MAIN_MODULE_URL).toMatch(/\/main\.js$/u);
+    expect(INSTALLED_MAIN_MODULE_URL).not.toContain("default-dependencies");
+  });
+
+  /* A same-UID replacement of a log by a FIFO is enough to park a blocking open forever, and mode
+     bits do not stop one: the read has to decide on the handle, not the path. */
+  it("skips a log replaced by a FIFO instead of blocking on it", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+    });
+    const identityRoot = join(
+      paths.home,
+      ".local",
+      "state",
+      "remote-runner",
+      "profiles",
+      "ariadne",
+      "verify-full",
+      "aaa",
+    );
+    await mkdir(identityRoot, { recursive: true });
+    await writeFile(join(identityRoot, "runner.log.1"), `${finishLine("2026-08-01T00:00:00Z", 2000)}\n`);
+    expect(spawnSync("mkfifo", [join(identityRoot, "runner.log")]).status).toBe(0);
+
+    const report = await dependencies.readLogCorpus!({});
+
+    expect(report.provenance.files).toBe(1);
+    expect(report.summary.records).toBe(1);
+  });
+
+  /* A crash can leave the tail of a log half-written. A fatal decode throws the whole file away, so
+     one truncated record would cost every other record that identity ever wrote. */
+  it("loses only the truncated record when a log ends mid-multibyte character", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+    });
+    const identityRoot = join(
+      paths.home,
+      ".local",
+      "state",
+      "remote-runner",
+      "profiles",
+      "ariadne",
+      "verify-full",
+      "aaa",
+    );
+    await mkdir(identityRoot, { recursive: true });
+    const tail = Buffer.from(
+      JSON.stringify({ event: "run-unavailable", at: "2026-08-02T00:00:00Z", reason: "черга" }),
+      "utf8",
+    );
+    await writeFile(
+      join(identityRoot, "runner.log"),
+      Buffer.concat([
+        Buffer.from(`${finishLine("2026-08-01T00:00:00Z", 2000)}\n`, "utf8"),
+        tail.subarray(0, tail.indexOf(0xd1) + 1),
+      ]),
+    );
+
+    const report = await dependencies.readLogCorpus!({});
+
+    expect(report.provenance.unparsed).toBe(1);
+    expect(report.summary.records).toBe(1);
+  });
+
+  it("degrades the runner version to unknown rather than losing the corpus", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+      mainModuleUrl: pathToFileURL(join(paths.root, "absent", "src", "main.js")).href,
+    });
+
+    const report = await dependencies.readLogCorpus!({});
+
+    expect(report.provenance.runner).toBe("unknown");
+    expect(report.provenance.files).toBe(0);
   });
 
   it("writes bounded diagnostic lifecycle records for real profile dispatch", async () => {

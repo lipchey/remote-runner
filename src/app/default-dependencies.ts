@@ -1,5 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  appendFile,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { arch, homedir } from "node:os";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import process from "node:process";
@@ -16,6 +29,8 @@ import {
   type DiagnosticStatus,
   type DoctorProfileReport,
 } from "../diagnostics/doctor.js";
+import { readCorpus, summarizeCorpus } from "../diagnostics/corpus.js";
+import { formatInstallVersion, readInstalledReceipt } from "../node/install-receipt.js";
 import { mutagenDarwinArchitecture } from "../install/mutagen.js";
 import { createNodeNotificationCallbacks } from "../node/notifications.js";
 import { ensureNodeController, NodeControllerRuntime } from "../node/controller.js";
@@ -44,6 +59,7 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 export interface NodeCliDependencyOptions {
   readonly home?: string;
   readonly sourceRoot?: string;
+  readonly mainModuleUrl?: string;
   readonly launcherSource?: Uint8Array;
   readonly managedSsh?: ManagedSshTransport;
   readonly processes?: NodeProcessRuntime;
@@ -95,8 +111,73 @@ async function readLauncherSource(): Promise<Uint8Array> {
   throw new Error("remote launcher asset is missing");
 }
 
+/* The receipt sits one directory above the main module, so this must name `main.js` and not this
+   module: pointing it here would look one level too deep and report "unknown" for every install. */
+export const INSTALLED_MAIN_MODULE_URL = new URL("../main.js", import.meta.url).href;
+
+const lenientDecoder = new TextDecoder("utf-8");
+
+function corpusRoot(home: string): string {
+  return join(home, ".local", "state", "remote-runner", "profiles");
+}
+
 function profileRoot(home: string, profile: Pick<Profile, "consumer" | "id">, identity: string): string {
-  return join(home, ".local", "state", "remote-runner", "profiles", profile.consumer, profile.id, identity);
+  return join(corpusRoot(home), profile.consumer, profile.id, identity);
+}
+
+/* Log paths sit in a user-writable tree this process does not own, and a same-UID replacement of a
+   log by a FIFO parks a plain open forever — mode bits do not stop one. Opening non-blocking and
+   deciding on the HANDLE rather than the path is what keeps that from happening. */
+async function readLogBytes(path: string): Promise<Uint8Array | undefined> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  } catch (caught) {
+    if (errorCode(caught) === "ENOENT") return undefined;
+    throw caught;
+  }
+  try {
+    if (!(await handle.stat()).isFile()) return undefined;
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readOptionalLog(path: string): Promise<string | undefined> {
+  const bytes = await readLogBytes(path);
+  return bytes === undefined ? undefined : decoder.decode(bytes);
+}
+
+/* Decoded leniently, unlike every other read here: a crash can leave the tail half-written, and one
+   truncated character must cost that record rather than the identity's whole history. */
+async function readCorpusLog(path: string): Promise<string | undefined> {
+  const bytes = await readLogBytes(path);
+  return bytes === undefined ? undefined : lenientDecoder.decode(bytes);
+}
+
+async function listCorpusDirectories(path: string): Promise<readonly string[]> {
+  try {
+    return (await readdir(path, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+  } catch (caught) {
+    /* Only a missing directory means "nothing dispatched here"; swallowing the rest would report an
+       unreadable corpus as an empty one, which reads as a clean lane. */
+    if (errorCode(caught) === "ENOENT") return [];
+    throw caught;
+  }
+}
+
+async function installedRunnerVersion(mainModuleUrl: string): Promise<string> {
+  try {
+    return formatInstallVersion(await readInstalledReceipt(mainModuleUrl));
+  } catch {
+    /* The version is provenance, not the answer: an unreadable receipt must not cost the operator
+       the corpus it annotates. */
+    return "unknown";
+  }
 }
 
 function selectedProfiles(manifest: ManifestV1, profileId?: string): readonly Profile[] {
@@ -689,11 +770,24 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       for (const profile of profiles) {
         const logPath = join(profileRoot(home, profile, identity), "runner.log");
         const profileLines = await tailLogs({
-          readRotation: (index) => readOptionalUtf8(index === 0 ? logPath : `${logPath}.${index}`),
+          readRotation: (index) => readOptionalLog(index === 0 ? logPath : `${logPath}.${index}`),
         });
         lines.push(...(profileId === undefined ? profileLines.map((line) => `${profile.id} ${line}`) : profileLines));
       }
       return lines;
+    },
+    async readLogCorpus(corpusOptions) {
+      const source = corpusRoot(home);
+      const read = await readCorpus({ listDirectories: listCorpusDirectories, readLog: readCorpusLog }, source);
+      return {
+        provenance: {
+          source,
+          files: read.files,
+          unparsed: read.unparsed,
+          runner: await installedRunnerVersion(options.mainModuleUrl ?? INSTALLED_MAIN_MODULE_URL),
+        },
+        summary: summarizeCorpus(read.records, corpusOptions),
+      };
     },
     async benchmarkProfile(profile) {
       await ensureNodeController(home);
