@@ -1,0 +1,2 @@
+{"event":"run-finish","at":"2026-08-04T00:00:00Z","runId":"r7","provider":"remote","status":0,"durationMs":60000,"phases":{"bootstrap":12000}}
+{"event":"run-unavailable","at":"2026-08-04T01:00:00Z","reason":"transport"}

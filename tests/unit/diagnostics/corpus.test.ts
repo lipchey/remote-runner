@@ -1,17 +1,46 @@
+import { readFile, readdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+
 import { expect, test } from "vitest";
 
 import {
   COLD_BOOTSTRAP_MS,
+  corpusJson,
   formatCorpus,
   readCorpus,
   summarizeCorpus,
+  type CorpusOptions,
   type CorpusProvenance,
+  type CorpusRead,
   type CorpusRecord,
   type CorpusRuntime,
   type CorpusSummary,
 } from "../../../src/diagnostics/corpus.js";
 
 const ROOT = "/corpus";
+
+const FIXTURE_ROOT = fileURLToPath(new URL("../../fixtures/corpus", import.meta.url));
+
+const fixtureRuntime: CorpusRuntime = {
+  listDirectories: async (path) =>
+    (await readdir(path, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort(),
+  readLog: async (path) => {
+    try {
+      return await readFile(path, "utf8");
+    } catch {
+      return undefined;
+    }
+  },
+};
+
+async function readFixture(options?: CorpusOptions): Promise<{ read: CorpusRead; summary: CorpusSummary }> {
+  const read = await readCorpus(fixtureRuntime, FIXTURE_ROOT);
+  const summary = summarizeCorpus(read.records, options);
+  return { read, summary };
+}
 
 /* Returns children in reverse order deliberately: a fake that sorted would let an unsorted merge
    pass, since the real runtime sorts too. */
@@ -292,6 +321,101 @@ test("a non-regular file where a log was expected is skipped, not counted as rea
   );
   expect(read.files).toBe(1);
   expect(read.records).toHaveLength(1);
+});
+
+/* `schemaVersion` guards the envelope's shape; only this pin guards its meaning. A commit that
+   changes what an absent `provider` implies, or which finishes count as dispatched, reds here and
+   has to bump the version deliberately. */
+test("the envelope pins what every field of a real corpus means", async () => {
+  const { read, summary } = await readFixture();
+  const envelope: unknown = JSON.parse(
+    JSON.stringify(
+      corpusJson({ ...provenance(), source: FIXTURE_ROOT, files: read.files, unparsed: read.unparsed }, summary),
+    ),
+  );
+  expect(envelope).toEqual({
+    schemaVersion: 1,
+    source: FIXTURE_ROOT,
+    files: 4,
+    unparsed: 0,
+    runner: "remote-runner 9.9.9 (app deadbeef)",
+    since: "",
+    records: 8,
+    identities: 3,
+    profiles: ["ariadne/verify-full", "telegram/live"],
+    span: { from: "2026-08-01T00:00:00Z", to: "2026-08-04T01:00:00Z" },
+    dispatched: { total: 4, status: { "0": 3, "1": 1 } },
+    undispatched: 2,
+    deferred: { lock: 1, transport: 1 },
+    bootstrap: {
+      measured: 3,
+      of: 4,
+      coldThresholdMs: 5000,
+      cold: 2,
+      medianMs: 9000,
+      maxMs: 12_000,
+      returning: 2,
+      returningCold: 1,
+      measuredMs: [2000, 9000, 12_000],
+    },
+    failures: [
+      {
+        at: "2026-08-03T00:00:00Z",
+        consumer: "ariadne",
+        profile: "verify-full",
+        identity: "aaa",
+        runId: "r4",
+        status: 1,
+        durationMs: 48_000,
+      },
+    ],
+  });
+});
+
+test("a non-default cold threshold moves the counts it defines and ships back with them", async () => {
+  const { summary } = await readFixture({ coldThresholdMs: 10_000 });
+  expect(summary.bootstrap.coldThresholdMs).toBe(10_000);
+  expect(summary.bootstrap.cold).toBe(1);
+  expect(summary.bootstrap.returningCold).toBe(0);
+  expect(summary.bootstrap.measuredMs).toEqual([2000, 9000, 12_000]);
+});
+
+/* The text render is where the absent corpus turns into prose; a JSON consumer parses this field by
+   field and must never be handed a sentence. */
+test("an absent corpus still yields a parseable envelope with a null span", () => {
+  const envelope: unknown = JSON.parse(JSON.stringify(corpusJson(provenance({ files: 0 }), summarizeCorpus([]))));
+  expect(envelope).toMatchObject({
+    schemaVersion: 1,
+    files: 0,
+    records: 0,
+    span: null,
+    dispatched: { total: 0, status: {} },
+    failures: [],
+  });
+});
+
+test("the failure list is capped and says how many it withheld", () => {
+  const records = Array.from({ length: 4 }, (_, index) => ({
+    ...finish(`2026-08-0${index + 1}T00:00:00Z`, { status: 1 }),
+    identity: `id${index}`,
+  }));
+  const lines = formatCorpus({ provenance: provenance(), summary: summarizeCorpus(records) }, { failureLimit: 2 });
+  expect(lines).toMatch(/failures {3}4 non-zero/u);
+  expect(lines).toMatch(/\.\.\. 2 withheld/u);
+});
+
+/* The cap exists so a terminal stays readable; a consumer reading the envelope has to get every
+   failure or its own tallies silently stop at 15. */
+test("the JSON failure list is complete where the text render caps it", () => {
+  const records = Array.from({ length: 20 }, (_, index) => ({
+    ...finish(`2026-08-01T00:${String(index).padStart(2, "0")}:00Z`, { status: 1 }),
+    identity: `id${index}`,
+  }));
+  const summary = summarizeCorpus(records);
+  const lines = formatCorpus({ provenance: provenance(), summary });
+  expect(lines.split("\n").filter((line) => line.startsWith("  2026-"))).toHaveLength(15);
+  expect(lines).toMatch(/\.\.\. 5 withheld/u);
+  expect(corpusJson(provenance(), summary).failures).toHaveLength(20);
 });
 
 test("a window with no per-phase records reports that instead of dividing by nothing", () => {

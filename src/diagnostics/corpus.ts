@@ -90,6 +90,18 @@ export interface CorpusReport {
   readonly summary: CorpusSummary;
 }
 
+export interface CorpusEnvelope extends CorpusProvenance, Omit<CorpusSummary, "profiles" | "failures"> {
+  readonly schemaVersion: 1;
+  readonly profiles: readonly string[];
+  readonly failures: readonly CorpusFailure[];
+}
+
+/* The version a consumer gates on: it says nothing changed in what these fields MEAN, which no
+   amount of shape-checking on the consumer side can establish. */
+export function corpusJson(provenance: CorpusProvenance, summary: CorpusSummary): CorpusEnvelope {
+  return { schemaVersion: 1, ...provenance, ...summary };
+}
+
 function laneKey(record: CorpusRecord): string {
   return `${record.consumer}/${record.profile}/${record.identity}`;
 }
