@@ -227,6 +227,9 @@ export async function publishPrewarmRequest(home: string, value: PrewarmRequest)
   const generationPath = join(root, `${basename}.generation-${randomUUID()}`);
   const contents = new TextEncoder().encode(JSON.stringify(request));
   if (contents.byteLength > MAX_REQUEST_BYTES) throw new Error("prewarm request is too large");
+  /* This write stamps the mtime the queue is served in arrival order by; `link()` preserves it, and
+     a re-request that coalesces on EEXIST keeps the FIRST arrival's — refreshing it would push a
+     repeatedly-requested worktree to the back of the queue forever. */
   await writeFile(generationPath, contents, { flag: "wx", mode: 0o600 });
   try {
     await link(generationPath, pendingPath);
@@ -243,23 +246,39 @@ export async function publishPrewarmRequest(home: string, value: PrewarmRequest)
   return "published";
 }
 
+/* Arrival order, not FIFO: the mtime is stamped by the publish `writeFile` and only the later
+   `link()` makes the request visible, so two publishers interleaving between those two calls can be
+   served in the opposite order, and equal timestamps fall back to the identity-hash order this sort
+   exists to remove. Both are tolerable because the queue carries best-effort prewarms only. */
 async function ownedEntries(root: string): Promise<string[]> {
+  let names: string[];
   try {
     const entries = await readdir(root, { withFileTypes: true });
     if (entries.length > MAX_QUEUE_ENTRIES) throw new Error("prewarm queue has too many entries");
-    return entries
+    names = entries
       .filter((entry) => entry.isFile() || entry.isSymbolicLink())
       .map(({ name }) => name)
-      .filter((name) => name.endsWith(".running") || name.endsWith(".json"))
-      .sort((left, right) => {
-        const leftPriority = left.endsWith(".running") ? 0 : 1;
-        const rightPriority = right.endsWith(".running") ? 0 : 1;
-        return leftPriority - rightPriority || left.localeCompare(right);
-      });
+      .filter((name) => name.endsWith(".running") || name.endsWith(".json"));
   } catch (caught) {
     if (errorCode(caught) === "ENOENT") return [];
     throw caught;
   }
+  const arrivals = new Map<string, number>();
+  for (const name of names) {
+    try {
+      arrivals.set(name, (await lstat(join(root, name))).mtimeMs);
+    } catch (caught) {
+      /* A request another pass claimed between the readdir and here is a normal race, not an error. */
+      if (errorCode(caught) !== "ENOENT") throw caught;
+    }
+  }
+  return names
+    .filter((name) => arrivals.has(name))
+    .sort((left, right) => {
+      const leftPriority = left.endsWith(".running") ? 0 : 1;
+      const rightPriority = right.endsWith(".running") ? 0 : 1;
+      return leftPriority - rightPriority || arrivals.get(left)! - arrivals.get(right)! || left.localeCompare(right);
+    });
 }
 
 export async function consumeNextPrewarmRequest(

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,6 +13,27 @@ import {
 } from "../../../src/prewarm/queue.js";
 
 const temporaryRoots: string[] = [];
+
+/* The fixture identity sorts first by name; this one sorts last, so arrival order and hash order
+   can be made to disagree. */
+const HASH_LATE_IDENTITY = "fedcba9876543210fedcba98";
+
+function basenameOf(request: PrewarmRequest): string {
+  return `${request.consumer}_${request.profile}_${request.identity}`;
+}
+
+async function stamp(path: string, seconds: number): Promise<void> {
+  await utimes(path, new Date(seconds * 1000), new Date(seconds * 1000));
+}
+
+async function claimedIdentity(home: string): Promise<string | undefined> {
+  let identity: string | undefined;
+  await consumeNextPrewarmRequest(home, async (claimed) => {
+    identity = claimed.identity;
+    return 0;
+  });
+  return identity;
+}
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -145,6 +166,54 @@ describe("durable prewarm queue", () => {
     await symlink(join(queueRoot, ".."), join(queueRoot, "results"));
 
     await expect(inspectPrewarmRequest(home, request)).resolves.toBe("unknown");
+  });
+
+  it("serves the request that arrived first, not the one whose identity sorts first", async () => {
+    const { home, request, queueRoot } = await fixture();
+    const arrivedFirst = { ...request, identity: HASH_LATE_IDENTITY };
+    await publishPrewarmRequest(home, arrivedFirst);
+    await publishPrewarmRequest(home, request);
+    await stamp(join(queueRoot, `${basenameOf(arrivedFirst)}.json`), 1000);
+    await stamp(join(queueRoot, `${basenameOf(request)}.json`), 2000);
+
+    await expect(claimedIdentity(home)).resolves.toBe(HASH_LATE_IDENTITY);
+  });
+
+  it("keeps a recovered claim ahead of a pending request that arrived earlier", async () => {
+    const { home, request, queueRoot } = await fixture();
+    const recovered = { ...request, identity: HASH_LATE_IDENTITY };
+    await publishPrewarmRequest(home, recovered);
+    await publishPrewarmRequest(home, request);
+    const runningPath = join(queueRoot, `${basenameOf(recovered)}.running`);
+    await rename(join(queueRoot, `${basenameOf(recovered)}.json`), runningPath);
+    await stamp(join(queueRoot, `${basenameOf(request)}.json`), 1000);
+    await stamp(runningPath, 2000);
+
+    await expect(claimedIdentity(home)).resolves.toBe(HASH_LATE_IDENTITY);
+  });
+
+  /* Arrival order is the write mtime surviving link() at publish and rename() at claim; a refactor
+     to a copy at either end reorders the queue with nothing else failing. */
+  it("carries the arrival timestamp through the claim", async () => {
+    const { home, request, queueRoot, basename } = await fixture();
+    await publishPrewarmRequest(home, request);
+    const published = (await lstat(join(queueRoot, `${basename}.json`))).mtimeMs;
+
+    let claimed = 0;
+    await consumeNextPrewarmRequest(home, async () => {
+      claimed = (await lstat(join(queueRoot, `${basename}.running`))).mtimeMs;
+      return 0;
+    });
+
+    expect(claimed).toBe(published);
+  });
+
+  it("orders two ordinary publishes by the timestamps they really carry", async () => {
+    const { home, request } = await fixture();
+    await publishPrewarmRequest(home, { ...request, identity: HASH_LATE_IDENTITY });
+    await publishPrewarmRequest(home, request);
+
+    await expect(claimedIdentity(home)).resolves.toBe(HASH_LATE_IDENTITY);
   });
 
   it("recovers a claimed request left by a controller restart", async () => {
