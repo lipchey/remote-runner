@@ -467,6 +467,15 @@ describe("runCli", () => {
     expect(options).toEqual([{ since: "2026-08-17", coldThresholdMs: 3000 }]);
   });
 
+  it("accepts an in-range ISO time prefix on --since", async () => {
+    const options: CorpusOptions[] = [];
+
+    expect(
+      await runCli(["logs", "--all", "--since", "2026-08-17T23:59:59.999Z"], collect([]), corpusDependencies(options)),
+    ).toBe(0);
+    expect(options).toEqual([{ since: "2026-08-17T23:59:59.999Z" }]);
+  });
+
   it.each([
     ["a profile alongside --all", ["logs", "--all", "verify-full"]],
     ["--json without --all", ["logs", "--json"]],
@@ -480,6 +489,13 @@ describe("runCli", () => {
        selects a range no reader intended. */
     ["an impossible calendar date", ["logs", "--all", "--since", "2026-02-30"]],
     ["a --since that is not a date", ["logs", "--all", "--since", "yesterday"]],
+    /* A lexical cut sorts these above every real timestamp of that day instead of failing. One case
+       per component: a shared out-of-range value would let any single check carry all three. */
+    ["an out-of-range hour", ["logs", "--all", "--since", "2026-08-17T99Z"]],
+    ["an out-of-range minute", ["logs", "--all", "--since", "2026-08-17T12:99Z"]],
+    ["an out-of-range second", ["logs", "--all", "--since", "2026-08-17T12:30:99Z"]],
+    ["a bare T with no time after it", ["logs", "--all", "--since", "2026-08-17T"]],
+    ["an unsafe integer cold threshold", ["logs", "--all", "--cold-threshold-ms", "9007199254740993"]],
     ["--since with no value", ["logs", "--all", "--since"]],
     ["a repeated --since", ["logs", "--all", "--since", "2026-08-17", "--since", "2026-08-18"]],
     ["an unknown flag", ["logs", "--all", "--failures", "3"]],

@@ -1,14 +1,11 @@
 import { join } from "node:path";
 
-/* Bootstrap splits into two clusters with an empty band between them: a workspace the runner reuses
-   finishes in ~1.7-3.7 s, one it has to rebuild pays a full setup and lands at 5 s and above. The
-   cut sits in that observed gap rather than on a tuned value, and one machine's gap is all the
-   evidence behind it — hence `--cold-threshold-ms`. */
+/* The cut sits in an observed empty band — a reused workspace finishes in ~1.7-3.7 s, a rebuilt one
+   at 5 s and above — measured on one machine, which is why it is overridable. */
 export const COLD_BOOTSTRAP_MS = 5000;
 
-/* The runner rotates each log at a size cap, `runner.log` -> `.1` -> `.2` -> `.3`, so the live file
-   alone is the most recent slice and not the history. Oldest first keeps the merged stream in
-   append order. */
+/* The runner rotates at a size cap, so the live file alone is the most recent slice and not the
+   history; oldest first keeps the merged stream in append order. */
 const LOG_FILES = ["runner.log.3", "runner.log.2", "runner.log.1", "runner.log"] as const;
 
 const MAX_RENDERED_FAILURES = 15;
@@ -96,8 +93,8 @@ export interface CorpusEnvelope extends CorpusProvenance, Omit<CorpusSummary, "p
   readonly failures: readonly CorpusFailure[];
 }
 
-/* The version a consumer gates on: it says nothing changed in what these fields MEAN, which no
-   amount of shape-checking on the consumer side can establish. */
+/* The version a consumer gates on: it carries what these fields MEAN, which no amount of
+   shape-checking on the consumer side can establish. */
 export function corpusJson(provenance: CorpusProvenance, summary: CorpusSummary): CorpusEnvelope {
   return { schemaVersion: 1, ...provenance, ...summary };
 }
@@ -145,8 +142,8 @@ export async function readCorpus(runtime: CorpusRuntime, root: string): Promise<
       }
     }
   }
-  /* Rotation order gives append order within one identity, which is all `firstDispatch` needs, but
-     `span` and the newest-first failures read across identities. */
+  /* Rotation already gives append order within one identity; `span` and the newest-first failures
+     read across them. */
   records.sort((left, right) => left.at.localeCompare(right.at));
   return { records, unparsed, files };
 }
@@ -161,7 +158,9 @@ function median(sorted: readonly number[]): number | null {
   if (sorted.length === 0) return null;
   const middle = sorted.length / 2;
   if (sorted.length % 2 === 1) return sorted[(sorted.length - 1) / 2] ?? null;
-  return Math.round(((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2);
+  /* Left unrounded: for an odd sum, rounding the midpoint returns exactly the upper middle, which is
+     the value this figure exists to avoid reporting. */
+  return ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2;
 }
 
 export function summarizeCorpus(records: readonly CorpusRecord[], options: CorpusOptions = {}): CorpusSummary {
@@ -172,11 +171,16 @@ export function summarizeCorpus(records: readonly CorpusRecord[], options: Corpu
      outside `--since` would otherwise be re-labelled a newcomer, and every such relabelling turns an
      eviction into an expected first build. A finish that never reached the remote provider built no
      workspace, so it cannot stand as a first dispatch either. */
-  const firstDispatch = new Map<string, string>();
+  /* Held as the record itself, not its timestamp: two dispatches of one lane can share an `at`, and
+     comparing timestamps would then excuse both from the returning counts. */
+  const firstDispatch = new Set<CorpusRecord>();
+  const dispatchedLanes = new Set<string>();
   for (const record of records) {
     if (record.event !== "run-finish" || record.provider !== "remote") continue;
     const key = laneKey(record);
-    if (!firstDispatch.has(key)) firstDispatch.set(key, record.at);
+    if (dispatchedLanes.has(key)) continue;
+    dispatchedLanes.add(key);
+    firstDispatch.add(record);
   }
 
   const windowed = since ? records.filter((record) => record.at >= since) : records;
@@ -190,7 +194,7 @@ export function summarizeCorpus(records: readonly CorpusRecord[], options: Corpu
   });
   /* A workspace that has never dispatched has nothing to reuse, so its first build is cold by
      construction and says nothing about retention. */
-  const returning = measured.filter(({ record }) => firstDispatch.get(laneKey(record)) !== record.at);
+  const returning = measured.filter(({ record }) => !firstDispatch.has(record));
   const measuredMs = measured.map(({ bootstrapMs }) => bootstrapMs).sort((left, right) => left - right);
 
   return {
@@ -226,16 +230,24 @@ export function summarizeCorpus(records: readonly CorpusRecord[], options: Corpu
         consumer: record.consumer,
         profile: record.profile,
         identity: record.identity,
-        runId: record.runId ?? null,
-        status: record.status ?? null,
-        durationMs: record.durationMs ?? null,
+        /* Typed at the boundary rather than passed through: the envelope declares these numeric, and
+           the records come from a log this process does not own. */
+        runId: typeof record.runId === "string" ? record.runId : null,
+        status: typeof record.status === "number" ? record.status : null,
+        durationMs: typeof record.durationMs === "number" ? record.durationMs : null,
       })),
   };
 }
 
+/* Record-derived text reaches a terminal here, and a crafted log line can carry ANSI escapes that
+   rewrite what the operator sees. `JSON.stringify` escapes control bytes itself; this render must. */
+function plain(value: string): string {
+  return value.replaceAll(/[\p{Cc}\p{Cf}]/gu, "");
+}
+
 function formatTally(counts: Readonly<Record<string, number>>): string {
   const entries = Object.entries(counts);
-  return entries.length === 0 ? "none" : entries.map(([key, count]) => `${key}=${count}`).join(" ");
+  return entries.length === 0 ? "none" : entries.map(([key, count]) => `${plain(key)}=${count}`).join(" ");
 }
 
 export function formatCorpus(report: CorpusReport, options: { readonly failureLimit?: number } = {}): string {
@@ -248,13 +260,13 @@ export function formatCorpus(report: CorpusReport, options: { readonly failureLi
   }
   const failureLimit = options.failureLimit ?? MAX_RENDERED_FAILURES;
   const { bootstrap } = summary;
-  /* Provenance sits with the figures rather than under them: a number lifted out of this report into
-     a permanent document takes its coverage with it or it takes nothing. */
+  /* Provenance leads rather than trails: a number lifted out of this report into a permanent document
+     takes its coverage with it or it takes nothing. */
   const lines = [
     `source     ${provenance.source}`,
     `read       ${provenance.files} log files, ${provenance.unparsed} unparseable records, runner ${provenance.runner}`,
-    `corpus     ${summary.records} records, ${summary.identities} identities, profiles: ${summary.profiles.join(", ") || "none"}`,
-    `span       ${summary.span?.from ?? "-"} .. ${summary.span?.to ?? "-"}`,
+    `corpus     ${summary.records} records, ${summary.identities} identities, profiles: ${plain(summary.profiles.join(", ")) || "none"}`,
+    `span       ${plain(summary.span?.from ?? "-")} .. ${plain(summary.span?.to ?? "-")}`,
     `dispatched ${summary.dispatched.total} run-finish with provider=remote — status ${formatTally(summary.dispatched.status)}`,
     `undispatched ${summary.undispatched} run-finish never reached a provider`,
     /* Not a failure count: the runner emits these while a run waits, and the same run can still go
@@ -276,7 +288,7 @@ export function formatCorpus(report: CorpusReport, options: { readonly failureLi
     lines.push(`failures   ${summary.failures.length} non-zero, newest first:`);
     for (const failure of summary.failures.slice(0, failureLimit)) {
       lines.push(
-        `  ${failure.at}  ${failure.consumer}/${failure.profile}  ${failure.identity.slice(0, 8)}  run ${failure.runId ?? "?"}  status ${failure.status ?? "?"}  ${failure.durationMs ?? "?"}ms`,
+        `  ${plain(failure.at)}  ${plain(`${failure.consumer}/${failure.profile}`)}  ${plain(failure.identity).slice(0, 8)}  run ${plain(failure.runId ?? "?")}  status ${failure.status ?? "?"}  ${failure.durationMs ?? "?"}ms`,
       );
     }
     if (summary.failures.length > failureLimit) {

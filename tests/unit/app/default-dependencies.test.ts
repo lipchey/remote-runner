@@ -587,6 +587,39 @@ describe("concrete Node CLI dependencies", () => {
     expect(report.summary.records).toBe(1);
   });
 
+  /* Same threat as the FIFO, different primitive: a symlink where a log belongs would otherwise pull
+     a file from outside the corpus into the report, since `open` resolves it before the handle is
+     stat'd. */
+  it("refuses to follow a symlink standing in for a log", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+    });
+    const identityRoot = join(
+      paths.home,
+      ".local",
+      "state",
+      "remote-runner",
+      "profiles",
+      "ariadne",
+      "verify-full",
+      "aaa",
+    );
+    await mkdir(identityRoot, { recursive: true });
+    await writeFile(join(identityRoot, "runner.log.1"), `${finishLine("2026-08-01T00:00:00Z", 2000)}\n`);
+    const outside = join(paths.root, "elsewhere.log");
+    await writeFile(outside, `${finishLine("2026-08-02T00:00:00Z", 9000)}\n`);
+    await symlink(outside, join(identityRoot, "runner.log"));
+
+    const report = await dependencies.readLogCorpus!({});
+
+    expect(report.provenance.files).toBe(1);
+    expect(report.summary.bootstrap.measuredMs).toEqual([2000]);
+  });
+
   /* A crash can leave the tail of a log half-written. A fatal decode throws the whole file away, so
      one truncated record would cost every other record that identity ever wrote. */
   it("loses only the truncated record when a log ends mid-multibyte character", async () => {

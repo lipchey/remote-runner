@@ -125,15 +125,17 @@ function profileRoot(home: string, profile: Pick<Profile, "consumer" | "id">, id
   return join(corpusRoot(home), profile.consumer, profile.id, identity);
 }
 
-/* Log paths sit in a user-writable tree this process does not own, and a same-UID replacement of a
-   log by a FIFO parks a plain open forever — mode bits do not stop one. Opening non-blocking and
-   deciding on the HANDLE rather than the path is what keeps that from happening. */
+/* Log paths sit in a user-writable tree this process does not own, and mode bits do not stop a
+   same-UID replacement of a log by a FIFO (which parks a plain open forever) or by a symlink out of
+   the corpus. Hence non-blocking, no-follow, and the type decided on the HANDLE rather than the path.
+   ELOOP is what a refused symlink returns; like an absent log it means there is nothing to read. */
 async function readLogBytes(path: string): Promise<Uint8Array | undefined> {
   let handle;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
   } catch (caught) {
-    if (errorCode(caught) === "ENOENT") return undefined;
+    const code = errorCode(caught);
+    if (code === "ENOENT" || code === "ELOOP") return undefined;
     throw caught;
   }
   try {
@@ -149,8 +151,8 @@ async function readOptionalLog(path: string): Promise<string | undefined> {
   return bytes === undefined ? undefined : decoder.decode(bytes);
 }
 
-/* Decoded leniently, unlike every other read here: a crash can leave the tail half-written, and one
-   truncated character must cost that record rather than the identity's whole history. */
+/* Decoded leniently, unlike every other read here: a truncated tail character must cost that record
+   rather than the identity's whole history. */
 async function readCorpusLog(path: string): Promise<string | undefined> {
   const bytes = await readLogBytes(path);
   return bytes === undefined ? undefined : lenientDecoder.decode(bytes);
@@ -163,8 +165,8 @@ async function listCorpusDirectories(path: string): Promise<readonly string[]> {
       .map((entry) => entry.name)
       .sort();
   } catch (caught) {
-    /* Only a missing directory means "nothing dispatched here"; swallowing the rest would report an
-       unreadable corpus as an empty one, which reads as a clean lane. */
+    /* Only ENOENT means "nothing dispatched here": an unreadable corpus reported as an empty one
+       reads as a clean lane. */
     if (errorCode(caught) === "ENOENT") return [];
     throw caught;
   }
@@ -174,8 +176,8 @@ async function installedRunnerVersion(mainModuleUrl: string): Promise<string> {
   try {
     return formatInstallVersion(await readInstalledReceipt(mainModuleUrl));
   } catch {
-    /* The version is provenance, not the answer: an unreadable receipt must not cost the operator
-       the corpus it annotates. */
+    /* The version annotates the answer rather than being it, so an unreadable receipt must not cost
+       the operator the corpus. */
     return "unknown";
   }
 }

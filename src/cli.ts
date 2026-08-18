@@ -122,11 +122,19 @@ async function runBenchmarkCommand(argv: readonly string[], io: CliIo, dependenc
   }
 }
 
-/* A cut expressed as a string compare against ISO timestamps accepts `2026-02-30` happily and then
-   selects a range no reader intended, so the day has to survive a calendar round-trip. */
+/* The cut is a string compare against ISO timestamps, so an impossible value compares perfectly well
+   and silently selects a range no reader intended: `2026-02-30` needs a calendar round-trip, and
+   `2026-08-17T99:99Z` sorts above every real timestamp that day. Every component is range-checked. */
 function isUtcDatePrefix(value: string): boolean {
-  const day = /^(\d{4}-\d{2}-\d{2})(T[\d:.]*Z?)?$/u.exec(value)?.[1];
-  return day !== undefined && new Date(`${day}T00:00:00Z`).toISOString().startsWith(day);
+  const parts = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2})(?::(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?)?Z?)?$/u.exec(value);
+  if (parts === null) return false;
+  const [, day, hour, minute, second] = parts;
+  if (day === undefined || !new Date(`${day}T00:00:00Z`).toISOString().startsWith(day)) return false;
+  return (
+    (hour === undefined || Number(hour) <= 23) &&
+    (minute === undefined || Number(minute) <= 59) &&
+    (second === undefined || Number(second) <= 59)
+  );
 }
 
 async function runLogsCommand(argv: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
@@ -178,7 +186,9 @@ async function runLogsCommand(argv: readonly string[], io: CliIo, dependencies: 
       continue;
     }
     const threshold = Number(value);
-    if (!Number.isInteger(threshold) || threshold <= 0) {
+    /* Safe, not merely integral: a value past 2^53 is silently rounded, so the threshold echoed back
+       in the envelope would not be the one the caller asked for. */
+    if (!Number.isSafeInteger(threshold) || threshold <= 0) {
       io.stderr("logs --cold-threshold-ms takes a positive integer");
       return 2;
     }

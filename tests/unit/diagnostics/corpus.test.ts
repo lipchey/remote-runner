@@ -147,6 +147,64 @@ test("the median of an even sample is the midpoint of the two middles, not the u
   expect(summary.bootstrap.measuredMs).toEqual([2000, 3000, 4000, 9000]);
 });
 
+/* Rounding an odd-sum midpoint lands on the upper middle exactly, so an even sample whose two middles
+   sum to an odd number is the only shape that tells a midpoint from a rounded one. */
+test("an odd-sum midpoint is not rounded up into the upper middle", () => {
+  const summary = summarizeCorpus(
+    [1000, 1001].map((bootstrap, index) => ({
+      ...finish(`2026-08-0${index + 1}T00:00:00Z`, { phases: { bootstrap } }),
+      identity: `id${index}`,
+    })),
+  );
+  expect(summary.bootstrap.medianMs).toBe(1000.5);
+});
+
+/* Two dispatches of one lane can share a timestamp, and a first-dispatch mark keyed on the timestamp
+   would then excuse both of them from the returning counts. */
+test("only one of two dispatches sharing a timestamp is the lane's first", () => {
+  const summary = summarizeCorpus([
+    { ...finish("2026-08-01T00:00:00Z", { phases: { bootstrap: 11_000 } }), identity: "x" },
+    { ...finish("2026-08-01T00:00:00Z", { phases: { bootstrap: 9000 } }), identity: "x" },
+  ]);
+  expect(summary.bootstrap.returning).toBe(1);
+  expect(summary.bootstrap.returningCold).toBe(1);
+});
+
+/* Values from a log this process does not own reach the operator's terminal, where an ANSI escape
+   rewrites the lines around it. The envelope is safe by JSON escaping; the render is not. */
+test("a crafted record cannot write escape sequences into the rendered report", () => {
+  const hostile = "\u001b[2Kfaked";
+  const summary = summarizeCorpus([
+    { ...finish("2026-08-01T00:00:00Z", { status: 1, runId: hostile }), identity: hostile },
+    { ...finish("2026-08-01T00:01:00Z"), event: "run-unavailable", reason: hostile },
+  ]);
+  const lines = render(summary);
+  expect(lines).not.toContain("\u001b");
+  expect(lines).toContain("[2Kfaked");
+  /* The envelope keeps the value, escaped: a consumer parses fields rather than rendering them, and
+     dropping bytes there would hide what the log actually holds. */
+  expect(JSON.stringify(corpusJson(provenance(), summary))).toContain("\\u001b");
+});
+
+/* A field the envelope declares numeric is not numeric because the record says so: these come from a
+   log whose format is not pinned by anything a consumer can see. */
+test("a non-numeric status or duration is reported as absent, not passed through", () => {
+  const summary = summarizeCorpus([
+    { ...finish("2026-08-01T00:00:00Z"), status: "1" as unknown as number, durationMs: "48s" as unknown as number },
+  ]);
+  expect(summary.failures).toEqual([
+    {
+      at: "2026-08-01T00:00:00Z",
+      consumer: "ariadne",
+      profile: "verify-full",
+      identity: "a",
+      runId: null,
+      status: null,
+      durationMs: null,
+    },
+  ]);
+});
+
 /* The runner emits these while a run waits, and the same run can still finish green, so a reader who
    takes this line for a failure count is wrong. */
 test("a deferred run is reported as a wait, not as an outcome", () => {
@@ -323,9 +381,9 @@ test("a non-regular file where a log was expected is skipped, not counted as rea
   expect(read.records).toHaveLength(1);
 });
 
-/* `schemaVersion` guards the envelope's shape; only this pin guards its meaning. A commit that
-   changes what an absent `provider` implies, or which finishes count as dispatched, reds here and
-   has to bump the version deliberately. */
+/* `schemaVersion` guards the envelope's shape; only this pin guards its meaning — a commit that
+   changes what an absent `provider` implies, or which finishes count as dispatched, reds here. It
+   detects such a change, it cannot force the version bump that should accompany one. */
 test("the envelope pins what every field of a real corpus means", async () => {
   const { read, summary } = await readFixture();
   const envelope: unknown = JSON.parse(
