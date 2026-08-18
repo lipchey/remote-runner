@@ -4,6 +4,7 @@ export const PREPARATION_STEPS = [
   "validate",
   "lock",
   "probe",
+  "workload-lock",
   "sync-pause",
   "git-workspace",
   "sync-resume-flush",
@@ -49,6 +50,7 @@ export interface PreparationRuntime {
   validate(): Promise<void>;
   acquireLock(): Promise<() => Promise<void>>;
   probe(): Promise<void>;
+  touchActivity(): Promise<void>;
   pauseSync(): Promise<void>;
   reconcileWorkspace(): Promise<void>;
   resumeAndFlush(): Promise<void>;
@@ -89,6 +91,7 @@ function reasonFor(step: (typeof PREPARATION_STEPS)[number]): PreparationReason 
   if (step === "validate") return "validation";
   if (step === "lock") return "lock";
   if (step === "probe") return "transport";
+  if (step === "workload-lock") return "lock";
   if (step === "sync-pause" || step === "sync-resume-flush") return "sync";
   if (step === "git-workspace") return "workspace";
   if (step === "bootstrap") return "bootstrap";
@@ -116,6 +119,8 @@ export async function prepareRemote(runtime: PreparationRuntime): Promise<Prepar
     release = idempotentRelease(await runtime.acquireLock());
     step = "probe";
     await runtime.probe();
+    step = "workload-lock";
+    await runtime.touchActivity();
     step = "sync-pause";
     await runtime.pauseSync();
     step = "git-workspace";

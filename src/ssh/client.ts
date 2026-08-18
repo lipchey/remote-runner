@@ -6,6 +6,10 @@ import { errorCode } from "../runtime/errno.js";
 import type { ProcessRequest, ProcessResult } from "../runtime/contracts.js";
 
 const MAX_CONNECT_TIMEOUT_SECONDS = 300;
+/* The exit code every remote script uses for "another holder has this lock". Not 75: the bounded
+   capture path synthesizes 75 for a command that exited 0 with truncated output, so a capture
+   anomaly would be read as contention. */
+export const REMOTE_BUSY_EXIT_CODE = 79;
 export const SERVER_ALIVE_INTERVAL_SECONDS = 15;
 export const SERVER_ALIVE_COUNT_MAX = 4;
 const DEFAULT_CAPTURE_BYTES = 64 * 1024;

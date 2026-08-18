@@ -35,6 +35,7 @@ function timedPreparation(services: ProfileExecutionServices, telemetry: RunTele
     validate: () => telemetry.measure("validate", () => services.validate()),
     acquireLock: () => telemetry.measure("lock", () => services.acquireLock()),
     probe: () => telemetry.measure("probe", () => services.probe()),
+    touchActivity: () => telemetry.measure("workload-lock", () => services.touchActivity()),
     pauseSync: () => telemetry.measure("sync-pause", () => services.pauseSync()),
     reconcileWorkspace: () => telemetry.measure("git-workspace", () => services.reconcileWorkspace()),
     resumeAndFlush: () => telemetry.measure("sync-resume", () => services.resumeAndFlush()),

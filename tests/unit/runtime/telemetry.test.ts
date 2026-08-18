@@ -18,6 +18,7 @@ describe("run telemetry", () => {
       "validate",
       "lock",
       "probe",
+      "workload-lock",
       "sync-pause",
       "git-workspace",
       "sync-resume",

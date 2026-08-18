@@ -2,10 +2,14 @@ import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  LOCK_WAIT_MS,
+  LOCK_WAIT_NOTICE_MS,
   NodeProfileServices,
+  POST_WORKLOAD_LOCK_WAIT_MS,
+  WORKLOAD_LOCK_WAIT_MS,
   listLocalFingerprintFiles,
   listLocalGitlinks,
   localWorktreeExists,
@@ -20,7 +24,7 @@ import type { Profile } from "../../../src/config/types.js";
 import type { NodeProcessRuntime, StreamingProcessRequest } from "../../../src/node/process.js";
 import { pathIdentity, worktreeIdentity } from "../../../src/runtime/identity.js";
 import { RunTelemetry } from "../../../src/runtime/telemetry.js";
-import type { BoundedProcessRequest } from "../../../src/ssh/client.js";
+import { REMOTE_BUSY_EXIT_CODE, type BoundedProcessRequest } from "../../../src/ssh/client.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
 const profile = loadManifestText(validManifest).profiles[0]!;
@@ -369,11 +373,18 @@ describe("pilot service boundaries", () => {
     });
     Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current) });
 
+    await services.touchActivity();
     await services.pauseSync();
 
     expect(requests[0]?.command).toBe("ssh");
     expect(JSON.stringify(requests[0]?.args)).toContain("remote-runner-touch-activity");
-    expect(JSON.stringify(requests[0]?.args)).toContain("flock -w 60 9 || exit 75");
+    /* `flock -w` counts seconds and the budget is milliseconds; the unconverted constant is a
+       250-hour wait that still reads as a valid script. */
+    expect(WORKLOAD_LOCK_WAIT_MS % 1000).toBe(0);
+    expect(WORKLOAD_LOCK_WAIT_MS).toBeLessThan(LOCK_WAIT_MS);
+    expect(JSON.stringify(requests[0]?.args)).toContain(
+      `flock -w ${WORKLOAD_LOCK_WAIT_MS / 1000} 9 || exit ${REMOTE_BUSY_EXIT_CODE}`,
+    );
     expect(JSON.stringify(requests[0]?.args)).toContain(`${current}`);
     expect(requests.slice(1).map(({ args }) => args.slice(0, 2).join(" "))).toEqual([
       "daemon start",
@@ -382,12 +393,12 @@ describe("pilot service boundaries", () => {
     ]);
   });
 
-  it("offers a busy workload lock for another attempt instead of failing the preparation", async () => {
+  function servicesWithExitCode(exitCode: number): NodeProfileServices {
     const current = worktreeIdentity(process.cwd());
     const processes = {
       async run() {
         return {
-          exitCode: 75,
+          exitCode,
           stdout: new Uint8Array(),
           stderr: new Uint8Array(),
           outputTruncated: false,
@@ -405,8 +416,67 @@ describe("pilot service boundaries", () => {
       processes,
     });
     Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current) });
+    return services;
+  }
 
-    await expect(services.pauseSync()).rejects.toMatchObject({ reason: "lock", retryable: true });
+  it("fails a busy workload lock closed rather than spending the same budget twice", async () => {
+    await expect(servicesWithExitCode(REMOTE_BUSY_EXIT_CODE).touchActivity()).rejects.toMatchObject({
+      reason: "lock",
+      retryable: false,
+    });
+  });
+
+  /* A truncated capture whose command exited 0 is reported as 75 by the bounded process runtime, so
+     reading 75 as contention fails an unrelated run closed. */
+  it("does not read the truncation exit code as workload contention", async () => {
+    await expect(servicesWithExitCode(75).touchActivity()).rejects.toThrow("remote activity marker update failed");
+    expect(REMOTE_BUSY_EXIT_CODE).not.toBe(75);
+  });
+
+  it("tells the operator that another run of the workspace is still finishing", async () => {
+    vi.useFakeTimers();
+    try {
+      const current = worktreeIdentity(process.cwd());
+      const written: string[] = [];
+      let release!: () => void;
+      const busy = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const processes = {
+        async run() {
+          await busy;
+          return {
+            exitCode: 0,
+            stdout: new Uint8Array(),
+            stderr: new Uint8Array(),
+            outputTruncated: false,
+            spawned: true,
+          };
+        },
+        async isAlive() {
+          return false;
+        },
+      } as NodeProcessRuntime;
+      const services = new NodeProfileServices(retainedDataAiProfile, {
+        home: "/Users/admin",
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array([1]),
+        processes,
+        stderr: (chunk) => written.push(new TextDecoder().decode(chunk)),
+      });
+      Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current) });
+
+      const pending = services.touchActivity();
+      await vi.advanceTimersByTimeAsync(LOCK_WAIT_NOTICE_MS);
+      expect(written.join("")).toContain("another run of this workspace is still finishing");
+
+      release();
+      await pending;
+      await vi.advanceTimersByTimeAsync(LOCK_WAIT_NOTICE_MS * 2);
+      expect(written).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("gives dependency setup a capture bound that a package install fits into", async () => {
@@ -727,6 +797,11 @@ describe("pilot service boundaries", () => {
     expect(streamCalls).toBe(2);
     const serializedRequests = requests.map((request) => JSON.stringify(request.args));
     expect(serializedRequests.filter((value) => value.includes("activity")).length).toBeGreaterThanOrEqual(1);
+    /* The queue budget belongs to the preparation wait. Spending it here would hold this run's exit
+       code back for as long as the next run of the same worktree holds the lock. */
+    for (const value of serializedRequests.filter((argv) => argv.includes("remote-runner-touch-activity"))) {
+      expect(value).toContain(`flock -w ${POST_WORKLOAD_LOCK_WAIT_MS / 1000} 9`);
+    }
     expect(serializedRequests.some((value) => value.includes("remote-runner-retention-list"))).toBe(true);
     /* An identity lock file must outlive its holder: unlinking it drops the inode a concurrent
        holder is locked on, and the next arrival then locks a fresh one and runs alongside it. */

@@ -41,6 +41,7 @@ import { encodeSecretFrame, type SecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
 import { classifySshFailure } from "../ssh/probe.js";
 import {
+  REMOTE_BUSY_EXIT_CODE,
   runSsh,
   sshArguments,
   type BoundedProcessRequest,
@@ -254,11 +255,18 @@ const LOCAL_GIT_CAPTURE_BYTES = 4 * 1024 * 1024;
    and exceeding the bound SIGKILLs the ssh mid-install — repeated on every run, because the
    healthy state is never written. */
 const SETUP_CAPTURE_BYTES = 16 * 1024 * 1024;
-const WORKLOAD_LOCK_BUSY_EXIT_CODE = 75;
 /* A queued prewarm holds the profile lock for its whole workload, so a wait shorter than a run
    turns "someone else is already doing this" into a full duplicate run on the laptop. */
-const LOCK_WAIT_MS = 15 * 60 * 1000;
-const LOCK_WAIT_NOTICE_MS = 2 * 1000;
+export const LOCK_WAIT_MS = 15 * 60 * 1000;
+/* Spent while this run already holds the local profile lock for the same identity, so a third run
+   of the worktree waits out LOCK_WAIT_MS and then this on top — hence a fraction of it, and never
+   the constant itself. `flock -w` counts seconds, so the emitted value is this divided by 1000. */
+export const WORKLOAD_LOCK_WAIT_MS = 5 * 60 * 1000;
+/* The post-workload touch only refreshes the marker, and the next run of the same worktree may
+   already hold the lock — and will refresh it itself. Spending the queue budget here would hold the
+   finished run's exit code back for as long as that run lasts. */
+export const POST_WORKLOAD_LOCK_WAIT_MS = 5 * 1000;
+export const LOCK_WAIT_NOTICE_MS = 2 * 1000;
 const UV_VERSION = "0.11.30";
 const UV_SHA256 = {
   x86_64: "04bc7d180d6138bf6dc08387acf507a823f397a98fea55da36b0ccc7fbce3b68",
@@ -513,7 +521,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
           if (result.exitCode !== 0) throw new Error(`workspace retention lock exited ${result.exitCode}`);
           return "removed";
         }
-        if (result.exitCode === 75) return "locked";
+        if (result.exitCode === REMOTE_BUSY_EXIT_CODE) return "locked";
         if (result.exitCode === 76) return "missing";
         if (result.exitCode === 77) return "unsafe";
         if (result.exitCode === 78) return "refreshed";
@@ -694,27 +702,38 @@ export class NodeProfileServices implements ProfileExecutionServices {
     return telemetry === undefined ? run() : telemetry.measure(phase, run);
   }
 
-  private async touchActivity(): Promise<void> {
+  /* The workload lock is held by the remote child for the whole run, so an unbounded flock here
+     hangs the second run silently and without end. The lock itself stays: it fences the marker
+     against `git reset --hard`. */
+  private async markActivity(waitMs: number): Promise<void> {
     const paths = this.paths();
-    const marker = paths.activityMarker;
-    /* The workload lock is held by the remote child for the whole run, so an unbounded flock here
-       hangs the second run silently and without end. The bounded wait turns that into a retryable
-       lock failure instead. The lock itself stays: it fences the marker against `git reset --hard`. */
     const result = await this.remote().run([
       "sh",
       "-ceu",
-      'umask 077; marker=$1; lock=$2; mkdir -p -- "$(dirname -- "$marker")" "$(dirname -- "$lock")"; exec 9>"$lock"; flock -w 60 9 || exit 75; : >"$marker"',
+      `umask 077; marker=$1; lock=$2; mkdir -p -- "$(dirname -- "$marker")" "$(dirname -- "$lock")"; exec 9>"$lock"; flock -w ${waitMs / 1000} 9 || exit ${REMOTE_BUSY_EXIT_CODE}; : >"$marker"`,
       "remote-runner-touch-activity",
-      marker,
+      paths.activityMarker,
       paths.workloadLock,
     ]);
-    if (result.exitCode === WORKLOAD_LOCK_BUSY_EXIT_CODE) throw new PreparationError("lock", true);
+    /* Not retryable: the whole budget was already spent waiting, so a second attempt can only
+       double the delay the operator sits through. */
+    if (result.exitCode === REMOTE_BUSY_EXIT_CODE) throw new PreparationError("lock", false);
     if (result.exitCode !== 0) throw new Error("remote activity marker update failed");
+  }
+
+  async touchActivity(): Promise<void> {
+    const notice = setTimeout(() => {
+      this.write("remote-runner: another run of this workspace is still finishing; waiting for it\n");
+    }, LOCK_WAIT_NOTICE_MS);
+    try {
+      await this.markActivity(WORKLOAD_LOCK_WAIT_MS);
+    } finally {
+      clearTimeout(notice);
+    }
   }
 
   async pauseSync(): Promise<void> {
     const paths = this.paths();
-    await this.touchActivity();
     this.pausedSession = await this.mutagen.pauseForGitReconcile({
       consumer: this.profile.consumer,
       profile: this.profile.id,
@@ -981,7 +1000,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
       return { kind: "not-started", reason: workloadCommand ? WORKLOAD_COMMAND_REASON : "child-start" };
     }
     try {
-      await this.span("post-activity", () => this.touchActivity());
+      await this.span("post-activity", () => this.markActivity(POST_WORKLOAD_LOCK_WAIT_MS));
       await this.span("retention", () => this.pruneRetention());
     } catch {
       /* Through `write`, because this line runs AFTER the marker: an inline writer that throws here

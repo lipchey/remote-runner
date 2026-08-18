@@ -2,6 +2,7 @@ import { posix } from "node:path";
 
 import type { WorkspaceRetentionPolicy } from "../config/types.js";
 import type { RemoteCommandResult } from "../node/remote-toolchain.js";
+import { REMOTE_BUSY_EXIT_CODE } from "../ssh/client.js";
 
 const IDENTITY = /^[0-9a-f]{24}$/u;
 const MINUTES_TO_MS = 60_000;
@@ -234,7 +235,7 @@ export class RemoteWorkspaceRetentionRuntime implements WorkspaceRetentionRuntim
       [
         "sh",
         "-ceu",
-        'umask 077; existing=$1; lock=$2; workspace=$3; quarantine=$4; activity=$5; cutoff=$6; mkdir -p -- "$(dirname -- "$lock")"; exec 9>"$lock"; flock -n 9 || exit 75; if [ "$existing" != 1 ] && [ -f "$activity" ] && [ ! -L "$activity" ] && [ "$(stat -c %Y -- "$activity")" -ge "$cutoff" ]; then exit 78; fi; if [ "$existing" = 1 ]; then [ -d "$quarantine" ] || exit 76; [ ! -L "$quarantine" ] || exit 77; else [ -d "$workspace" ] || exit 76; [ ! -L "$workspace" ] || exit 77; [ ! -e "$quarantine" ] || exit 77; mv -- "$workspace" "$quarantine"; fi; printf "\\0REMOTE_RUNNER_RETENTION_LOCKED\\0" >&2; IFS= read -r release; [ "$release" = release ]',
+        `umask 077; existing=$1; lock=$2; workspace=$3; quarantine=$4; activity=$5; cutoff=$6; mkdir -p -- "$(dirname -- "$lock")"; exec 9>"$lock"; flock -n 9 || exit ${REMOTE_BUSY_EXIT_CODE}; if [ "$existing" != 1 ] && [ -f "$activity" ] && [ ! -L "$activity" ] && [ "$(stat -c %Y -- "$activity")" -ge "$cutoff" ]; then exit 78; fi; if [ "$existing" = 1 ]; then [ -d "$quarantine" ] || exit 76; [ ! -L "$quarantine" ] || exit 77; else [ -d "$workspace" ] || exit 76; [ ! -L "$workspace" ] || exit 77; [ ! -e "$quarantine" ] || exit 77; mv -- "$workspace" "$quarantine"; fi; printf "\\0REMOTE_RUNNER_RETENTION_LOCKED\\0" >&2; IFS= read -r release; [ "$release" = release ]`,
         "remote-runner-retention-lock",
         existing ? "1" : "0",
         lock,

@@ -25,6 +25,9 @@ class FakePreparation implements PreparationRuntime {
   async probe() {
     return this.step("probe");
   }
+  async touchActivity() {
+    return this.step("workload-lock");
+  }
   async pauseSync() {
     return this.step("sync-pause");
   }
@@ -56,6 +59,7 @@ describe("remote preparation", () => {
       "validate",
       "lock",
       "probe",
+      "workload-lock",
       "sync-pause",
       "git-workspace",
       "sync-resume-flush",
@@ -81,6 +85,7 @@ describe("remote preparation", () => {
     ["validate", "validation", false],
     ["lock", "lock", false],
     ["probe", "transport", true],
+    ["workload-lock", "lock", false],
     ["sync-pause", "sync", false],
     ["git-workspace", "workspace", false],
     ["sync-resume-flush", "sync", false],
