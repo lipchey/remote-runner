@@ -152,7 +152,7 @@ describe("concrete Node CLI dependencies", () => {
         profile: profile.id,
         identity: dependencies.identity,
       }),
-    ).resolves.toBe("queued");
+    ).resolves.toMatchObject({ state: "queued" });
     expect(processes.requests.some(({ command }) => command === "launchctl")).toBe(true);
   });
 
@@ -183,7 +183,7 @@ describe("concrete Node CLI dependencies", () => {
     await dependencies.enqueuePrewarm?.(profile, ".remote-runner.yaml");
 
     await expect(dependencies.statusProfile?.("verify-full")).resolves.toMatch(
-      /^verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear$/u,
+      /^verify-full controller=running prewarm=queued\(0\/1,\d+m\d{2}s\) session=watching workspace=ready fingerprint=current outage=clear$/u,
     );
     const report = (await dependencies.doctorProfile?.("verify-full"))![0]!.report;
     expect(report.checks).toHaveLength(DIAGNOSTIC_PROBES.length);

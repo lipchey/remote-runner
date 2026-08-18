@@ -28,6 +28,9 @@ class FakeServices implements ProfileExecutionServices {
     const failure = this.probeFailures.shift();
     if (failure !== undefined) throw failure;
   }
+  async touchActivity() {
+    this.calls.push("activity");
+  }
   async pauseSync() {
     this.calls.push("pause");
   }
@@ -134,6 +137,7 @@ describe("profile runtime composition", () => {
       "validate",
       "lock",
       "probe",
+      "activity",
       "pause",
       "workspace",
       "flush",
@@ -157,6 +161,7 @@ describe("profile runtime composition", () => {
       "validate",
       "lock",
       "probe",
+      "activity",
       "pause",
       "workspace",
       "flush",
@@ -183,6 +188,7 @@ describe("profile runtime composition", () => {
       "validate",
       "lock",
       "probe",
+      "activity",
       "pause",
       "workspace",
       "flush",
@@ -247,6 +253,7 @@ describe("profile runtime composition", () => {
       "validate",
       "lock",
       "probe",
+      "activity",
       "pause",
       "workspace",
       "flush",
@@ -434,6 +441,10 @@ describe("profile runtime composition", () => {
         elapsed += 4;
         return super.probe();
       }
+      override async touchActivity() {
+        elapsed += 256;
+        return super.touchActivity();
+      }
       override async pauseSync() {
         elapsed += 8;
         return super.pauseSync();
@@ -463,6 +474,7 @@ describe("profile runtime composition", () => {
       validate: 1,
       lock: 2,
       probe: 4,
+      "workload-lock": 256,
       "sync-pause": 8,
       "git-workspace": 16,
       "sync-resume": 32,

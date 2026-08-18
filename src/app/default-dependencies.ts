@@ -648,7 +648,17 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
           profile: profile.id,
           identity,
         });
-        lines.push(formatStatus({ profile: profile.id, controller, prewarm, session, ...remote, outage }));
+        lines.push(
+          formatStatus({
+            profile: profile.id,
+            controller,
+            prewarm: prewarm.state,
+            ...(prewarm.queue === undefined ? {} : { prewarmQueue: prewarm.queue }),
+            session,
+            ...remote,
+            outage,
+          }),
+        );
       }
       return lines.join("\n");
     },

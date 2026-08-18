@@ -1,4 +1,4 @@
-import type { PrewarmState } from "../prewarm/queue.js";
+import type { PrewarmQueuePosition, PrewarmState } from "../prewarm/queue.js";
 
 export type DiagnosticStatus = "ok" | "warn" | "fail";
 
@@ -155,6 +155,7 @@ export interface StatusSnapshot {
   readonly profile: string;
   readonly controller: "running" | "stopped" | "incompatible" | "unknown";
   readonly prewarm: PrewarmState;
+  readonly prewarmQueue?: PrewarmQueuePosition;
   readonly session: "watching" | "paused" | "missing" | "unknown";
   readonly workspace: "ready" | "missing" | "dirty" | "unknown";
   readonly fingerprint: "current" | "stale" | "missing" | "unknown";
@@ -163,14 +164,23 @@ export interface StatusSnapshot {
 
 const STATUS_FIELD = /^[a-z][a-z0-9-]{0,62}$/u;
 
-function formatPrewarm(prewarm: PrewarmState): string {
-  if (typeof prewarm === "string") return prewarm;
-  return prewarm.outcome === "ok" ? `ok@${prewarm.at}` : `failed(${prewarm.status})@${prewarm.at}`;
+function formatWaited(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+function formatPrewarm(snapshot: StatusSnapshot): string {
+  const { prewarm, prewarmQueue } = snapshot;
+  if (typeof prewarm !== "string") {
+    return prewarm.outcome === "ok" ? `ok@${prewarm.at}` : `failed(${prewarm.status})@${prewarm.at}`;
+  }
+  if (prewarmQueue === undefined || (prewarm !== "queued" && prewarm !== "running")) return prewarm;
+  return `${prewarm}(${prewarmQueue.position}/${prewarmQueue.depth},${formatWaited(prewarmQueue.waitedMs)})`;
 }
 
 export function formatStatus(snapshot: StatusSnapshot): string {
   if (!STATUS_FIELD.test(snapshot.profile)) throw new Error("status profile is invalid");
-  return `${snapshot.profile} controller=${snapshot.controller} prewarm=${formatPrewarm(snapshot.prewarm)} session=${snapshot.session} workspace=${snapshot.workspace} fingerprint=${snapshot.fingerprint} outage=${snapshot.outage}`;
+  return `${snapshot.profile} controller=${snapshot.controller} prewarm=${formatPrewarm(snapshot)} session=${snapshot.session} workspace=${snapshot.workspace} fingerprint=${snapshot.fingerprint} outage=${snapshot.outage}`;
 }
 
 export interface DiagnosticLogRuntime {

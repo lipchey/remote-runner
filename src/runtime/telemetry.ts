@@ -4,6 +4,7 @@ export const RUN_PHASES = [
   "validate",
   "lock",
   "probe",
+  "workload-lock",
   "sync-pause",
   "git-workspace",
   "sync-resume",

@@ -107,16 +107,17 @@ describe("doctor", () => {
 });
 
 describe("status formatting", () => {
+  const base = {
+    profile: "verify-full",
+    controller: "running",
+    session: "watching",
+    workspace: "ready",
+    fingerprint: "current",
+    outage: "clear",
+  } as const;
+
   it("prints only concise bounded status fields", () => {
-    const output = formatStatus({
-      profile: "verify-full",
-      controller: "running",
-      prewarm: "queued",
-      session: "watching",
-      workspace: "ready",
-      fingerprint: "current",
-      outage: "clear",
-    });
+    const output = formatStatus({ ...base, prewarm: "queued" });
 
     expect(output).toBe(
       "verify-full controller=running prewarm=queued session=watching workspace=ready fingerprint=current outage=clear",
@@ -124,21 +125,27 @@ describe("status formatting", () => {
   });
 
   it("prints the last prewarm outcome and when it finished", () => {
-    const snapshot = {
-      profile: "verify-full",
-      controller: "running",
-      session: "watching",
-      workspace: "ready",
-      fingerprint: "current",
-      outage: "clear",
-    } as const;
-
     expect(
-      formatStatus({ ...snapshot, prewarm: { outcome: "failed", status: 1, at: "2026-08-17T17:04:05.825Z" } }),
+      formatStatus({ ...base, prewarm: { outcome: "failed", status: 1, at: "2026-08-17T17:04:05.825Z" } }),
     ).toContain("prewarm=failed(1)@2026-08-17T17:04:05.825Z ");
-    expect(
-      formatStatus({ ...snapshot, prewarm: { outcome: "ok", status: 0, at: "2026-08-17T17:23:23.879Z" } }),
-    ).toContain("prewarm=ok@2026-08-17T17:23:23.879Z ");
+    expect(formatStatus({ ...base, prewarm: { outcome: "ok", status: 0, at: "2026-08-17T17:23:23.879Z" } })).toContain(
+      "prewarm=ok@2026-08-17T17:23:23.879Z ",
+    );
+  });
+
+  it.each([
+    ["queued" as const, { position: 2, depth: 5, waitedMs: 252_000 }, "queued(2/5,4m12s)"],
+    ["running" as const, { position: 0, depth: 3, waitedMs: 662_000 }, "running(0/3,11m02s)"],
+  ])("carries the queue position, depth and wait age of a %s request", (prewarm, prewarmQueue, expected) => {
+    expect(formatStatus({ ...base, prewarm, prewarmQueue })).toContain(`prewarm=${expected} `);
+  });
+
+  it.each([["idle" as const], ["unknown" as const]])("prints %s bare", (prewarm) => {
+    expect(formatStatus({ ...base, prewarm })).toContain(`prewarm=${prewarm} `);
+  });
+
+  it("rejects a profile name that is not a bounded field", () => {
+    expect(() => formatStatus({ ...base, profile: "verify full", prewarm: "idle" })).toThrow(/status profile/u);
   });
 });
 

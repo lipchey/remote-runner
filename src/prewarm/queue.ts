@@ -33,6 +33,21 @@ export interface PrewarmOutcome {
 
 export type PrewarmState = "idle" | "queued" | "running" | "unknown" | PrewarmOutcome;
 
+export interface PrewarmQueuePosition {
+  /* Dispatch entries ahead of this one, in the order the controller consumes them, so every claimed
+     request counts ahead of every pending one. */
+  readonly position: number;
+  readonly depth: number;
+  /* Age since enqueue, in both states — the mtime is the arrival instant and the claim preserves it,
+     so a claimed request reports how long ago it was asked for, not how long it has been running. */
+  readonly waitedMs: number;
+}
+
+export interface PrewarmQueueStatus {
+  readonly state: PrewarmState;
+  readonly queue?: PrewarmQueuePosition;
+}
+
 function queueRoot(home: string): string {
   if (!isAbsolute(home) || resolve(home) !== home) throw new Error("home must be an absolute path");
   return join(home, ".local", "state", "remote-runner", "prewarm");
@@ -202,15 +217,38 @@ async function recordPrewarmResult(root: string, basename: string, status: numbe
   }
 }
 
+/* Numbers only — never the state, which stays `inspectQueueState`'s: `ownedEntries` accepts
+   symlinks and `entryKind` does not, so a listing-derived state would report a symlinked entry as
+   queued and let publish's own self-check coalesce onto it. */
+async function queuePosition(root: string, name: string): Promise<PrewarmQueuePosition | undefined> {
+  let entries: readonly QueueEntry[];
+  try {
+    entries = await ownedEntries(root);
+  } catch {
+    /* Read-only, and needed most when the queue is deep: an over-full one costs the numbers, never
+       the answer. */
+    return undefined;
+  }
+  const index = entries.findIndex((entry) => entry.name === name);
+  const arrived = entries[index]?.arrivedMs;
+  if (arrived === undefined) return undefined;
+  return { position: index, depth: entries.length, waitedMs: Math.max(0, Math.round(Date.now() - arrived)) };
+}
+
 export async function inspectPrewarmRequest(
   home: string,
   request: Pick<PrewarmRequest, "consumer" | "profile" | "identity">,
-): Promise<PrewarmState> {
+): Promise<PrewarmQueueStatus> {
   const root = await verifiedQueueRoot(home, false);
   const basename = requestBasename(request);
   const queued = await inspectQueueState(root, basename);
-  if (queued !== "idle") return queued;
-  return (await readPrewarmResult(root, basename)) ?? "idle";
+  if (queued === "queued" || queued === "running") {
+    const suffix = queued === "running" ? ".running" : ".json";
+    const queue = await queuePosition(root, `${basename}${suffix}`);
+    return { state: queued, ...(queue === undefined ? {} : { queue }) };
+  }
+  if (queued !== "idle") return { state: queued };
+  return { state: (await readPrewarmResult(root, basename)) ?? "idle" };
 }
 
 export async function publishPrewarmRequest(home: string, value: PrewarmRequest): Promise<"published" | "coalesced"> {
@@ -227,6 +265,9 @@ export async function publishPrewarmRequest(home: string, value: PrewarmRequest)
   const generationPath = join(root, `${basename}.generation-${randomUUID()}`);
   const contents = new TextEncoder().encode(JSON.stringify(request));
   if (contents.byteLength > MAX_REQUEST_BYTES) throw new Error("prewarm request is too large");
+  /* This write stamps the mtime the queue is served in arrival order by; `link()` preserves it, and
+     a re-request that coalesces on EEXIST keeps the FIRST arrival's — refreshing it would push a
+     repeatedly-requested worktree to the back of the queue forever. */
   await writeFile(generationPath, contents, { flag: "wx", mode: 0o600 });
   try {
     await link(generationPath, pendingPath);
@@ -243,23 +284,42 @@ export async function publishPrewarmRequest(home: string, value: PrewarmRequest)
   return "published";
 }
 
-async function ownedEntries(root: string): Promise<string[]> {
+/* Arrival order, not FIFO: the mtime is stamped by the publish `writeFile` and only the later
+   `link()` makes the request visible, so two publishers interleaving between those two calls can be
+   served in the opposite order, and equal timestamps fall back to the identity-hash order this sort
+   exists to remove. Both are tolerable because the queue carries best-effort prewarms only. */
+interface QueueEntry {
+  readonly name: string;
+  readonly arrivedMs: number;
+}
+
+async function ownedEntries(root: string): Promise<readonly QueueEntry[]> {
+  let names: string[];
   try {
     const entries = await readdir(root, { withFileTypes: true });
     if (entries.length > MAX_QUEUE_ENTRIES) throw new Error("prewarm queue has too many entries");
-    return entries
+    names = entries
       .filter((entry) => entry.isFile() || entry.isSymbolicLink())
       .map(({ name }) => name)
-      .filter((name) => name.endsWith(".running") || name.endsWith(".json"))
-      .sort((left, right) => {
-        const leftPriority = left.endsWith(".running") ? 0 : 1;
-        const rightPriority = right.endsWith(".running") ? 0 : 1;
-        return leftPriority - rightPriority || left.localeCompare(right);
-      });
+      .filter((name) => name.endsWith(".running") || name.endsWith(".json"));
   } catch (caught) {
     if (errorCode(caught) === "ENOENT") return [];
     throw caught;
   }
+  const entries: QueueEntry[] = [];
+  for (const name of names) {
+    try {
+      entries.push({ name, arrivedMs: (await lstat(join(root, name))).mtimeMs });
+    } catch (caught) {
+      /* A request another pass claimed between the readdir and here is a normal race, not an error. */
+      if (errorCode(caught) !== "ENOENT") throw caught;
+    }
+  }
+  return entries.sort((left, right) => {
+    const leftPriority = left.name.endsWith(".running") ? 0 : 1;
+    const rightPriority = right.name.endsWith(".running") ? 0 : 1;
+    return leftPriority - rightPriority || left.arrivedMs - right.arrivedMs || left.name.localeCompare(right.name);
+  });
 }
 
 export async function consumeNextPrewarmRequest(
@@ -267,7 +327,7 @@ export async function consumeNextPrewarmRequest(
   run: (request: PrewarmRequest) => Promise<number>,
 ): Promise<"idle" | "processed" | "discarded"> {
   const root = await verifiedQueueRoot(home, false);
-  for (const name of await ownedEntries(root)) {
+  for (const { name } of await ownedEntries(root)) {
     const claimedBasename = name.endsWith(".running")
       ? name.slice(0, -".running".length)
       : name.slice(0, -".json".length);
