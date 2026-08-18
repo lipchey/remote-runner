@@ -54,8 +54,16 @@ controller owns the request, and after completion the terminal outcome of that r
 code and `70` means the run threw instead of exiting. Outcomes are scoped to one consumer, profile
 and worktree identity: `prewarm=idle` means no request has ever finished for that triple —
 including any that ran before the runner recorded outcomes — not that the last one succeeded, and
-`prewarm=unknown` means the recorded outcome could not be read. A parser
-of this line must accept all six forms. Do not poll this state from a worktree-creation hook or add
+`prewarm=unknown` means the recorded outcome could not be read. The queued and running forms usually
+carry `(<position>/<depth>,<age>)`: `prewarm=queued(2/5,4m12s)` means two dispatch entries are ahead
+of this one in a queue of five and it was enqueued 4m12s ago; the parenthesis is absent when the
+queue is too deep to order. Every claimed request counts ahead of every pending one, and the age is
+time since enqueue in both states — `running(0/3,11m02s)` is a request asked for 11 minutes ago, not
+one that has been running for 11 minutes. A position that does not fall over successive `status`
+calls means either a long-running claim ahead of it or a stuck controller; read `remote-runner logs
+<profile>` and the controller state to tell them apart. A parser of this line must accept all eight
+forms — bare and annotated `queued` and `running`, `idle`, `unknown`, `ok@…` and `failed(…)@…`.
+Do not poll this state from a worktree-creation hook or add
 project-local adapters for mode selection, dotenv parsing, fallback, notification, or prewarm
 policy.
 

@@ -33,6 +33,21 @@ export interface PrewarmOutcome {
 
 export type PrewarmState = "idle" | "queued" | "running" | "unknown" | PrewarmOutcome;
 
+export interface PrewarmQueuePosition {
+  /* Dispatch entries ahead of this one, in the order the controller consumes them, so every claimed
+     request counts ahead of every pending one. */
+  readonly position: number;
+  readonly depth: number;
+  /* Age since enqueue, in both states — the mtime is the arrival instant and the claim preserves it,
+     so a claimed request reports how long ago it was asked for, not how long it has been running. */
+  readonly waitedMs: number;
+}
+
+export interface PrewarmQueueStatus {
+  readonly state: PrewarmState;
+  readonly queue?: PrewarmQueuePosition;
+}
+
 function queueRoot(home: string): string {
   if (!isAbsolute(home) || resolve(home) !== home) throw new Error("home must be an absolute path");
   return join(home, ".local", "state", "remote-runner", "prewarm");
@@ -202,15 +217,38 @@ async function recordPrewarmResult(root: string, basename: string, status: numbe
   }
 }
 
+/* Numbers only — never the state, which stays `inspectQueueState`'s: `ownedEntries` accepts
+   symlinks and `entryKind` does not, so a listing-derived state would report a symlinked entry as
+   queued and let publish's own self-check coalesce onto it. */
+async function queuePosition(root: string, name: string): Promise<PrewarmQueuePosition | undefined> {
+  let entries: readonly QueueEntry[];
+  try {
+    entries = await ownedEntries(root);
+  } catch {
+    /* Read-only, and needed most when the queue is deep: an over-full one costs the numbers, never
+       the answer. */
+    return undefined;
+  }
+  const index = entries.findIndex((entry) => entry.name === name);
+  const arrived = entries[index]?.arrivedMs;
+  if (arrived === undefined) return undefined;
+  return { position: index, depth: entries.length, waitedMs: Math.max(0, Math.round(Date.now() - arrived)) };
+}
+
 export async function inspectPrewarmRequest(
   home: string,
   request: Pick<PrewarmRequest, "consumer" | "profile" | "identity">,
-): Promise<PrewarmState> {
+): Promise<PrewarmQueueStatus> {
   const root = await verifiedQueueRoot(home, false);
   const basename = requestBasename(request);
   const queued = await inspectQueueState(root, basename);
-  if (queued !== "idle") return queued;
-  return (await readPrewarmResult(root, basename)) ?? "idle";
+  if (queued === "queued" || queued === "running") {
+    const suffix = queued === "running" ? ".running" : ".json";
+    const queue = await queuePosition(root, `${basename}${suffix}`);
+    return { state: queued, ...(queue === undefined ? {} : { queue }) };
+  }
+  if (queued !== "idle") return { state: queued };
+  return { state: (await readPrewarmResult(root, basename)) ?? "idle" };
 }
 
 export async function publishPrewarmRequest(home: string, value: PrewarmRequest): Promise<"published" | "coalesced"> {
@@ -250,7 +288,12 @@ export async function publishPrewarmRequest(home: string, value: PrewarmRequest)
    `link()` makes the request visible, so two publishers interleaving between those two calls can be
    served in the opposite order, and equal timestamps fall back to the identity-hash order this sort
    exists to remove. Both are tolerable because the queue carries best-effort prewarms only. */
-async function ownedEntries(root: string): Promise<string[]> {
+interface QueueEntry {
+  readonly name: string;
+  readonly arrivedMs: number;
+}
+
+async function ownedEntries(root: string): Promise<readonly QueueEntry[]> {
   let names: string[];
   try {
     const entries = await readdir(root, { withFileTypes: true });
@@ -263,22 +306,20 @@ async function ownedEntries(root: string): Promise<string[]> {
     if (errorCode(caught) === "ENOENT") return [];
     throw caught;
   }
-  const arrivals = new Map<string, number>();
+  const entries: QueueEntry[] = [];
   for (const name of names) {
     try {
-      arrivals.set(name, (await lstat(join(root, name))).mtimeMs);
+      entries.push({ name, arrivedMs: (await lstat(join(root, name))).mtimeMs });
     } catch (caught) {
       /* A request another pass claimed between the readdir and here is a normal race, not an error. */
       if (errorCode(caught) !== "ENOENT") throw caught;
     }
   }
-  return names
-    .filter((name) => arrivals.has(name))
-    .sort((left, right) => {
-      const leftPriority = left.endsWith(".running") ? 0 : 1;
-      const rightPriority = right.endsWith(".running") ? 0 : 1;
-      return leftPriority - rightPriority || arrivals.get(left)! - arrivals.get(right)! || left.localeCompare(right);
-    });
+  return entries.sort((left, right) => {
+    const leftPriority = left.name.endsWith(".running") ? 0 : 1;
+    const rightPriority = right.name.endsWith(".running") ? 0 : 1;
+    return leftPriority - rightPriority || left.arrivedMs - right.arrivedMs || left.name.localeCompare(right.name);
+  });
 }
 
 export async function consumeNextPrewarmRequest(
@@ -286,7 +327,7 @@ export async function consumeNextPrewarmRequest(
   run: (request: PrewarmRequest) => Promise<number>,
 ): Promise<"idle" | "processed" | "discarded"> {
   const root = await verifiedQueueRoot(home, false);
-  for (const name of await ownedEntries(root)) {
+  for (const { name } of await ownedEntries(root)) {
     const claimedBasename = name.endsWith(".running")
       ? name.slice(0, -".running".length)
       : name.slice(0, -".json".length);
