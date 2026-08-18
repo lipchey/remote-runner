@@ -92,6 +92,36 @@ For allowlisted development secrets, a profile may declare `dotenv: .env`. The r
 the named keys locally, never synchronizes the file, and sends values through framed SSH input. An
 argv `provider` remains available for consumers that cannot use a dotenv file.
 
+## `run` exit codes
+
+`run` returns the workload's own exit status verbatim, with one exception: a remote workload
+exiting 255 cannot be told apart from ssh reporting a dropped connection, and is reported as 75.
+The runner's own codes are 2 for a usage, manifest or profile error, 70 when the execution runtime
+is unavailable or the run itself threw, 64 when the workload command is not a usable argument
+array, 127 when the remote could not execute it, and 75 for an infrastructure failure.
+
+**No exit code is reserved per failure reason, and 75 is deliberately not split.** The workload
+shares this code space, so a reserved code would collide with a workload that chose it — and in the
+worst direction, telling a retry shim that a workload which did run never started. A run exiting 75
+is therefore ambiguous between an infrastructure failure, a connection lost after the workload had
+already started, and a workload that exited 75 or 255 on its own. **75 alone never licenses a
+retry**; the reason is in the log, not in the status.
+
+`remote-runner logs <profile>` writes an optional `unavailableReason` on the `run-finish` and
+`run-error` records: the last reason reported during that run. Treat it as optional — it is absent
+when nothing was reported, when the remote child started and the run recovered, and on records
+written before the field existed — and keep the `runId` join to the paired `run-unavailable` record
+as the fallback path and as the only source of the operator `detail`. The value is raw as reported
+and is not restricted to the documented reason index, so accept values outside it. Presence does
+not mean failure: a run that fell back to local and succeeded still names what pushed it there.
+`run-finish` also carries `remoteChildStarted`: true once the remote child's start marker was seen.
+False is weaker than it looks — the marker rides the child's spawn event, so a failure in the
+window before it arrives can leave a remote workload alive — but it is the closest thing to a
+retry-safety signal the runner has, and the one channel a workload cannot influence.
+
+The 74-79 codes returned by the remote retention and probe snippets are internal to their callers
+and never become the CLI's exit status.
+
 ## Remote workspace placement and retention
 
 The legacy generated root remains valid. A profile may instead select a canonical absolute POSIX

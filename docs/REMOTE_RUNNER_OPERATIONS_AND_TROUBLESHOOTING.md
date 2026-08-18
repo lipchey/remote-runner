@@ -63,9 +63,18 @@ Every log record of one run carries the same `runId` and the writing `pid`, so t
 in one file stay separable — though no record says which of them the controller started, which is
 why the prewarm verdict lives on the status line and not here; `run-finish` and `run-error` add
 `durationMs`.
-A `run-unavailable` record names the stable reason the remote could not be prepared, with the
-operator detail when the failure carried one — read it before treating an exit code 75 as a single
-condition.
+`run-finish` and `run-error` name the last reason reported during the run in `unavailableReason`,
+so an exit code 75 does not have to be read as a single condition. Exit code 75 is not split per
+reason and no per-reason exit code is reserved, so the log is the only place that names it. The
+field is optional and may be absent — nothing was reported, the remote child started and the run
+recovered, or the record predates the field — and its value is raw as reported, so it may fall
+outside the index below. Its presence is not a failure verdict: a run that fell back to local and
+succeeded still names what pushed it there. `run-finish` also reports `remoteChildStarted`, true
+once the remote child's start marker was seen; false is weaker than it reads, because a failure in
+the window before that marker arrives can leave a remote workload alive, so an exit code 75 is an
+unknown outcome and never a licence to retry. A `run-unavailable` record names the same reason with the
+operator detail when the failure carried one; join it by `runId` for that detail, and for any run
+whose terminal record has no reason.
 
 ## Stable reason-code index
 

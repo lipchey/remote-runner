@@ -49,7 +49,15 @@ export interface NodeCliDependencyOptions {
   readonly processes?: NodeProcessRuntime;
   readonly now?: () => string;
   readonly createRunId?: () => string;
-  readonly executeProfile?: (profile: Profile, command: readonly string[], mode: RunMode) => Promise<number>;
+  readonly executeProfile?: (
+    profile: Profile,
+    command: readonly string[],
+    mode: RunMode,
+    hooks: {
+      readonly onUnavailable: (reason: string, detail?: string) => void;
+      readonly onRemoteChildStarted: () => void;
+    },
+  ) => Promise<number>;
 }
 
 export interface NodeCliDependencies extends CliDependencies {
@@ -413,55 +421,66 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       return { managedSsh, launcherSource };
     })());
 
-  const executeWorkload: (
+  const executeWorkload = async (
     profile: Profile,
     command: readonly string[],
     mode: RunMode,
     onUnavailable: (reason: string, detail?: string) => void,
+    onRemoteChildStarted: () => void,
     telemetry: RunTelemetry,
-  ) => Promise<{ readonly status: number; readonly provider: "remote" | "local" }> =
-    options.executeProfile !== undefined
-      ? async (profile, command, mode) => ({
-          status: await options.executeProfile!(profile, command, mode),
-          provider: "remote",
-        })
-      : async (
-          profile: Profile,
-          command: readonly string[],
-          mode: RunMode,
-          onUnavailable: (reason: string, detail?: string) => void,
-          telemetry: RunTelemetry,
-        ) => {
-          const resources = await executionResources();
-          const notifications = createNodeNotificationCallbacks({
-            statePath: join(profileRoot(home, profile, identity), "outage.json"),
-            configPath: join(home, ".claude", ".telegram-ask.conf"),
-            context: { consumer: profile.consumer, profile: profile.id, remoteLabel: profile.remote.label },
-            stderr: (line) => process.stderr.write(`${line}\n`),
-          });
-          /* Local to this call's own async activation, unlike the closure-shared variable this
-             replaces: overlapping executeProfile calls each get their own binding, so one run's
-             fallback to local can never bleed into a concurrently running remote run's record. */
-          let provider: "remote" | "local" = "remote";
-          const services = new NodeProfileServices(profile, {
-            home,
-            sourceRoot,
-            launcherSource: resources.launcherSource,
-            mutagenCommand,
-            managedSshPath: resources.managedSsh.directory,
-            knownHostsPath: resources.managedSsh.knownHostsPath,
-            processes,
-            recordFallback: notifications.recordFallback,
-            recordRemoteChildStarted: notifications.recordRemoteChildStarted,
-            onLocalExecution: () => {
-              provider = "local";
-            },
-            onUnavailable,
-            telemetry,
-          });
-          const status = await runProfile(createProfileRuntime(services, telemetry), profile, command, mode);
-          return { status, provider };
-        };
+  ): Promise<{
+    readonly status: number;
+    readonly provider: "remote" | "local";
+    readonly remoteChildStarted: boolean;
+  }> => {
+    /* Local to this call's own async activation, unlike the closure-shared variables they replace:
+       overlapping executeProfile calls each get their own binding, so one run's fallback to local
+       can never bleed into a concurrently running remote run's record. */
+    let provider: "remote" | "local" = "remote";
+    let remoteChildStarted = false;
+    const markRemoteChildStarted = (): void => {
+      remoteChildStarted = true;
+      onRemoteChildStarted();
+    };
+    const injected = options.executeProfile;
+    if (injected !== undefined) {
+      const status = await injected(profile, command, mode, {
+        onUnavailable,
+        onRemoteChildStarted: markRemoteChildStarted,
+      });
+      return { status, provider, remoteChildStarted };
+    }
+    const resources = await executionResources();
+    const notifications = createNodeNotificationCallbacks({
+      statePath: join(profileRoot(home, profile, identity), "outage.json"),
+      configPath: join(home, ".claude", ".telegram-ask.conf"),
+      context: { consumer: profile.consumer, profile: profile.id, remoteLabel: profile.remote.label },
+      stderr: (line) => process.stderr.write(`${line}\n`),
+    });
+    const services = new NodeProfileServices(profile, {
+      home,
+      sourceRoot,
+      launcherSource: resources.launcherSource,
+      mutagenCommand,
+      managedSshPath: resources.managedSsh.directory,
+      knownHostsPath: resources.managedSsh.knownHostsPath,
+      processes,
+      recordFallback: notifications.recordFallback,
+      /* Marked before the notification, whose throw the caller swallows: a run already executing
+         remotely may not report that it never started. */
+      recordRemoteChildStarted: async () => {
+        markRemoteChildStarted();
+        await notifications.recordRemoteChildStarted();
+      },
+      onLocalExecution: () => {
+        provider = "local";
+      },
+      onUnavailable,
+      telemetry,
+    });
+    const status = await runProfile(createProfileRuntime(services, telemetry), profile, command, mode);
+    return { status, provider, remoteChildStarted };
+  };
 
   const executeProfile = async (
     profile: Profile,
@@ -489,7 +508,8 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     };
     const now = options.now ?? (() => new Date().toISOString());
     /* A prewarm and a manual run interleave their records in this one file, so every record of a
-       run carries the same runId and the writer's pid; status 75 alone names four failures. */
+       run carries the same runId and the writer's pid; the operator detail stays on the paired
+       run-unavailable record, which only that runId finds. */
     const runId = (options.createRunId ?? (() => randomUUID().replaceAll("-", "").slice(0, 16)))();
     /* Monotonic: a wall clock corrected backwards mid-run would otherwise report a negative run. */
     const startedMs = performance.now();
@@ -502,6 +522,9 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     /* The unavailable callback fires mid-run: chaining it keeps its record ahead of the terminal
        one without the workload ever waiting on a diagnostic write. */
     let unavailable: Promise<void> = Promise.resolve();
+    /* The last reason reported, not a verdict on the status: emitted even when the run succeeded,
+       so a fallback that ran locally still names what pushed it there. */
+    let unavailableReason: string | undefined;
     await writeLog({
       at: now(),
       event: "run-start",
@@ -511,11 +534,12 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       mode,
     });
     try {
-      const { status, provider } = await executeWorkload(
+      const { status, provider, remoteChildStarted } = await executeWorkload(
         profile,
         command,
         mode,
         (reason, detail) => {
+          unavailableReason = reason;
           unavailable = unavailable.then(() =>
             writeLog({
               at: now(),
@@ -529,6 +553,11 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
             }),
           );
         },
+        /* Without this, a preparation that failed, retried and recovered leaves its reason for the
+           workload's own exit 75 to inherit. */
+        () => {
+          unavailableReason = undefined;
+        },
         telemetry,
       );
       await unavailable;
@@ -541,6 +570,10 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         mode,
         status,
         provider,
+        /* Not derivable from `provider`: a run that failed in preparation still reports the remote
+           provider. Only the start marker says the workload reached the remote. */
+        remoteChildStarted,
+        ...(unavailableReason === undefined ? {} : { unavailableReason }),
         durationMs: Math.round(performance.now() - startedMs),
         ...measurements(),
       });
@@ -555,6 +588,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         profile: profile.id,
         mode,
         error: caught instanceof Error ? caught.name : "UnknownError",
+        ...(unavailableReason === undefined ? {} : { unavailableReason }),
         durationMs: Math.round(performance.now() - startedMs),
         ...measurements(),
         /* Deliberately no provider field: a throw reaches here only from resource setup, before
