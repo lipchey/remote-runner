@@ -350,6 +350,7 @@ export function inspectOwnedSession(listing: Uint8Array, expected: OwnedSessionE
 }
 
 export interface AbandonedSessionSweep {
+  readonly clientId: string;
   readonly consumer: string;
   readonly profile: string;
   readonly betaTarget: string;
@@ -451,7 +452,7 @@ export class MutagenSyncLifecycle {
          whatever the name claims. Endpoint, mode and a probeable canonical alpha are checked for the
          same reason: the sweep reconstructs the expectation instead of receiving it. */
       if (
-        pathIdentity(record.alpha) !== identity ||
+        pathIdentity(record.alpha, sweep.clientId) !== identity ||
         record.beta !== betaEndpoint(sweep.betaTarget, posix.join(sweep.profileRoot, identity)) ||
         record.mode !== "one-way-replica" ||
         !isCanonicalAbsolutePath(record.alpha) ||

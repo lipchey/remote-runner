@@ -360,6 +360,72 @@ describe("runCli", () => {
     ]);
   });
 
+  it.each(["status", "doctor", "logs"])("passes the selected manifest through %s diagnostics", async (command) => {
+    const calls: unknown[] = [];
+    const dependencies: CliDependencies = {
+      readFile: async () => {
+        throw new Error("diagnostic dependencies own manifest reading");
+      },
+      statusProfile: async (profile?: string, manifestPath?: string) => {
+        calls.push([profile, manifestPath]);
+        return "status";
+      },
+      doctorProfile: async (profile?: string, manifestPath?: string) => {
+        calls.push([profile, manifestPath]);
+        return [{ profile: profile ?? "verify-full", report: { checks: [] } }];
+      },
+      logsProfile: async (profile?: string, manifestPath?: string) => {
+        calls.push([profile, manifestPath]);
+        return ["log"];
+      },
+    };
+
+    for (const arguments_ of [
+      ["verify-full", "--manifest", "operator.yaml"],
+      ["--manifest", "operator.yaml", "verify-full"],
+      ["--manifest", "operator.yaml"],
+      [],
+    ]) {
+      expect(await runCli([command, ...arguments_], collect([]), dependencies)).toBe(0);
+    }
+    expect(calls).toEqual([
+      ["verify-full", "operator.yaml"],
+      ["verify-full", "operator.yaml"],
+      [undefined, "operator.yaml"],
+      [undefined, undefined],
+    ]);
+  });
+
+  it.each(["status", "doctor", "logs"])("rejects malformed %s manifest options before diagnostics", async (command) => {
+    const calls: string[] = [];
+    const dependencies: CliDependencies = {
+      readFile: async () => validManifest,
+      statusProfile: async () => {
+        calls.push("status");
+        return "status";
+      },
+      doctorProfile: async () => {
+        calls.push("doctor");
+        return [];
+      },
+      logsProfile: async () => {
+        calls.push("logs");
+        return [];
+      },
+    };
+    for (const arguments_ of [
+      ["--manifest"],
+      ["--manifest", ""],
+      ["--manifest", "--all"],
+      ["--manifest", "first.yaml", "--manifest", "second.yaml"],
+      ["first-profile", "second-profile", "--manifest", "operator.yaml"],
+      ["--unknown", "operator.yaml"],
+    ]) {
+      expect(await runCli([command, ...arguments_], collect([]), dependencies)).toBe(2);
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("exits non-zero for doctor only on a failing check, printing the same report either way", async () => {
     const stdout: string[] = [];
     const io = { stdout: (line: string) => stdout.push(line), stderr: () => undefined };
@@ -478,6 +544,7 @@ describe("runCli", () => {
 
   it.each([
     ["a profile alongside --all", ["logs", "--all", "verify-full"]],
+    ["a manifest alongside --all", ["logs", "--all", "--manifest", "operator.yaml"]],
     ["--json without --all", ["logs", "--json"]],
     ["--since without --all", ["logs", "--since", "2026-08-17"]],
     ["--cold-threshold-ms without --all", ["logs", "--cold-threshold-ms", "3000"]],
@@ -513,7 +580,7 @@ describe("runCli", () => {
     expect(options).toEqual([]);
   });
 
-  it("keeps rejecting flags for status and doctor", async () => {
+  it("keeps rejecting unsupported flags for status and doctor", async () => {
     const stderr: string[] = [];
     const io = { stdout: () => undefined, stderr: (line: string) => stderr.push(line) };
     const dependencies: CliDependencies = {

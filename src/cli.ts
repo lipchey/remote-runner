@@ -22,9 +22,9 @@ export interface CliDependencies {
     controllerEnsureMs?: number,
   ): Promise<number>;
   enqueuePrewarm?(profile: Profile, manifestPath: string): Promise<"published" | "coalesced">;
-  statusProfile?(profile?: string): Promise<string>;
-  doctorProfile?(profile?: string): Promise<readonly DoctorProfileReport[]>;
-  logsProfile?(profile?: string): Promise<readonly string[]>;
+  statusProfile?(profile?: string, manifestPath?: string): Promise<string>;
+  doctorProfile?(profile?: string, manifestPath?: string): Promise<readonly DoctorProfileReport[]>;
+  logsProfile?(profile?: string, manifestPath?: string): Promise<readonly string[]>;
   readLogCorpus?(options: CorpusOptions): Promise<CorpusReport>;
   benchmarkProfile?(profile: Profile): Promise<unknown>;
 }
@@ -38,9 +38,9 @@ const HELP = [
   "remote-runner run <profile> [options] [-- <command...>]",
   "remote-runner prewarm <profile> [--manifest <path>]",
   "remote-runner validate [profile] [--manifest <path>]",
-  "remote-runner status [profile]",
-  "remote-runner doctor [profile]",
-  "remote-runner logs [profile]",
+  "remote-runner status [profile] [--manifest <path>]",
+  "remote-runner doctor [profile] [--manifest <path>]",
+  "remote-runner logs [profile] [--manifest <path>]",
   "remote-runner logs --all [--json] [--since <date>] [--cold-threshold-ms <n>]",
   "remote-runner benchmark <profile>",
 ].join("\n");
@@ -143,6 +143,7 @@ async function runLogsCommand(argv: readonly string[], io: CliIo, dependencies: 
   let since: string | undefined;
   let coldThresholdMs: number | undefined;
   let profileId: string | undefined;
+  let manifestPath: string | undefined;
   const seen = new Set<string>();
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index] ?? "";
@@ -167,15 +168,19 @@ async function runLogsCommand(argv: readonly string[], io: CliIo, dependencies: 
       json = true;
       continue;
     }
-    if (argument !== "--since" && argument !== "--cold-threshold-ms") {
+    if (argument !== "--since" && argument !== "--cold-threshold-ms" && argument !== "--manifest") {
       io.stderr(`unknown logs argument: ${argument}`);
       return 2;
     }
     const value = argv[index + 1];
     index += 1;
-    if (value === undefined || value.startsWith("--")) {
+    if (value === undefined || value.length === 0 || value.startsWith("--")) {
       io.stderr(`logs requires a value after ${argument}`);
       return 2;
+    }
+    if (argument === "--manifest") {
+      manifestPath = value;
+      continue;
     }
     if (argument === "--since") {
       if (!isUtcDatePrefix(value)) {
@@ -200,7 +205,11 @@ async function runLogsCommand(argv: readonly string[], io: CliIo, dependencies: 
       io.stderr("logs --json, --since and --cold-threshold-ms only apply to --all");
       return 2;
     }
-    return tailOneProfile(profileId, io, dependencies);
+    return tailOneProfile(profileId, io, dependencies, manifestPath);
+  }
+  if (manifestPath !== undefined) {
+    io.stderr("logs --all reads the global run corpus and takes no --manifest option");
+    return 2;
   }
   if (profileId !== undefined) {
     io.stderr("logs --all reads every profile and takes no profile argument");
@@ -230,13 +239,14 @@ async function tailOneProfile(
   profileId: string | undefined,
   io: CliIo,
   dependencies: CliDependencies,
+  manifestPath?: string,
 ): Promise<number> {
   if (dependencies.logsProfile === undefined) {
     io.stderr("remote-runner logs runtime is not configured");
     return 70;
   }
   try {
-    for (const line of await dependencies.logsProfile(profileId)) io.stdout(line);
+    for (const line of await dependencies.logsProfile(profileId, manifestPath)) io.stdout(line);
   } catch {
     io.stderr("remote-runner logs failed");
     return 70;
@@ -250,18 +260,35 @@ async function runReadOnlyDiagnostic(
   io: CliIo,
   dependencies: CliDependencies,
 ): Promise<number> {
-  if (argv.length > 1 || argv[0]?.startsWith("-")) {
-    io.stderr(`${command} accepts at most one profile`);
-    return 2;
+  let profile: string | undefined;
+  let manifestPath: string | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
+    if (argument === "--manifest") {
+      if (manifestPath !== undefined) {
+        io.stderr(`duplicate ${command} argument: --manifest`);
+        return 2;
+      }
+      const value = argv[++index];
+      if (value === undefined || value.length === 0 || value.startsWith("--")) {
+        io.stderr(`${command} requires a value after --manifest`);
+        return 2;
+      }
+      manifestPath = value;
+    } else if (argument.startsWith("-") || profile !== undefined) {
+      io.stderr(`${command} accepts at most one profile and --manifest <path>`);
+      return 2;
+    } else {
+      profile = argument;
+    }
   }
-  const profile = argv[0];
   try {
     if (command === "status" && dependencies.statusProfile !== undefined) {
-      io.stdout(await dependencies.statusProfile(profile));
+      io.stdout(await dependencies.statusProfile(profile, manifestPath));
       return 0;
     }
     if (command === "doctor" && dependencies.doctorProfile !== undefined) {
-      const reports = await dependencies.doctorProfile(profile);
+      const reports = await dependencies.doctorProfile(profile, manifestPath);
       /* The serialized shape stays the operator-facing contract — one report for a named profile,
          the wrapper for every profile — so only the exit code carries the new signal. */
       io.stdout(JSON.stringify(profile === undefined ? { profiles: reports } : reports[0]!.report));

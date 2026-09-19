@@ -97,6 +97,7 @@ whose terminal record has no reason.
 | `bootstrap`              | `ssh <remote> test -x <toolchain>/bin/node && test -x <toolchain>/bin/pnpm`                                      |
 | `consumer-setup`         | `ssh <remote> sh -c 'cd <workspace> && ./scripts/ds-bootstrap.sh'`                                               |
 | `validation`             | `remote-runner validate <profile>`                                                                               |
+| `account-busy`           | `ssh <remote> cat .config/remote-runner/concurrency` and `remote-runner logs <profile>`                          |
 | `lock`                   | `ls -ld <lock-root>`                                                                                             |
 | `sync`                   | `mutagen sync list <session>`                                                                                    |
 | `workspace`              | `ssh <remote> git -C <workspace> status --short --branch`                                                        |
@@ -108,7 +109,7 @@ whose terminal record has no reason.
 | `timeout`                | `ssh -o ConnectTimeout=2 <remote> true`                                                                          |
 | `unknown`                | `remote-runner status <profile>`                                                                                 |
 
-`lock`, `validation`, `consumer-setup` and `secrets` never raise an outage notification: none says the
+`lock`, `account-busy`, `validation`, `consumer-setup` and `secrets` never raise an outage notification: none says the
 remote is unreachable. `secrets` joined them on 2026-08-10 (`RRM-B9`): both halves of that RUN reason
 — reading the consumer's dotenv or provider, and encoding the frame — happen on this machine. (The
 `secrets` row in the index above belongs to the `doctor` probe, which is an ssh check for a plaintext
@@ -449,3 +450,53 @@ Create a harmless tracked-name text file containing no secret, wait for `remote-
 the session watching, and confirm its content under the generated remote workspace with
 `ssh <remote> cat <workspace>/<canary-file>`. Remove it on the laptop afterward. Never use `.env` or credentials as a
 canary, and never edit the generated remote workspace directly.
+
+## Switching client machines
+
+Each client installation creates `~/.local/state/remote-runner/client-id`, a private stable UUID.
+Do not copy it to another computer, regenerate it routinely, or put it in a repository. A corrupt
+identity is an error; restore its original contents instead of silently selecting a new workspace.
+Remote workspaces and retention live under
+`<generatedRoot>/<consumer>/<profile>/clients/<client-hash>/<worktree-hash>`.
+The worktree hash includes the client identity and canonical source path. Identical checkout paths
+on different computers are isolated, and one client's retention cannot prune another client's namespace.
+
+For the first upgrade from path-only identities, drain old runs and queued prewarms on every client.
+Keep dirty source changes on the owning computer. Inventory Mutagen sessions by exact alpha path,
+beta host and beta path; terminate only the old sessions that match those owned paths after runs finish.
+Never terminate all sessions or delete the generated root. Install the built checkout on each client,
+then run `doctor`, one forced-remote canary and one real workload. Old generated directories remain
+untouched by the new per-client retention; remove only specifically inventoried obsolete directories
+in a separate cleanup window. Rollback needs the same drain to avoid two generations syncing together.
+
+For an alternate endpoint, copy the project manifest into an ignored file **inside each source root**,
+update target, pinned host key, absolute workspace/cache paths and resource limits together, and include
+that private file in `bootstrap.fingerprint.files`. `prewarm` rejects a manifest outside the source root.
+Pass the same `--manifest .remote-runner.local.yaml` to `validate`, `run`, `prewarm`, `status`, `doctor`
+and bounded `logs`. Global `logs --all` spans all profiles/manifests and rejects `--manifest`.
+
+`--mode local` and automatic local fallback now prepare the same profile's setup/artifacts/ensure
+before collecting secrets and starting the workload. Local state and toolchain identity are separate
+from remote healthy state; setup gets the local ambient environment, not remote workload paths or
+injected workload secrets. The workload still receives its declared child environment and allowlisted
+secrets, so consumers remain responsible for platform-specific workload values.
+
+## Account workload limit
+
+On the Linux runner account, `~/.config/remote-runner/concurrency` may contain a positive decimal
+integer of at most nine digits. Missing, unreadable, zero or malformed content leaves it uncapped.
+The default is unchanged until the operator creates this file. Start conservatively with one slot
+when the same host also runs CI; this cap covers remote-runner workloads only, not setup or CI workers.
+
+Each run acquires its workspace lock first, then one account slot at
+`~/.local/state/remote-runner/slots/<number>`. The launcher inherits both locks and releases them on
+exit. Never delete slot files to free capacity: a replaced inode allows simultaneous holders.
+Capacity is read once per admission; drain running work before lowering it. Waiters poll with a
+five-minute monotonic deadline and return `reason=account-busy`, status 75, without a local fallback
+or outage alert. A waiter whose SSH parent disappeared exits before admission. Slots are not FIFO;
+`status`'s prewarm position is not a workload-slot position or ETA.
+
+The real Linux process suite is `pnpm exec vitest run tests/unit/runtime/account-admission.test.ts`.
+Its five Linux-only cases must pass before activating this new cap; macOS skips them. The 2026-09-19
+attempt to execute them on the existing runner was blocked by approval review before file transfer.
+The cap has not been activated on the operator's machine by this change.

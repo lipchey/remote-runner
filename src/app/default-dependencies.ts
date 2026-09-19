@@ -37,7 +37,7 @@ import { ensureNodeController, NodeControllerRuntime } from "../node/controller.
 import { ensureManagedSshTransport, mutagenSshEnvironment, type ManagedSshTransport } from "../node/managed-ssh.js";
 import { NodeProcessRuntime } from "../node/process.js";
 import { errorCode } from "../runtime/errno.js";
-import { worktreeIdentity } from "../runtime/identity.js";
+import { clientNamespace, resolveClientIdentity, worktreeIdentity } from "../runtime/identity.js";
 import { createJsonlLogger } from "../runtime/log.js";
 import { RunTelemetry } from "../runtime/telemetry.js";
 import { inspectPrewarmRequest, publishPrewarmRequest } from "../prewarm/queue.js";
@@ -58,6 +58,7 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 
 export interface NodeCliDependencyOptions {
   readonly home?: string;
+  readonly clientId?: string;
   readonly sourceRoot?: string;
   readonly mainModuleUrl?: string;
   readonly launcherSource?: Uint8Array;
@@ -78,7 +79,7 @@ export interface NodeCliDependencyOptions {
 
 export interface NodeCliDependencies extends CliDependencies {
   readonly identity: string;
-  loadManifest(): Promise<ManifestV1>;
+  loadManifest(manifestPath?: string): Promise<ManifestV1>;
 }
 
 export function installedMutagenPath(home: string): string {
@@ -205,6 +206,7 @@ function hostFromTarget(target: string): string {
 function remoteDiagnosticPaths(
   profile: Profile,
   identity: string,
+  clientId: string,
 ): {
   readonly generatedRoot: string;
   readonly workspace: string;
@@ -216,7 +218,7 @@ function remoteDiagnosticPaths(
       : profile.workspace.generatedRoot;
   return {
     generatedRoot,
-    workspace: posix.join(generatedRoot, profile.consumer, profile.id, identity),
+    workspace: posix.join(generatedRoot, profile.consumer, profile.id, "clients", clientNamespace(clientId), identity),
     mirror: posix.join(generatedRoot, profile.consumer, ".mirror.git"),
   };
 }
@@ -258,11 +260,12 @@ async function inspectRemoteStatus(
   profile: Profile,
   identity: string,
   knownHostsPath: string,
+  clientId: string,
 ): Promise<{
   readonly workspace: "ready" | "missing" | "dirty" | "unknown";
   readonly fingerprint: "current" | "stale" | "missing" | "unknown";
 }> {
-  const { workspace } = remoteDiagnosticPaths(profile, identity);
+  const { workspace } = remoteDiagnosticPaths(profile, identity, clientId);
   const setupState = `.local/state/remote-runner/profiles/${profile.consumer}/${profile.id}/${identity}/setup.json`;
   const script = [
     "workspace=$1",
@@ -340,6 +343,7 @@ async function inspectProbe(
   identity: string,
   options: {
     readonly home: string;
+    readonly clientId: string;
     readonly sourceRoot: string;
     readonly knownHostsPath: string;
     readonly mutagenCommand: string;
@@ -355,7 +359,7 @@ async function inspectProbe(
   let command: string;
   let args: readonly string[];
   let environment: Readonly<Record<string, string>> | undefined;
-  const remotePaths = remoteDiagnosticPaths(profile, identity);
+  const remotePaths = remoteDiagnosticPaths(profile, identity, options.clientId);
   if (probe.id === "network.dns") {
     command = "dscacheutil";
     args = ["-q", "host", "-a", "name", hostFromTarget(profile.remote.target)];
@@ -468,7 +472,8 @@ async function inspectProbe(
 export async function createNodeCliDependencies(options: NodeCliDependencyOptions = {}): Promise<NodeCliDependencies> {
   const home = options.home ?? homedir();
   const sourceRoot = await realpath(options.sourceRoot ?? process.cwd());
-  const identity = worktreeIdentity(sourceRoot);
+  const clientId = options.clientId ?? resolveClientIdentity(home);
+  const identity = worktreeIdentity(sourceRoot, clientId);
   const processes = options.processes ?? new NodeProcessRuntime();
   const mutagenCommand = installedMutagenPath(home);
   const diagnosticSsh = options.managedSsh ?? {
@@ -477,8 +482,8 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     knownHostsPath: join(home, ".local", "state", "remote-runner", "known_hosts", "managed"),
   };
 
-  const loadManifest = async (): Promise<ManifestV1> =>
-    loadManifestText(await readFile(join(sourceRoot, ".remote-runner.yaml"), "utf8"));
+  const loadManifest = async (manifestPath = ".remote-runner.yaml"): Promise<ManifestV1> =>
+    loadManifestText(await readFile(resolve(sourceRoot, manifestPath), "utf8"));
 
   let resourcesPromise:
     Promise<{ readonly managedSsh: ManagedSshTransport; readonly launcherSource: Uint8Array }> | undefined;
@@ -542,6 +547,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     });
     const services = new NodeProfileServices(profile, {
       home,
+      clientId,
       sourceRoot,
       launcherSource: resources.launcherSource,
       mutagenCommand,
@@ -710,8 +716,8 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         manifestPath: absoluteManifest,
       });
     },
-    async statusProfile(profileId) {
-      const profiles = selectedProfiles(await loadManifest(), profileId);
+    async statusProfile(profileId, manifestPath) {
+      const profiles = selectedProfiles(await loadManifest(manifestPath), profileId);
       const controllerState = await new NodeControllerRuntime(home, processes).inspect();
       const controller = !controllerState.compatible ? "incompatible" : controllerState.running ? "running" : "stopped";
       const lines: string[] = [];
@@ -724,7 +730,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
           maxOutputBytes: CAPTURE_BYTES,
         });
         const session = sessionResult.exitCode === 0 ? sessionStatus(sessionResult.stdout, expectedSession) : "unknown";
-        const remote = await inspectRemoteStatus(processes, profile, identity, diagnosticSsh.knownHostsPath);
+        const remote = await inspectRemoteStatus(processes, profile, identity, diagnosticSsh.knownHostsPath, clientId);
         const outage = await inspectOutage(join(profileRoot(home, profile, identity), "outage.json"));
         const prewarm = await inspectPrewarmRequest(home, {
           consumer: profile.consumer,
@@ -745,8 +751,8 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       }
       return lines.join("\n");
     },
-    async doctorProfile(profileId) {
-      const profiles = selectedProfiles(await loadManifest(), profileId);
+    async doctorProfile(profileId, manifestPath) {
+      const profiles = selectedProfiles(await loadManifest(manifestPath), profileId);
       const reports: DoctorProfileReport[] = [];
       for (const profile of profiles) {
         reports.push({
@@ -755,6 +761,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
             inspect: (probe) =>
               inspectProbe(probe, profile, identity, {
                 home,
+                clientId,
                 sourceRoot,
                 knownHostsPath: diagnosticSsh.knownHostsPath,
                 mutagenCommand,
@@ -766,8 +773,8 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       }
       return reports;
     },
-    async logsProfile(profileId) {
-      const profiles = selectedProfiles(await loadManifest(), profileId);
+    async logsProfile(profileId, manifestPath) {
+      const profiles = selectedProfiles(await loadManifest(manifestPath), profileId);
       const lines: string[] = [];
       for (const profile of profiles) {
         const logPath = join(profileRoot(home, profile, identity), "runner.log");

@@ -36,6 +36,8 @@ async function fixture(manifest = validManifest) {
   const knownHostsPath = join(home, ".local", "state", "remote-runner", "known_hosts", "managed");
   await mkdir(sourceRoot, { recursive: true });
   await writeFile(join(sourceRoot, ".remote-runner.yaml"), manifest);
+  await writeFile(join(sourceRoot, "package.json"), JSON.stringify({ packageManager: "pnpm@11.9.0" }));
+  await writeFile(join(sourceRoot, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
   return { root, sourceRoot, home, managedSshPath, knownHostsPath };
 }
 
@@ -94,6 +96,7 @@ interface WorkloadHooks {
 async function withInjectedWorkload(workload: (hooks: WorkloadHooks) => Promise<number>) {
   const paths = await fixture();
   const dependencies = await createNodeCliDependencies({
+    clientId: "test-client",
     ...paths,
     launcherSource: new Uint8Array([1]),
     managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -152,6 +155,7 @@ describe("concrete Node CLI dependencies", () => {
     const paths = await fixture();
     const processes = new FakeProcesses();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: {
@@ -178,6 +182,7 @@ describe("concrete Node CLI dependencies", () => {
     const paths = await fixture();
     const processes = new FakeProcesses();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -212,6 +217,7 @@ describe("concrete Node CLI dependencies", () => {
   it("reports the last prewarm's terminal outcome on the status line", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -236,6 +242,7 @@ describe("concrete Node CLI dependencies", () => {
       return result("", 1);
     };
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -253,6 +260,7 @@ describe("concrete Node CLI dependencies", () => {
     const processes = new FakeProcesses();
     processes.registrationExitCode = 74;
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -292,7 +300,7 @@ describe("concrete Node CLI dependencies", () => {
     const generatedRoot = "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces";
     const paths = await fixture(validManifest.replace('"~/.cache/remote-runner/workspaces"', `"${generatedRoot}"`));
     const sourceRoot = await realpath(paths.sourceRoot);
-    const identity = worktreeIdentity(sourceRoot);
+    const identity = worktreeIdentity(sourceRoot, "test-client");
     const processes = new FakeProcesses();
     processes.sessionListing = JSON.stringify([
       {
@@ -303,7 +311,7 @@ describe("concrete Node CLI dependencies", () => {
           protocol: "ssh",
           user: "admin",
           host: "pop-os",
-          path: `${generatedRoot}/ariadne/verify-full/${identity}`,
+          path: `${generatedRoot}/ariadne/verify-full/clients/d5fe82513196ca977d816609/${identity}`,
         },
         mode: "one-way-replica",
         ignore: { paths: MANIFEST_COMPILED_IGNORES },
@@ -315,6 +323,7 @@ describe("concrete Node CLI dependencies", () => {
       },
     ]);
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -340,6 +349,7 @@ describe("concrete Node CLI dependencies", () => {
     const processes = new FakeProcesses();
     processes.secretsProbeExitCode = secretsProbeExitCode;
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -372,6 +382,7 @@ describe("concrete Node CLI dependencies", () => {
     processes.secretsProbeExitCode = 79;
     processes.workspaceProbeExitCode = 79;
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -407,6 +418,7 @@ describe("concrete Node CLI dependencies", () => {
     const paths = await fixture();
     const processes = new FakeProcesses();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -426,7 +438,17 @@ describe("concrete Node CLI dependencies", () => {
     const exitCode = (command: string, home: string): number | null =>
       spawnSync("/bin/sh", ["-c", command], { env: { HOME: home, PATH: process.env.PATH ?? "" } }).status;
     const workspacePath = (home: string): string =>
-      join(home, ".cache", "remote-runner", "workspaces", "ariadne", "verify-full", dependencies.identity);
+      join(
+        home,
+        ".cache",
+        "remote-runner",
+        "workspaces",
+        "ariadne",
+        "verify-full",
+        "clients",
+        "d5fe82513196ca977d816609",
+        dependencies.identity,
+      );
     const probeHome = async (): Promise<string> => {
       const root = await mkdtemp(join(tmpdir(), "remote-runner-probe-home-"));
       temporaryRoots.push(root);
@@ -455,6 +477,7 @@ describe("concrete Node CLI dependencies", () => {
     const paths = await fixture();
     const executions: Array<{ mode: string; command: readonly string[] }> = [];
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -487,6 +510,7 @@ describe("concrete Node CLI dependencies", () => {
   it("reads every identity under the state root, rotations included", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -514,6 +538,7 @@ describe("concrete Node CLI dependencies", () => {
   it("reports an unreadable state root instead of an empty corpus", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -543,6 +568,7 @@ describe("concrete Node CLI dependencies", () => {
       formatInstallReceipt({ schemaVersion: 1, version: "9.9.9", appIdentity: "f71f95d0a1b2c3d4e5f60718" }),
     );
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -562,6 +588,7 @@ describe("concrete Node CLI dependencies", () => {
   it("skips a log replaced by a FIFO instead of blocking on it", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -593,6 +620,7 @@ describe("concrete Node CLI dependencies", () => {
   it("refuses to follow a symlink standing in for a log", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -625,6 +653,7 @@ describe("concrete Node CLI dependencies", () => {
   it("loses only the truncated record when a log ends mid-multibyte character", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -662,6 +691,7 @@ describe("concrete Node CLI dependencies", () => {
   it("degrades the runner version to unknown rather than losing the corpus", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -678,6 +708,7 @@ describe("concrete Node CLI dependencies", () => {
   it("writes bounded diagnostic lifecycle records for real profile dispatch", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -700,6 +731,7 @@ describe("concrete Node CLI dependencies", () => {
   it("correlates one run's records with a run id, the writer pid, and a measured duration", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -728,6 +760,7 @@ describe("concrete Node CLI dependencies", () => {
   it("stamps a failed run's error record with the same correlation fields and its duration", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -761,6 +794,7 @@ describe("concrete Node CLI dependencies", () => {
       mode: 0o600,
     });
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -906,6 +940,7 @@ describe("concrete Node CLI dependencies", () => {
       }
     }
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -928,6 +963,7 @@ describe("concrete Node CLI dependencies", () => {
   it("marks a genuinely local run-finish record with provider local", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -972,6 +1008,7 @@ describe("concrete Node CLI dependencies", () => {
         }
       }
       const dependencies = await createNodeCliDependencies({
+        clientId: "test-client",
         ...paths,
         launcherSource: new Uint8Array([1]),
         managedSsh: { changed: true, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -1015,6 +1052,7 @@ describe("concrete Node CLI dependencies", () => {
       }
     }
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -1043,6 +1081,7 @@ describe("concrete Node CLI dependencies", () => {
     const outside = join(paths.root, "outside");
     await mkdir(outside);
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -1071,6 +1110,7 @@ describe("concrete Node CLI dependencies", () => {
       mode: 0o600,
     });
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -1098,6 +1138,7 @@ describe("concrete Node CLI dependencies", () => {
   it("carries the controller measurement and empty spans on a run that never reached the remote", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -1122,6 +1163,7 @@ describe("concrete Node CLI dependencies", () => {
   it("keeps reading a runner log written before the phase fields existed", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
       ...paths,
       launcherSource: new Uint8Array([1]),
       managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
@@ -1163,3 +1205,20 @@ describe("concrete Node CLI dependencies", () => {
     expect(records.at(-1)!.controllerEnsureMs).toBeUndefined();
   });
 });
+
+it.each(["statusProfile", "doctorProfile", "logsProfile"] as const)(
+  "%s reads the selected private manifest",
+  async (method) => {
+    const paths = await fixture();
+    await writeFile(
+      join(paths.sourceRoot, ".remote-runner.local.yaml"),
+      validManifest.replaceAll("verify-full", "alternate"),
+    );
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      processes: new FakeProcesses(),
+    });
+    await expect(dependencies[method]!("alternate", ".remote-runner.local.yaml")).resolves.toBeDefined();
+  },
+);

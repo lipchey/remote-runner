@@ -100,17 +100,9 @@ export function createProfileRuntime(services: ProfileExecutionServices, telemet
           report(services, "unknown");
           throw caught;
         }
-        /* The controller threw before any child started — an internal invariant (remote paths or a
-           toolchain root missing before their step ran), an invalid remote argument, a synchronous
-           spawn failure. Identical outcome to the not-started result the same call returns without
-           throwing, so it takes the same path instead of reaching runProfile's catch, which exits
-           75 having established no reason at all. One reason for all of them: unlike the returning
-           half, a throw carries no reason of its own, and inventing one per throw site would be a
-           guess. Known ceiling: the marker arrives on the remote child's spawn event, so a throw in
-           the window between that spawn and the marker reaching us falls back locally against a
-           workload that is already alive — the same window the shipped non-throwing `!markerSeen`
-           path already falls back through. */
-        result = { kind: "not-started", reason: "child-start" };
+        /* No marker does not prove the remote never started: transport or a local output writer
+           can fail while the server is admitting/starting the child. Fail closed to avoid duplicates. */
+        result = { kind: "not-started", reason: "connection-lost" };
       }
       if (result.kind === "not-started" && result.reason !== WORKLOAD_COMMAND_REASON) {
         /* The reason belongs to the site that knows what failed; only the closed-set mapping is

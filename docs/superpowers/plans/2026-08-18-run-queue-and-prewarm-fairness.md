@@ -406,6 +406,14 @@ carries the accepted ones.
 
 ### Task 4: Cap concurrent workloads per host
 
+2026-09-19 source update (`codex/machine-switching-isolation`): account-scoped slot admission is
+implemented after the workspace lock, with inherited descriptor 8, a five-minute monotonic deadline,
+`account-busy` classification and no local fallback. Unit/contract checks run on macOS; the five real
+Linux process checks remain an explicit acceptance gate because approval review rejected the test
+payload transfer before execution. Task 4 is **not accepted or activated**. FIFO/slot queue position
+and ETA are not implemented; the prewarm queue remains a distinct mechanism. The next action is the
+Linux suite documented in the operations runbook, followed by an operator-owned cap activation.
+
 **Read before starting:** this task has no failure in the corpus attributed to
 it. It targets the degradation data in the issue body (cheap gates degrading
 monotonically with overlap; `io some=73.1s` PSI), not the exit-75 cluster, which
