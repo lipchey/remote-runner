@@ -120,9 +120,10 @@ function liveV018PausedSession(): string {
 const PROFILE_ROOT = "/srv/remote-runner/workspaces/ariadne";
 const LIVE_ALPHA = "/Users/dev/live-worktree";
 const GONE_ALPHA = "/Users/dev/deleted-worktree";
-const GONE_IDENTITY = pathIdentity(GONE_ALPHA);
+const GONE_IDENTITY = pathIdentity(GONE_ALPHA, "test-client");
 
 const sweep = {
+  clientId: "test-client",
   consumer: "ariadne",
   profile: "verify-full",
   betaTarget: "runner@example.test",
@@ -135,7 +136,7 @@ function abandonable(
   alpha: string,
   patch: Partial<{ identity: string; name: string; beta: string; mode: string }> = {},
 ): Record<string, unknown> {
-  const identity = patch.identity ?? pathIdentity(alpha);
+  const identity = patch.identity ?? pathIdentity(alpha, "test-client");
   return {
     identifier: `sync_${identity}`,
     name: patch.name ?? `remote-runner-ariadne-verify-full-${identity}`,
@@ -298,7 +299,7 @@ describe("Mutagen one-way lifecycle", () => {
     expect(processes.requests.map(({ args }) => args.at(-1))).toEqual([
       "{{ json . }}",
       `sync_${GONE_IDENTITY}`,
-      `sync_${pathIdentity(second)}`,
+      `sync_${pathIdentity(second, "test-client")}`,
     ]);
   });
 
@@ -308,7 +309,7 @@ describe("Mutagen one-way lifecycle", () => {
     ["a name without an identity", [abandonable(GONE_ALPHA, { name: "remote-runner-ariadne-verify-full-manual" })]],
     [
       "an alpha that did not derive the identity",
-      [abandonable(GONE_ALPHA, { identity: pathIdentity("/Users/dev/other") })],
+      [abandonable(GONE_ALPHA, { identity: pathIdentity("/Users/dev/other", "test-client") })],
     ],
     [
       "a workspace this profile never derives",

@@ -140,6 +140,12 @@ workspace:
 ```
 
 Capacity is probed on the filesystem containing `generatedRoot`, not on the remote home filesystem.
+Each client has a stable private `~/.local/state/remote-runner/client-id`; workspace identities include
+that UUID and the canonical checkout path. Workspaces and retention are isolated below
+`<generatedRoot>/<consumer>/<profile>/clients/<client-hash>`. Do not clone this identity across computers;
+read the [machine-switching migration](docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md#switching-client-machines)
+before upgrading a path-only installation.
+
 Retention reserves the current identity, keeps the newest identities up to `keep`, and protects any
 additional identity active within `graceMinutes`. Active workloads hold a profile identity lock;
 cleanup takes the same lock non-blockingly, quarantines one exact stale directory, terminates only
@@ -170,7 +176,7 @@ bootstrap:
     patterns: ["**/package.json", "**/pyproject.toml", "**/uv.lock"]
 ```
 
-Every remote preparation checks each declared repository-relative artifact and then runs each
+Every remote or local preparation checks each declared repository-relative artifact and then runs each
 fixed-argv `ensure` command. A missing artifact or failed ensure triggers the full setup once. All
 artifacts are checked again before every ensure command is retried; a persistently missing artifact,
 artifact inspection error, or second ensure failure is fail-closed and no new healthy state is
@@ -184,3 +190,7 @@ fingerprint arrays remain accepted as exact-file lists.
 
 - [Remote runner operations and troubleshooting](docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md)
 - Implementation plan: `docs/superpowers/plans/2026-07-31-remote-runner-implementation.md`
+
+`status`, `doctor` and bounded `logs` accept the same `--manifest <path>` as `run` and `prewarm`.
+For the opt-in account workload cap, migration steps and Linux acceptance requirement, see the
+[operations runbook](docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md#account-workload-limit).

@@ -260,3 +260,15 @@ describe("run profile selection", () => {
     expect(runtime.calls.filter((call) => call === "prepare")).toHaveLength(1);
   });
 });
+
+it.each(["account-busy", "connection-lost"])(
+  "never falls back after an ambiguous or capacity-limited remote start: %s",
+  async (reason) => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [prepared(runtime)];
+    runtime.remoteKind = "not-started";
+    runtime.notStartedReason = reason;
+    expect(await runProfile(runtime, { mode: "auto", fallback: "local" }, ["test"])).toBe(75);
+    expect(runtime.calls.some((call) => call.startsWith("local:"))).toBe(false);
+  },
+);

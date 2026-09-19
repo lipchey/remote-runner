@@ -112,11 +112,17 @@ failures without putting raw output into notifications.
 
 ### 6.3 Git-backed remote workspaces
 
-Each local Git worktree maps to an opaque identity derived from its canonical root. Branch names
+Each local Git worktree maps to an opaque identity derived from the client installation UUID and
+its canonical root. The UUID is persisted outside the checkout at
+`~/.local/state/remote-runner/client-id` and must not be copied between clients. Branch names
 are labels, never path input. The workstation stores a private bare mirror per consumer and
 generated worktrees below:
 
-`~/.cache/remote-runner/workspaces/<consumer>/<identity>/`
+`<generatedRoot>/<consumer>/<profile>/clients/<client-hash>/<identity>/`
+
+Retention is confined to that client namespace. Upgrading a path-only installation requires draining
+old dispatches and terminating only inventoried owned legacy sync sessions; old remote directories
+are preserved. The operations runbook owns this migration.
 
 Before synchronization, the system pauses the session, pushes local `HEAD` to a private workstation
 ref over SSH, resets only the confined generated worktree, and initializes required submodules.
@@ -163,6 +169,12 @@ fingerprint, missing artifact, or failed ensure runs the full setup once; after 
 must exist before every ensure command is retried and the healthy fingerprint is persisted.
 Artifact inspection errors, persistently missing artifacts, and persistent ensure failures are
 fail-closed. Manifests that omit artifacts retain the empty-list behavior.
+
+Local execution applies the same setup/artifacts/ensure convergence in the authoritative local
+checkout before workload execution, under its local workspace lock. Its healthy state and toolchain
+identity are separate from remote state; it uses the existing local toolchain and does not install
+remote Node/uv binaries. Setup receives ambient local environment plus local provider markers,
+while allowlisted secrets and manifest workload environment are applied only to the workload.
 
 ### 6.6 Ephemeral environment
 

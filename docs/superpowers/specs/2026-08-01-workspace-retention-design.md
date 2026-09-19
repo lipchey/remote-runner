@@ -3,7 +3,7 @@
 ## Context
 
 `remote-runner` creates one generated workspace for every local worktree identity under
-`<generatedRoot>/<consumer>/<profile>/<identity>`. The current schema accepts only
+`<generatedRoot>/<consumer>/<profile>/clients/<client-hash>/<identity>`. The current schema accepts only
 `~/.cache/remote-runner/workspaces`, the runtime checks capacity on the remote home filesystem,
 and completed identities are never retired. Ariadne accumulated 18 identity directories and
 approximately 7 GiB of physical workspace data in one day, eventually falling below its 10 GiB
@@ -70,10 +70,15 @@ The capacity probe calls `df` on the resolved generated root. Therefore moving w
 DataAI makes the profile's `minimumFreeBytes` protect DataAI rather than the unrelated `/home`
 partition. Toolchain and setup-state paths remain rooted under the remote home.
 
+Since 2026-09-19 the `profileRoot` used by collection is the client namespace above. The client hash
+comes from the installation UUID and the worktree hash includes that UUID and the canonical path.
+This confines one client's pruning and Mutagen ownership proof to its own generated workspaces.
+Legacy directories outside the namespace are deliberately preserved for an inventoried migration.
+
 ## Activity protection
 
 Every identity owns a lock file below
-`<generatedRoot>/<consumer>/<profile>/.locks/<identity>.lock`. The remote child shell acquires an
+`<generatedRoot>/<consumer>/<profile>/clients/<client-hash>/.locks/<identity>.lock`. The remote child shell acquires an
 exclusive `flock` before changing into the workspace and holds the file descriptor until the
 launcher and workload exit. A collector may quarantine an identity only after acquiring the same
 lock non-blockingly.

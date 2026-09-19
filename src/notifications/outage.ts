@@ -46,6 +46,7 @@ export const NOTIFICATION_REASONS = new Set([
   "consumer-setup",
   "validation",
   "lock",
+  "account-busy",
   "sync",
   "workspace",
   "secrets",
@@ -73,7 +74,7 @@ export function stableReason(value: string): string {
    failure is their own dotenv or provider — collected on this machine, and encoded here too, so
    neither half of it ever touches the remote — none of them says the remote is down, so none may
    raise an outage. */
-const LOCAL_REASONS = new Set(["lock", "validation", "consumer-setup", "secrets"]);
+const LOCAL_REASONS = new Set(["lock", "account-busy", "validation", "consumer-setup", "secrets"]);
 
 export function isOutageReason(value: string): boolean {
   return NOTIFICATION_REASONS.has(value) && !LOCAL_REASONS.has(value);

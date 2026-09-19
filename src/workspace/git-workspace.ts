@@ -1,6 +1,6 @@
 import { isAbsolute, posix } from "node:path";
 
-import { worktreeIdentity } from "../runtime/identity.js";
+import { clientNamespace, worktreeIdentity } from "../runtime/identity.js";
 import {
   encodePosixCommand,
   runSsh,
@@ -163,6 +163,7 @@ git submodule foreach --recursive 'git reset --hard HEAD -- && git clean -ffd --
 export type PrivateRef = `refs/remote-runner/${string}/${string}/${string}`;
 
 export interface GitWorkspaceOptions {
+  readonly clientId: string;
   readonly consumer: string;
   readonly profile: string;
   readonly sourceRoot: string;
@@ -286,12 +287,19 @@ export async function reconcileWorkspace(
     options.connectTimeoutSeconds,
     options.knownHostsPath,
   ).slice(0, -2);
-  const identity = worktreeIdentity(options.sourceRoot);
+  const identity = worktreeIdentity(options.sourceRoot, options.clientId);
   if (!/^[0-9a-f]{24}$/u.test(identity)) {
     throw new Error("workspace identity must be 24 lowercase hex digits");
   }
   const privateRef = `refs/remote-runner/${options.consumer}/${options.profile}/${identity}` as PrivateRef;
-  const candidateInput = posix.join(options.generatedRoot, options.consumer, options.profile, identity);
+  const candidateInput = posix.join(
+    options.generatedRoot,
+    options.consumer,
+    options.profile,
+    "clients",
+    clientNamespace(options.clientId),
+    identity,
+  );
   const mirrorInput = posix.join(options.generatedRoot, options.consumer, ".mirror.git");
   const lockInput = posix.join(options.generatedRoot, ".locks", `${options.consumer}.lock`);
 
@@ -355,7 +363,10 @@ export async function reconcileWorkspace(
   );
   assertConfinedWorkspace(prepared.root, prepared.candidate);
   assertConfinedWorkspace(prepared.root, prepared.mirror);
-  if (prepared.candidate !== posix.join(prepared.root, options.consumer, options.profile, identity)) {
+  if (
+    prepared.candidate !==
+    posix.join(prepared.root, options.consumer, options.profile, "clients", clientNamespace(options.clientId), identity)
+  ) {
     throw new Error("prepare workspace returned an unexpected canonical workspace");
   }
   if (prepared.mirror !== posix.join(prepared.root, options.consumer, ".mirror.git")) {

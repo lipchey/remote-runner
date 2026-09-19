@@ -177,13 +177,13 @@ describe("profile runtime composition", () => {
 
   /* The throwing half of the same outcome. Before this it returned 75 having established no reason
      at all, so nothing reached stderr, the runner log or the outage channel. */
-  it("announces an unavailable remote before falling back when the controller throws pre-marker", async () => {
+  it("fails closed on an ambiguous remote outcome when the controller throws pre-marker", async () => {
     const services = new FakeServices();
     services.throwAt = "before-marker";
 
     const code = await runProfile(createProfileRuntime(services), profile, ["./verify"]);
 
-    expect(code).toBe(17);
+    expect(code).toBe(INFRASTRUCTURE_EXIT_CODE);
     expect(services.calls).toEqual([
       "validate",
       "lock",
@@ -195,10 +195,9 @@ describe("profile runtime composition", () => {
       "bootstrap",
       "secrets",
       "remote",
-      "unavailable:child-start",
+      "unavailable:connection-lost",
       "release",
-      "fallback:child-start",
-      "local",
+      "outage:connection-lost",
     ]);
   });
 
@@ -209,8 +208,8 @@ describe("profile runtime composition", () => {
     const code = await runProfile(createProfileRuntime(services), { mode: "auto", fallback: "fail" }, ["./verify"]);
 
     expect(code).toBe(INFRASTRUCTURE_EXIT_CODE);
-    expect(services.calls).toContain("unavailable:child-start");
-    expect(services.calls).toContain("outage:child-start");
+    expect(services.calls).toContain("unavailable:connection-lost");
+    expect(services.calls).toContain("outage:connection-lost");
     expect(services.calls).not.toContain("local");
   });
 

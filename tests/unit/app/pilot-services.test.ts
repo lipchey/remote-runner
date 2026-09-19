@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,10 +58,67 @@ const answeringProvider = [
   `process.stdout.write(JSON.stringify({ NEON_DEV_DATABASE_URL: ${JSON.stringify(LOCAL_SECRET)} }))`,
 ];
 function withSecretProvider(source: Profile, provider: string[] = answeringProvider): Profile {
-  return { ...source, secrets: { ...source.secrets, provider } };
+  return {
+    ...source,
+    bootstrap: { ...source.bootstrap, setup: [], artifacts: [], ensure: [] },
+    secrets: { ...source.secrets, provider },
+  };
 }
 
 describe("pilot service boundaries", () => {
+  it.each([0, 7])(
+    "prepares local dependencies before announcing or starting work (setup exit %s)",
+    async (setupExit) => {
+      const root = await mkdtemp(join(tmpdir(), "local-service-"));
+      try {
+        execFileSync("git", ["init", "--quiet", root]);
+        await writeFile(join(root, "package.json"), JSON.stringify({ packageManager: "pnpm@11.9.0" }));
+        await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+        await writeFile(join(root, "setup.sh"), `#!/bin/sh\nprintf ready > artifact\nexit ${setupExit}\n`, {
+          mode: 0o700,
+        });
+        const configured = withSecretProvider(profile);
+        const calls: string[] = [];
+        const services = new NodeProfileServices(
+          {
+            ...configured,
+            bootstrap: {
+              ...configured.bootstrap,
+              setup: ["./setup.sh"],
+              artifacts: ["artifact"],
+              ensure: [[process.execPath, "-e", "require('node:fs').appendFileSync('ensured', 'yes')"]],
+            },
+          },
+          {
+            clientId: "test-client",
+            home: join(root, "home"),
+            sourceRoot: root,
+            launcherSource: new Uint8Array(),
+            onLocalExecution: () => calls.push("local"),
+            onUnavailable: (reason) => calls.push(reason),
+            stdout: () => calls.push("workload"),
+            stderr: () => undefined,
+          },
+        );
+        const run = () =>
+          services.runLocal([
+            process.execPath,
+            "-e",
+            "process.stdout.write(require('node:fs').readFileSync('ensured'))",
+          ]);
+        if (setupExit === 0) {
+          expect(await run()).toBe(0);
+          expect(await run()).toBe(0);
+          expect(calls).toEqual(["local", "workload", "local", "workload"]);
+        } else {
+          await expect(run()).rejects.toThrow();
+          expect(calls).toEqual(["consumer-setup"]);
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
   it("applies the manifest child environment to a local workload", async () => {
     const chunks: Uint8Array[] = [];
     const services = new NodeProfileServices(
@@ -75,6 +133,7 @@ describe("pilot service boundaries", () => {
         },
       }),
       {
+        clientId: "test-client",
         home: "/tmp/remote-runner-test-home",
         sourceRoot: process.cwd(),
         launcherSource: new Uint8Array(),
@@ -96,6 +155,7 @@ describe("pilot service boundaries", () => {
   it("carries the allowlisted secrets into the local child, as the remote launcher does", async () => {
     const chunks: Uint8Array[] = [];
     const services = new NodeProfileServices(withSecretProvider(profile), {
+      clientId: "test-client",
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),
@@ -124,6 +184,7 @@ describe("pilot service boundaries", () => {
         'process.stdout.write(JSON.stringify({ NEON_DEV_DATABASE_URL: "collected-again" }))',
       ]),
       {
+        clientId: "test-client",
         home: "/tmp/remote-runner-test-home",
         sourceRoot: process.cwd(),
         launcherSource: new Uint8Array(),
@@ -151,6 +212,7 @@ describe("pilot service boundaries", () => {
     const services = new NodeProfileServices(
       { ...overriding, secrets: { ...overriding.secrets, allow: ["REMOTE_RUNNER_PROVIDER"] } },
       {
+        clientId: "test-client",
         home: "/tmp/remote-runner-test-home",
         sourceRoot: process.cwd(),
         launcherSource: new Uint8Array(),
@@ -174,6 +236,7 @@ describe("pilot service boundaries", () => {
     const observed: string[] = [];
     let markedLocal = false;
     const services = new NodeProfileServices(withSecretProvider(profile, [process.execPath, "-e", "process.exit(3)"]), {
+      clientId: "test-client",
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),
@@ -200,6 +263,7 @@ describe("pilot service boundaries", () => {
   it("notifies onLocalExecution before running a local workload", async () => {
     let notified = false;
     const services = new NodeProfileServices(withSecretProvider(profile), {
+      clientId: "test-client",
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),
@@ -219,6 +283,7 @@ describe("pilot service boundaries", () => {
     const lines: string[] = [];
     let recorded: string | undefined;
     const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),
@@ -238,6 +303,7 @@ describe("pilot service boundaries", () => {
     const lines: string[] = [];
     const observed: (readonly [string, string | undefined])[] = [];
     const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),
@@ -259,6 +325,7 @@ describe("pilot service boundaries", () => {
     const lines: string[] = [];
     let recorded: string | undefined;
     const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),
@@ -275,28 +342,28 @@ describe("pilot service boundaries", () => {
   });
 
   it("resolves every generated target below the canonical remote home", () => {
-    const paths = resolveRemotePaths("/home/admin", profile, "0123456789abcdef01234567");
+    const paths = resolveRemotePaths("/home/admin", profile, "0123456789abcdef01234567", "test-client");
 
     expect(paths.generatedRoot).toBe("/home/admin/.cache/remote-runner/workspaces");
     expect(paths.workspace).toBe(
-      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/clients/d5fe82513196ca977d816609/0123456789abcdef01234567",
     );
     expect(paths.workloadLock).toBe(
-      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/.locks/0123456789abcdef01234567",
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/clients/d5fe82513196ca977d816609/.locks/0123456789abcdef01234567",
     );
     expect(paths.activityMarker).toBe(
-      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/.activity/0123456789abcdef01234567",
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/clients/d5fe82513196ca977d816609/.activity/0123456789abcdef01234567",
     );
     expect(Object.values(paths).every((path) => path.startsWith("/home/admin/"))).toBe(true);
-    expect(() => resolveRemotePaths("/", profile, "0123456789abcdef01234567")).toThrow();
+    expect(() => resolveRemotePaths("/", profile, "0123456789abcdef01234567", "test-client")).toThrow();
   });
 
   it("preserves a canonical absolute generated root outside the remote home", () => {
-    const paths = resolveRemotePaths("/home/admin", dataAiProfile, "0123456789abcdef01234567");
+    const paths = resolveRemotePaths("/home/admin", dataAiProfile, "0123456789abcdef01234567", "test-client");
 
     expect(paths.generatedRoot).toBe("/mnt/DataAI/home/admin/.cache/remote-runner/workspaces");
     expect(paths.workspace).toBe(
-      "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+      "/mnt/DataAI/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/clients/d5fe82513196ca977d816609/0123456789abcdef01234567",
     );
     expect(paths.toolchainRoot).toBe("/home/admin/.local/share/remote-runner/toolchains");
   });
@@ -333,6 +400,7 @@ describe("pilot service boundaries", () => {
       },
     } as NodeProcessRuntime;
     const services = new NodeProfileServices(dataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       knownHostsPath: "/Users/admin/.local/state/remote-runner/known_hosts/managed",
@@ -348,7 +416,7 @@ describe("pilot service boundaries", () => {
   });
 
   it("touches the external activity marker before Mutagen reconciliation begins", async () => {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     const requests: BoundedProcessRequest[] = [];
     const processes = {
       async run(request: BoundedProcessRequest) {
@@ -366,12 +434,15 @@ describe("pilot service boundaries", () => {
       },
     } as NodeProcessRuntime;
     const services = new NodeProfileServices(retainedDataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
       processes,
     });
-    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current) });
+    Object.assign(services, {
+      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current, "test-client"),
+    });
 
     await services.touchActivity();
     await services.pauseSync();
@@ -394,7 +465,7 @@ describe("pilot service boundaries", () => {
   });
 
   function servicesWithExitCode(exitCode: number): NodeProfileServices {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     const processes = {
       async run() {
         return {
@@ -410,12 +481,15 @@ describe("pilot service boundaries", () => {
       },
     } as NodeProcessRuntime;
     const services = new NodeProfileServices(retainedDataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
       processes,
     });
-    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current) });
+    Object.assign(services, {
+      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current, "test-client"),
+    });
     return services;
   }
 
@@ -436,7 +510,7 @@ describe("pilot service boundaries", () => {
   it("tells the operator that another run of the workspace is still finishing", async () => {
     vi.useFakeTimers();
     try {
-      const current = worktreeIdentity(process.cwd());
+      const current = worktreeIdentity(process.cwd(), "test-client");
       const written: string[] = [];
       let release!: () => void;
       const busy = new Promise<void>((resolve) => {
@@ -458,13 +532,16 @@ describe("pilot service boundaries", () => {
         },
       } as NodeProcessRuntime;
       const services = new NodeProfileServices(retainedDataAiProfile, {
+        clientId: "test-client",
         home: "/Users/admin",
         sourceRoot: process.cwd(),
         launcherSource: new Uint8Array([1]),
         processes,
         stderr: (chunk) => written.push(new TextDecoder().decode(chunk)),
       });
-      Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current) });
+      Object.assign(services, {
+        remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current, "test-client"),
+      });
 
       const pending = services.touchActivity();
       await vi.advanceTimersByTimeAsync(LOCK_WAIT_NOTICE_MS);
@@ -480,7 +557,7 @@ describe("pilot service boundaries", () => {
   });
 
   it("gives dependency setup a capture bound that a package install fits into", async () => {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     const requests: BoundedProcessRequest[] = [];
     const processes = {
       async run(request: BoundedProcessRequest) {
@@ -499,12 +576,13 @@ describe("pilot service boundaries", () => {
       },
     } as NodeProcessRuntime;
     const services = new NodeProfileServices(ensureProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
       processes,
     });
-    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
+    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current, "test-client") });
 
     await services.bootstrap();
 
@@ -522,7 +600,7 @@ describe("pilot service boundaries", () => {
   it.each([3, 124])(
     "classifies a consumer setup script that exits %i away from a remote outage",
     async (setupExitCode) => {
-      const current = worktreeIdentity(process.cwd());
+      const current = worktreeIdentity(process.cwd(), "test-client");
       const outages: string[] = [];
       const processes = {
         async run(request: BoundedProcessRequest) {
@@ -540,6 +618,7 @@ describe("pilot service boundaries", () => {
         },
       } as NodeProcessRuntime;
       const services = new NodeProfileServices(ensureProfile, {
+        clientId: "test-client",
         home: "/Users/admin",
         sourceRoot: process.cwd(),
         launcherSource: new Uint8Array([1]),
@@ -548,7 +627,9 @@ describe("pilot service boundaries", () => {
           outages.push(reason);
         },
       });
-      Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
+      Object.assign(services, {
+        remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current, "test-client"),
+      });
 
       await expect(services.bootstrap()).rejects.toMatchObject({
         name: "PreparationError",
@@ -566,7 +647,7 @@ describe("pilot service boundaries", () => {
   it.each([126, 127])(
     "keeps a setup script the remote shell would not exec (exit %i) a bootstrap failure",
     async (setupExitCode) => {
-      const current = worktreeIdentity(process.cwd());
+      const current = worktreeIdentity(process.cwd(), "test-client");
       const processes = {
         async run(request: BoundedProcessRequest) {
           const argv = JSON.stringify(request.args);
@@ -583,12 +664,15 @@ describe("pilot service boundaries", () => {
         },
       } as NodeProcessRuntime;
       const services = new NodeProfileServices(ensureProfile, {
+        clientId: "test-client",
         home: "/Users/admin",
         sourceRoot: process.cwd(),
         launcherSource: new Uint8Array([1]),
         processes,
       });
-      Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
+      Object.assign(services, {
+        remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current, "test-client"),
+      });
 
       const caught = await services.bootstrap().catch((error: unknown) => error);
 
@@ -602,7 +686,7 @@ describe("pilot service boundaries", () => {
   it.each([1, 124])(
     "keeps a setup command that never reached the remote (exit %i) a bootstrap failure",
     async (setupExitCode) => {
-      const current = worktreeIdentity(process.cwd());
+      const current = worktreeIdentity(process.cwd(), "test-client");
       const processes = {
         async run(request: BoundedProcessRequest) {
           const argv = JSON.stringify(request.args);
@@ -620,12 +704,15 @@ describe("pilot service boundaries", () => {
         },
       } as NodeProcessRuntime;
       const services = new NodeProfileServices(ensureProfile, {
+        clientId: "test-client",
         home: "/Users/admin",
         sourceRoot: process.cwd(),
         launcherSource: new Uint8Array([1]),
         processes,
       });
-      Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current) });
+      Object.assign(services, {
+        remotePaths: resolveRemotePaths("/home/admin", ensureProfile, current, "test-client"),
+      });
 
       const caught = await services.bootstrap().catch((error: unknown) => error);
 
@@ -638,6 +725,7 @@ describe("pilot service boundaries", () => {
     const lines: string[] = [];
     let recorded: string | undefined;
     const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),
@@ -659,6 +747,7 @@ describe("pilot service boundaries", () => {
     const lines: string[] = [];
     const recorded: string[] = [];
     const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),
@@ -704,7 +793,7 @@ describe("pilot service boundaries", () => {
   it("builds fixed workspace ensure argv without shell-interpolating the command", () => {
     const command = ["node", "scripts/pnpm-state.mjs", "argument with spaces", ""];
     const args = remoteWorkspaceCommandArguments(
-      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/clients/d5fe82513196ca977d816609/0123456789abcdef01234567",
       "/remote/node/bin:/remote/uv:/usr/bin:/bin",
       command,
     );
@@ -714,7 +803,7 @@ describe("pilot service boundaries", () => {
       "-ceu",
       'cd -- "$1" || exit 125; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
       "remote-runner-workspace-command",
-      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/clients/d5fe82513196ca977d816609/0123456789abcdef01234567",
       "/remote/node/bin:/remote/uv:/usr/bin:/bin",
       ...command,
     ]);
@@ -724,7 +813,7 @@ describe("pilot service boundaries", () => {
   it("builds fixed artifact-check argv without shell-interpolating the path", () => {
     const artifact = "vendor/dev-standards/runner/dist/verify-runner.mjs";
     const args = remoteArtifactCheckArguments(
-      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/clients/d5fe82513196ca977d816609/0123456789abcdef01234567",
       "/remote/node/bin:/remote/uv:/usr/bin:/bin",
       artifact,
     );
@@ -734,7 +823,7 @@ describe("pilot service boundaries", () => {
       "-ceu",
       'cd -- "$1" || exit 125; export PATH=$2; export REMOTE_RUNNER_CHILD=1; export REMOTE_RUNNER_PROVIDER=remote; shift 2; exec "$@"',
       "remote-runner-workspace-command",
-      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/0123456789abcdef01234567",
+      "/home/admin/.cache/remote-runner/workspaces/ariadne/verify-full/clients/d5fe82513196ca977d816609/0123456789abcdef01234567",
       "/remote/node/bin:/remote/uv:/usr/bin:/bin",
       "test",
       "-f",
@@ -744,7 +833,7 @@ describe("pilot service boundaries", () => {
   });
 
   it("touches activity and prunes after a marker-seen nonzero workload without changing its exit", async () => {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     const stale = "ffffffffffffffffffffffff";
     const requests: BoundedProcessRequest[] = [];
     const processes = {
@@ -772,8 +861,9 @@ describe("pilot service boundaries", () => {
       await request.onMarker();
       return { exitCode: streamCalls === 1 ? 23 : 0, signal: null, markerSeen: true, spawned: true };
     };
-    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current);
+    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current, "test-client");
     const services = new NodeProfileServices(retainedDataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       knownHostsPath: "/Users/admin/.local/state/remote-runner/known_hosts/managed",
@@ -817,6 +907,7 @@ describe("pilot service boundaries", () => {
       validManifest.replace("allow: [NEON_DEV_DATABASE_URL]", "allow: [FIRST_SECRET, SECOND_SECRET, THIRD_SECRET]"),
     ).profiles[0]!;
     const services = new NodeProfileServices(manySecrets, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       knownHostsPath: "/Users/admin/.local/state/remote-runner/known_hosts/managed",
@@ -826,7 +917,12 @@ describe("pilot service boundaries", () => {
       },
     });
     Object.assign(services, {
-      remotePaths: resolveRemotePaths("/home/admin", manySecrets, worktreeIdentity(process.cwd())),
+      remotePaths: resolveRemotePaths(
+        "/home/admin",
+        manySecrets,
+        worktreeIdentity(process.cwd(), "test-client"),
+        "test-client",
+      ),
       nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
       uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
     });
@@ -848,6 +944,7 @@ describe("pilot service boundaries", () => {
     const observed: string[] = [];
     const fallbacks: string[] = [];
     const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),
@@ -880,6 +977,7 @@ describe("pilot service boundaries", () => {
       },
     } as unknown as NodeProcessRuntime;
     const services = new NodeProfileServices(retainedDataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       knownHostsPath: "/Users/admin/.local/state/remote-runner/known_hosts/managed",
@@ -894,7 +992,12 @@ describe("pilot service boundaries", () => {
       },
     });
     Object.assign(services, {
-      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, worktreeIdentity(process.cwd())),
+      remotePaths: resolveRemotePaths(
+        "/home/admin",
+        retainedDataAiProfile,
+        worktreeIdentity(process.cwd(), "test-client"),
+        "test-client",
+      ),
       nodeRoot: "/remote/node",
       uvRoot: "/remote/uv",
     });
@@ -909,16 +1012,16 @@ describe("pilot service boundaries", () => {
   });
 
   it("reaps the Mutagen session of a deleted worktree after a workload, with no retention policy", async () => {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     const sandbox = await mkdtemp(join(tmpdir(), "remote-runner-sweep-"));
     const barrier = join(sandbox, "barrier");
     await mkdir(join(barrier, "worktree"), { recursive: true });
     const alphaRoots = [await realpath(process.cwd()), join(sandbox, "deleted-worktree"), join(barrier, "worktree")];
-    const gone = pathIdentity(alphaRoots[1]!);
-    const paths = resolveRemotePaths("/home/admin", profile, current);
+    const gone = pathIdentity(alphaRoots[1]!, "test-client");
+    const paths = resolveRemotePaths("/home/admin", profile, current, "test-client");
     const listing = JSON.stringify(
       alphaRoots.map((alpha) => {
-        const identity = pathIdentity(alpha);
+        const identity = pathIdentity(alpha, "test-client");
         return {
           identifier: `sync_${identity}`,
           name: `remote-runner-${profile.consumer}-${profile.id}-${identity}`,
@@ -949,6 +1052,7 @@ describe("pilot service boundaries", () => {
       },
     } as NodeProcessRuntime;
     const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
@@ -1006,10 +1110,10 @@ describe("pilot service boundaries", () => {
   });
 
   it("sweeps abandoned sessions even when the remote prune fails, and still reports the failure", async () => {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     const sandbox = await mkdtemp(join(tmpdir(), "remote-runner-both-"));
-    const gone = pathIdentity(join(sandbox, "deleted-worktree"));
-    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current);
+    const gone = pathIdentity(join(sandbox, "deleted-worktree"), "test-client");
+    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current, "test-client");
     const listing = JSON.stringify([
       {
         identifier: `sync_${gone}`,
@@ -1053,6 +1157,7 @@ describe("pilot service boundaries", () => {
       },
     } as NodeProcessRuntime;
     const services = new NodeProfileServices(retainedDataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
@@ -1084,7 +1189,7 @@ describe("pilot service boundaries", () => {
   });
 
   it("preserves the workload exit and emits one bounded warning when cleanup fails", async () => {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     const warnings: Uint8Array[] = [];
     const processes = {
       async run() {
@@ -1100,8 +1205,9 @@ describe("pilot service boundaries", () => {
         return false;
       },
     } as NodeProcessRuntime;
-    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current);
+    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current, "test-client");
     const services = new NodeProfileServices(retainedDataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
@@ -1131,7 +1237,7 @@ describe("pilot service boundaries", () => {
   });
 
   it("refuses to present ssh's own 255 as the workload's exit once the child has started", async () => {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     const lines: string[] = [];
     const outages: string[] = [];
     const unavailable: string[] = [];
@@ -1150,6 +1256,7 @@ describe("pilot service boundaries", () => {
       },
     } as NodeProcessRuntime;
     const services = new NodeProfileServices(retainedDataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
@@ -1165,7 +1272,7 @@ describe("pilot service boundaries", () => {
       },
     });
     Object.assign(services, {
-      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current),
+      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current, "test-client"),
       nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
       uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
     });
@@ -1183,7 +1290,7 @@ describe("pilot service boundaries", () => {
   /* The notification is a side channel; the workload already ran, so nothing it reports may reach
      the caller as a different verdict about that run. */
   it("keeps the mid-run drop's exit code when the outage notification fails", async () => {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     const processes = {
       async run() {
         return {
@@ -1199,6 +1306,7 @@ describe("pilot service boundaries", () => {
       },
     } as NodeProcessRuntime;
     const services = new NodeProfileServices(retainedDataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
@@ -1213,7 +1321,7 @@ describe("pilot service boundaries", () => {
       },
     });
     Object.assign(services, {
-      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current),
+      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current, "test-client"),
       nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
       uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
     });
@@ -1225,10 +1333,13 @@ describe("pilot service boundaries", () => {
   });
 
   it.each([
-    [255, "child-start"],
+    [255, "connection-lost"],
+    [143, "connection-lost"],
+    [0, "connection-lost"],
+    [75, "account-busy"],
     [69, "workload-command"],
   ])("does not touch activity or run retention when the child marker is absent (exit %i)", async (exitCode, reason) => {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     let processCalls = 0;
     const outages: string[] = [];
     const processes = {
@@ -1246,8 +1357,9 @@ describe("pilot service boundaries", () => {
         return false;
       },
     } as NodeProcessRuntime;
-    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current);
+    const paths = resolveRemotePaths("/home/admin", retainedDataAiProfile, current, "test-client");
     const services = new NodeProfileServices(retainedDataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array([1]),
@@ -1255,7 +1367,14 @@ describe("pilot service boundaries", () => {
       recordFallback: async (raised) => {
         outages.push(raised);
       },
-      streamProcess: async () => ({ exitCode, signal: null, markerSeen: false, spawned: true }),
+      streamProcess: async (request) => {
+        if (exitCode === 75) {
+          request.stderr(new TextEncoder().encode("RR_ACCOUNT_"));
+          request.stderr(new TextEncoder().encode("BUSY\n"));
+        }
+        return { exitCode, signal: null, markerSeen: false, spawned: true };
+      },
+      stderr: () => undefined,
     });
     Object.assign(services, {
       remotePaths: paths,
@@ -1437,7 +1556,7 @@ describe("pilot service boundaries", () => {
   });
 
   it("splits a dispatch into child-start, workload and post-workload spans and counts only ssh", async () => {
-    const current = worktreeIdentity(process.cwd());
+    const current = worktreeIdentity(process.cwd(), "test-client");
     let elapsed = 0;
     const telemetry = new RunTelemetry(() => elapsed);
     const requests: BoundedProcessRequest[] = [];
@@ -1472,6 +1591,7 @@ describe("pilot service boundaries", () => {
       return { exitCode: 0, signal: null, markerSeen: true, spawned: true };
     };
     const services = new NodeProfileServices(retainedDataAiProfile, {
+      clientId: "test-client",
       home: "/Users/admin",
       sourceRoot: process.cwd(),
       knownHostsPath: "/Users/admin/.local/state/remote-runner/known_hosts/managed",
@@ -1482,7 +1602,7 @@ describe("pilot service boundaries", () => {
       telemetry,
     });
     Object.assign(services, {
-      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current),
+      remotePaths: resolveRemotePaths("/home/admin", retainedDataAiProfile, current, "test-client"),
       nodeRoot: "/home/admin/.local/share/remote-runner/toolchains/node/current",
       uvRoot: "/home/admin/.local/share/remote-runner/toolchains/uv/current",
     });
@@ -1510,6 +1630,7 @@ describe("pilot service boundaries", () => {
   it("moves Mutagen's own flush duration out of the resume span", async () => {
     const telemetry = new RunTelemetry(() => 0);
     const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
       home: "/tmp/remote-runner-test-home",
       sourceRoot: process.cwd(),
       launcherSource: new Uint8Array(),

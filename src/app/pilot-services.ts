@@ -23,6 +23,8 @@ import {
   type HealthySetupState,
 } from "../bootstrap/dependencies.js";
 import { dependencyFingerprint, type EnvironmentIdentity, type GitlinkIdentity } from "../bootstrap/fingerprint.js";
+import { ensureLocalDependencies } from "../bootstrap/local-dependencies.js";
+import { ACCOUNT_BUSY_MARKER, buildAccountAdmissionShell } from "../runtime/account-admission.js";
 import { installNode, localNodeVersion } from "../bootstrap/node.js";
 import { installUv } from "../bootstrap/uv.js";
 import type { Profile } from "../config/types.js";
@@ -30,7 +32,7 @@ import { NodeProcessRuntime, runStreamingProcess } from "../node/process.js";
 import { ensureManagedKnownHost, mutagenSshEnvironment } from "../node/managed-ssh.js";
 import { RemoteToolchainRuntime } from "../node/remote-toolchain.js";
 import { acquireProfileLock, LockTimeoutError } from "../runtime/lock.js";
-import { worktreeIdentity } from "../runtime/identity.js";
+import { clientNamespace, resolveClientIdentity, worktreeIdentity } from "../runtime/identity.js";
 import type { RunPhase, RunTelemetry } from "../runtime/telemetry.js";
 import { PreparationError } from "../run/prepare.js";
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
@@ -86,6 +88,7 @@ export function resolveRemotePaths(
   remoteHome: string,
   profile: Pick<Profile, "consumer" | "id" | "workspace">,
   identity: string,
+  clientId: string,
 ): RemotePaths {
   canonicalRemotePath(remoteHome, "remote home");
   if (!/^[a-z][a-z0-9-]{0,62}$/u.test(profile.consumer) || !/^[a-z][a-z0-9-]{0,62}$/u.test(profile.id)) {
@@ -97,7 +100,7 @@ export function resolveRemotePaths(
       ? posix.join(remoteHome, ".cache", "remote-runner", "workspaces")
       : profile.workspace.generatedRoot;
   canonicalRemotePath(generatedRoot, "generated root");
-  const profileRoot = posix.join(generatedRoot, profile.consumer, profile.id);
+  const profileRoot = posix.join(generatedRoot, profile.consumer, profile.id, "clients", clientNamespace(clientId));
   return {
     generatedRoot,
     profileRoot,
@@ -170,7 +173,9 @@ export function remoteChildArguments(
   return [
     "sh",
     "-ceu",
-    'workspace=$1; lock=$2; shift 2; umask 077; mkdir -p -- "$(dirname -- "$lock")"; exec 9>"$lock"; flock -x 9; cd -- "$workspace"; exec "$@" 3>&2',
+    'workspace=$1; lock=$2; shift 2; umask 077; mkdir -p -- "$(dirname -- "$lock")"; exec 9>"$lock"; flock -x 9; ' +
+      buildAccountAdmissionShell() +
+      '\ncd -- "$workspace"; exec "$@" 3>&2',
     "remote-runner-child",
     workspace,
     workloadLock,
@@ -413,6 +418,7 @@ function timedSshStream(
 
 export interface NodeProfileServicesOptions {
   readonly home: string;
+  readonly clientId?: string;
   readonly sourceRoot: string;
   readonly knownHostsPath?: string;
   readonly mutagenCommand?: string;
@@ -432,6 +438,7 @@ export interface NodeProfileServicesOptions {
 export class NodeProfileServices implements ProfileExecutionServices {
   private readonly processes: NodeProcessRuntime;
   private readonly identity: string;
+  private readonly clientId: string;
   private readonly stateRoot: string;
   private readonly lockRoot: string;
   private readonly knownHostsPath: string;
@@ -453,7 +460,8 @@ export class NodeProfileServices implements ProfileExecutionServices {
     const telemetry = options.telemetry;
     this.processes = telemetry === undefined ? processes : timedSshProcesses(processes, telemetry);
     this.streamProcess = telemetry === undefined ? streamProcess : timedSshStream(streamProcess, telemetry);
-    this.identity = worktreeIdentity(options.sourceRoot);
+    this.clientId = options.clientId ?? resolveClientIdentity(options.home);
+    this.identity = worktreeIdentity(options.sourceRoot, this.clientId);
     this.stateRoot = join(options.home, ".local", "state", "remote-runner");
     this.lockRoot = join(this.stateRoot, "locks");
     this.knownHostsPath = options.knownHostsPath ?? join(this.stateRoot, "known_hosts", "managed");
@@ -569,6 +577,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
        last, because a sweep that throws — a stopped daemon, a listing this runner refuses to read —
        must not be what keeps the remote prune from reclaiming a checkout's worth of disk. */
     await this.mutagen.terminateAbandoned({
+      clientId: this.clientId,
       consumer: this.profile.consumer,
       profile: this.profile.id,
       betaTarget: this.profile.remote.target,
@@ -663,7 +672,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
     } catch (caught) {
       throw new PreparationError("remote-shell", false, { cause: caught });
     }
-    const paths = resolveRemotePaths(remoteHome, this.profile, this.identity);
+    const paths = resolveRemotePaths(remoteHome, this.profile, this.identity, this.clientId);
     const capacityResult = await runSsh(
       this.processes,
       this.profile.remote.target,
@@ -752,6 +761,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
         consumer: this.profile.consumer,
         profile: this.profile.id,
         sourceRoot: this.options.sourceRoot,
+        clientId: this.clientId,
         remoteTarget: this.profile.remote.target,
         generatedRoot: paths.generatedRoot,
         ...(this.profile.workspace.baseRef === undefined ? {} : { baseRef: this.profile.workspace.baseRef }),
@@ -957,6 +967,14 @@ export class NodeProfileServices implements ProfileExecutionServices {
       stopChildStart?.();
       return { kind: "not-started", reason: "secrets" };
     }
+    let accountBusy = false;
+    let childStarted = false;
+    let markerTail = "";
+    const writeStderr =
+      this.options.stderr ??
+      ((chunk: Uint8Array) => {
+        process.stderr.write(chunk);
+      });
     const result = await this.streamProcess({
       command: "ssh",
       args: sshArguments(
@@ -976,6 +994,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
       stdin: frame.stdin,
       marker: CHILD_MARKER,
       onMarker: async () => {
+        childStarted = true;
         stopChildStart?.();
         stopWorkload = telemetry?.start("workload");
         await onChildStarted();
@@ -985,19 +1004,25 @@ export class NodeProfileServices implements ProfileExecutionServices {
         ((chunk) => {
           process.stdout.write(chunk);
         }),
-      stderr:
-        this.options.stderr ??
-        ((chunk) => {
-          process.stderr.write(chunk);
-        }),
+      stderr: (chunk) => {
+        if (!childStarted) {
+          markerTail = markerTail + Buffer.from(chunk).toString("utf8");
+          accountBusy ||= markerTail.includes(ACCOUNT_BUSY_MARKER);
+          markerTail = markerTail.slice(-ACCOUNT_BUSY_MARKER.length);
+        }
+        writeStderr(chunk);
+      },
     }).finally(() => {
       /* Also on a rejected stream, which is where the workload the spans describe really ended. */
       stopChildStart?.();
       stopWorkload?.();
     });
     if (!result.spawned || !result.markerSeen) {
-      const workloadCommand = result.spawned && result.exitCode === WORKLOAD_SPAWN_EXIT_CODE;
-      return { kind: "not-started", reason: workloadCommand ? WORKLOAD_COMMAND_REASON : "child-start" };
+      if (accountBusy && result.exitCode === INFRASTRUCTURE_EXIT_CODE)
+        return { kind: "not-started", reason: "account-busy" };
+      if (result.spawned && result.exitCode === WORKLOAD_SPAWN_EXIT_CODE)
+        return { kind: "not-started", reason: WORKLOAD_COMMAND_REASON };
+      return { kind: "not-started", reason: result.spawned ? CONNECTION_LOST_REASON : "child-start" };
     }
     try {
       await this.span("post-activity", () => this.markActivity(POST_WORKLOAD_LOCK_WAIT_MS));
@@ -1034,7 +1059,38 @@ export class NodeProfileServices implements ProfileExecutionServices {
   }
 
   async runLocal(command: readonly string[], prepared?: Readonly<Record<string, string>>): Promise<number> {
-    /* The same allowlisted values the remote child would have carried: without them a fallback runs
+    await mkdir(this.lockRoot, { recursive: true, mode: 0o700 });
+    const release = await this.acquireLock();
+    try {
+      try {
+        const discovered = await listLocalFingerprintFiles(
+          this.processes,
+          this.options.sourceRoot,
+          this.profile.bootstrap.fingerprint.patterns,
+        );
+        await ensureLocalDependencies({
+          workspaceRoot: this.options.sourceRoot,
+          statePath: join(
+            this.stateRoot,
+            "profiles",
+            this.profile.consumer,
+            this.profile.id,
+            this.identity,
+            "local-setup.json",
+          ),
+          bootstrap: this.profile.bootstrap,
+          fingerprintFiles: [...new Set([...this.profile.bootstrap.fingerprint.files, ...discovered])],
+          gitlinks: await listLocalGitlinks(this.processes, this.options.sourceRoot),
+          processes: this.processes,
+        });
+      } catch (caught) {
+        this.reportUnavailable(
+          caught instanceof DependencyCommandError ? "consumer-setup" : "bootstrap",
+          "local dependency preparation failed",
+        );
+        throw caught;
+      }
+      /* The same allowlisted values the remote child would have carried: without them a fallback runs
        a DIFFERENT workload than the remote leg, and whether that difference reads as a failure or
        as a green depends on how each consumer's guards treat an absent value — a dependency this
        runner must not have. `prepared` is the snapshot the preparation already collected for the
@@ -1043,40 +1099,43 @@ export class NodeProfileServices implements ProfileExecutionServices {
        collects here. Values that cannot be collected fail the run closed rather than running a
        workload the remote would not have run. Spread last, matching the remote launcher, which
        merges them over an environment that already carries the markers. */
-    const secrets =
-      prepared ??
-      (await this.collectSecrets().catch((caught: unknown) => {
-        this.reportUnavailable("secrets", "the local run cannot carry the profile's secrets");
-        throw caught;
-      }));
-    /* After the collection, not before: this callback is the only thing that stamps the run record
+      const secrets =
+        prepared ??
+        (await this.collectSecrets().catch((caught: unknown) => {
+          this.reportUnavailable("secrets", "the local run cannot carry the profile's secrets");
+          throw caught;
+        }));
+      /* After the collection, not before: this callback is the only thing that stamps the run record
        with `provider: "local"`, and a record naming a leg whose workload never started is the same
        lie the run-error path refuses to tell. */
-    this.options.onLocalExecution?.();
-    const result = await this.streamProcess({
-      command: command[0]!,
-      args: command.slice(1),
-      cwd: this.options.sourceRoot,
-      environment: {
-        ...this.profile.workload.childEnvironment,
-        REMOTE_RUNNER_CHILD: "1",
-        REMOTE_RUNNER_PROVIDER: "local",
-        ...secrets,
-      },
-      marker: new TextEncoder().encode("\0REMOTE_RUNNER_UNUSED_MARKER\0"),
-      onMarker: async () => undefined,
-      stdout:
-        this.options.stdout ??
-        ((chunk) => {
-          process.stdout.write(chunk);
-        }),
-      stderr:
-        this.options.stderr ??
-        ((chunk) => {
-          process.stderr.write(chunk);
-        }),
-    });
-    return result.exitCode;
+      this.options.onLocalExecution?.();
+      const result = await this.streamProcess({
+        command: command[0]!,
+        args: command.slice(1),
+        cwd: this.options.sourceRoot,
+        environment: {
+          ...this.profile.workload.childEnvironment,
+          REMOTE_RUNNER_CHILD: "1",
+          REMOTE_RUNNER_PROVIDER: "local",
+          ...secrets,
+        },
+        marker: new TextEncoder().encode("\0REMOTE_RUNNER_UNUSED_MARKER\0"),
+        onMarker: async () => undefined,
+        stdout:
+          this.options.stdout ??
+          ((chunk) => {
+            process.stdout.write(chunk);
+          }),
+        stderr:
+          this.options.stderr ??
+          ((chunk) => {
+            process.stderr.write(chunk);
+          }),
+      });
+      return result.exitCode;
+    } finally {
+      await release();
+    }
   }
 
   async recordFallback(reason: string): Promise<void> {

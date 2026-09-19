@@ -23,7 +23,11 @@ const CONSUMER_SETUP_REASON = "consumer-setup";
    that raises no outage, or it starts paging the operator about a remote that is fine. Containment
    only — `LOCAL_REASONS` answers a different question ("does this say the remote is down") and
    holds `validation` on purpose, which is no reason to skip a local run. */
-export const LOCAL_RERUN_POINTLESS_REASONS: ReadonlySet<string> = new Set([LOCK_REASON, CONSUMER_SETUP_REASON]);
+export const LOCAL_RERUN_POINTLESS_REASONS: ReadonlySet<string> = new Set([
+  LOCK_REASON,
+  CONSUMER_SETUP_REASON,
+  "account-busy",
+]);
 const USAGE_EXIT_CODE = 64;
 const MAX_PREPARATION_ATTEMPTS = 2;
 
@@ -146,7 +150,10 @@ export async function runProfile(
     }
     if (childStarted) return INFRASTRUCTURE_EXIT_CODE;
     if (remote.reason === WORKLOAD_COMMAND_REASON) return WORKLOAD_COMMAND_EXIT_CODE;
-    return mayFallback(mode, profile) ? runLocal(runtime, command, prepared.secrets) : failClosed(runtime);
+    const unsafeOrPointless = remote.reason === "connection-lost" || LOCAL_RERUN_POINTLESS_REASONS.has(remote.reason);
+    return mayFallback(mode, profile) && !unsafeOrPointless
+      ? runLocal(runtime, command, prepared.secrets)
+      : failClosed(runtime);
   }
 
   if (!childStarted) {

@@ -63,12 +63,12 @@ class FakeProcesses {
       ) {
         return result(73, "", "mirror object format mismatch");
       }
-      const identity = worktreeIdentity(this.sourceRoot());
+      const identity = worktreeIdentity(this.sourceRoot(), "test-client");
       return result(
         0,
         [
           `root=${this.root}`,
-          `candidate=${this.candidateCanonical ?? `${this.root}/${this.consumer}/${this.profile}/${identity}`}`,
+          `candidate=${this.candidateCanonical ?? `${this.root}/${this.consumer}/${this.profile}/clients/d5fe82513196ca977d816609/${identity}`}`,
           `mirror=${this.root}/${this.consumer}/.mirror.git`,
           "",
         ].join("\n"),
@@ -85,7 +85,7 @@ class FakeProcesses {
       return result(0, `${this.candidateCanonical ?? remote.split(" ").at(-1)}\n`);
     }
     if (remote.includes("worktree list --porcelain")) {
-      const identity = worktreeIdentity(this.sourceRoot());
+      const identity = worktreeIdentity(this.sourceRoot(), "test-client");
       return result(0, this.worktreeRegistered ? `worktree ${this.root}/ariadne/${identity}\nHEAD deadbeef\n` : "");
     }
     return result();
@@ -113,6 +113,7 @@ async function fixture(
       consumer,
       profile,
       sourceRoot,
+      clientId: "test-client",
       remoteTarget: "admin@pop-os",
       generatedRoot: root,
       knownHostsPath: "/runner/known_hosts",
@@ -151,9 +152,9 @@ async function waitForLog(path: string, fragment: string): Promise<void> {
 describe("confined Git workspace reconciliation", () => {
   it("creates the mirror, pushes HEAD, creates the worktree, resets it, then updates submodules", async () => {
     const { options, processes } = await fixture();
-    const identity = worktreeIdentity(options.sourceRoot);
+    const identity = worktreeIdentity(options.sourceRoot, "test-client");
     const privateRef = `refs/remote-runner/ariadne/verify-full/${identity}`;
-    const candidate = `/cache/workspaces/ariadne/verify-full/${identity}`;
+    const candidate = `/cache/workspaces/ariadne/verify-full/clients/d5fe82513196ca977d816609/${identity}`;
 
     await expect(reconcileWorkspace(options, processes)).resolves.toEqual({
       identity,
@@ -215,9 +216,9 @@ describe("confined Git workspace reconciliation", () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "remote-runner-prunable-")));
     temporaryRoots.push(root);
     const { options, processes } = await fixture(root);
-    const identity = worktreeIdentity(options.sourceRoot);
+    const identity = worktreeIdentity(options.sourceRoot, "test-client");
     const mirror = join(root, "ariadne", ".mirror.git");
-    const candidate = join(root, "ariadne", "verify-full", identity);
+    const candidate = join(root, "ariadne", "verify-full", "clients", "d5fe82513196ca977d816609", identity);
     const tools = join(root, "test-bin");
     await Promise.all([
       mkdir(join(root, "ariadne"), { recursive: true, mode: 0o700 }),
@@ -314,7 +315,7 @@ os.chmod(arguments[-1], int(arguments[0], 8))
 
     const outcome = await reconcileWorkspace({ ...options, sourceRoot: alias }, processes);
 
-    expect(outcome.identity).toBe(worktreeIdentity(await realpath(options.sourceRoot)));
+    expect(outcome.identity).toBe(worktreeIdentity(await realpath(options.sourceRoot), "test-client"));
     expect(JSON.stringify(processes.requests)).not.toContain(branch);
     expect(JSON.stringify(processes.requests)).not.toContain("refs/heads");
     expect(JSON.stringify(processes.requests)).not.toContain("github");
@@ -444,11 +445,13 @@ os.chmod(arguments[-1], int(arguments[0], 8))
 
   it("preserves canonical path whitespace while removing only record terminators", async () => {
     const { options, processes } = await fixture("/cache/workspaces ");
-    const identity = worktreeIdentity(options.sourceRoot);
+    const identity = worktreeIdentity(options.sourceRoot, "test-client");
 
     const outcome = await reconcileWorkspace(options, processes);
 
-    expect(outcome.remoteRoot).toBe(`/cache/workspaces /ariadne/verify-full/${identity}`);
+    expect(outcome.remoteRoot).toBe(
+      `/cache/workspaces /ariadne/verify-full/clients/d5fe82513196ca977d816609/${identity}`,
+    );
   });
 
   it("rejects a canonical candidate redirected to an unrelated descendant", async () => {

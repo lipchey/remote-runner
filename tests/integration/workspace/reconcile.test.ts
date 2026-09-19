@@ -227,6 +227,7 @@ async function createFixture(): Promise<GitFixture> {
     sourceRoot,
     subRoot,
     options: {
+      clientId: "integration-client",
       connectTimeoutSeconds: 10,
       consumer: "runner",
       generatedRoot,
