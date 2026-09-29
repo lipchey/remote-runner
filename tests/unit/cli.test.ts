@@ -60,6 +60,7 @@ describe("runCli", () => {
 
     expect(code).toBe(0);
     expect(stdout.join("\n")).toContain("run <profile> [options] [-- <command...>]");
+    expect(stdout.join("\n")).toContain("remote-runner resolve <profile> [--manifest <path>] --json");
     expect(stdout.join("\n")).toContain("prewarm <profile>");
     expect(stdout.join("\n")).toContain("validate [profile] [--manifest <path>]");
     expect(stdout.join("\n")).toContain("status [profile]");
@@ -78,6 +79,77 @@ describe("runCli", () => {
 
     expect(code).toBe(2);
     expect(stderr).toEqual(["unknown command: unknown"]);
+  });
+
+  it.each([
+    ["selected", 0],
+    ["unreachable", 3],
+    ["security", 4],
+  ] as const)("prints the resolve JSON verbatim for a %s outcome", async (outcome, expectedCode) => {
+    const stdout: string[] = [];
+    const calls: unknown[] = [];
+    const answer = {
+      requested: "verify-full-pop-os",
+      selected: outcome === "selected" ? "verify-full-pop-os" : null,
+      remoteLabel: outcome === "selected" ? "ariadne-runner" : null,
+      fallbackActive: false,
+      reason: outcome === "selected" ? null : "transport",
+      checkedAt: "2026-09-29T10:00:00.000Z",
+    };
+    const code = await runCli(
+      ["resolve", "verify-full-pop-os", "--manifest", "operator.yaml", "--json"],
+      collect(stdout),
+      {
+        environment: { REMOTE_RUNNER_MODE: "remote" },
+        readFile: async () => remoteFallbackManifest(),
+        resolveProfile: async (...args) => {
+          calls.push(args);
+          return { outcome, answer };
+        },
+      },
+    );
+
+    expect(code).toBe(expectedCode);
+    expect(stdout).toEqual([JSON.stringify(answer)]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      expect.objectContaining({ id: "verify-full-pop-os" }),
+      expect.objectContaining({ id: "verify-full" }),
+      "remote",
+    ]);
+  });
+
+  it.each([
+    ["missing --json", ["resolve", "verify-full"]],
+    ["unknown profile", ["resolve", "missing", "--json"]],
+    ["an extra argument", ["resolve", "verify-full", "extra", "--json"]],
+  ])("rejects resolve with %s", async (_case, argv) => {
+    const stderr: string[] = [];
+    const code = await runCli(
+      argv,
+      { stdout: () => undefined, stderr: (line) => stderr.push(line) },
+      { readFile: async () => validManifest },
+    );
+
+    expect(code).toBe(2);
+    expect(stderr).toHaveLength(1);
+  });
+
+  it("maps a resolve dependency failure to 70", async () => {
+    const stderr: string[] = [];
+    const code = await runCli(
+      ["resolve", "verify-full", "--json"],
+      { stdout: () => undefined, stderr: (line) => stderr.push(line) },
+      {
+        readFile: async () => validManifest,
+        resolveProfile: async () => {
+          throw new Error("ssh is missing");
+        },
+      },
+    );
+
+    expect(code).toBe(70);
+    expect(stderr).toEqual(["remote-runner resolve failed"]);
   });
 
   it("validates the default manifest through only the injected reader", async () => {

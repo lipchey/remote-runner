@@ -84,6 +84,21 @@ function result(stdout = "", exitCode = 0): BoundedProcessResult {
   };
 }
 
+const resolveHostKey = new TextEncoder().encode("resolve-host-key");
+const resolveHostPin = `SHA256:${createHash("sha256").update(resolveHostKey).digest("base64").replace(/=+$/u, "")}`;
+
+function resolveManifest(fallbackPolicy: "local" | "fail" = "local"): string {
+  return remoteFallbackManifest(fallbackPolicy).replaceAll("SHA256:trusted", resolveHostPin);
+}
+
+async function seedResolveKnownHosts(paths: { readonly knownHostsPath: string }): Promise<void> {
+  await mkdir(dirname(paths.knownHostsPath), { recursive: true });
+  const key = Buffer.from(resolveHostKey).toString("base64");
+  await writeFile(paths.knownHostsPath, `primary ssh-ed25519 ${key}\npop-os ssh-ed25519 ${key}\n`, { mode: 0o600 });
+}
+
+type ResolveProbeOutcome = "reachable" | "reachability" | "remote" | "security" | "local";
+
 interface RunRecord {
   readonly event: string;
   readonly runId: string;
@@ -183,6 +198,48 @@ class FakeProcesses {
   async isAlive() {
     return false;
   }
+}
+
+class ResolveProcesses extends FakeProcesses {
+  constructor(private readonly outcomes: Readonly<Record<string, ResolveProbeOutcome>>) {
+    super();
+  }
+
+  override async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+    if (request.command !== "ssh") return super.run(request);
+    const target = request.args.find((part) => part === "admin@primary" || part === "admin@pop-os");
+    const outcome = target === undefined ? undefined : this.outcomes[target];
+    if (request.args.at(-1)?.includes("remote-runner-home-probe")) {
+      if (outcome === "reachable") return result("/home/admin\n");
+      if (outcome === "local") return { ...result("", 127), spawned: false, spawnErrorCode: "ENOENT" };
+      if (outcome === "security") {
+        return { ...result("", 255), stderr: new TextEncoder().encode("Permission denied (publickey).") };
+      }
+      if (outcome === "remote") return result("", 1);
+      return { ...result("", 255), stderr: new TextEncoder().encode("Connection refused") };
+    }
+    if (request.args.at(-1)?.includes("remote-runner-capacity-probe")) return result("999999999999\n");
+    return super.run(request);
+  }
+}
+
+async function resolveHarness(
+  outcomes: Readonly<Record<string, ResolveProbeOutcome>>,
+  manifest = resolveManifest(),
+  state = fallbackState(),
+) {
+  const paths = await fixture(manifest);
+  await seedResolveKnownHosts(paths);
+  const processes = new ResolveProcesses(outcomes);
+  const dependencies = await createNodeCliDependencies({
+    ...paths,
+    clientId: "test-client",
+    managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+    processes,
+    now: () => "2026-09-29T10:00:00.000Z",
+    fallbackState: state,
+  });
+  return { dependencies, manifest: await dependencies.loadManifest(), paths, processes };
 }
 
 describe("concrete Node CLI dependencies", () => {
@@ -1607,5 +1664,248 @@ describe("remote fallback orchestration", () => {
         join(paths.home, ".local", "state", "remote-runner", "fallback", profile.consumer, profile.id, "state.json"),
       ),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("resolve answers the reachable primary without Mutagen or a profile lock", async () => {
+    let reachable = 0;
+    const { dependencies, manifest, paths, processes } = await resolveHarness(
+      { "admin@primary": "reachable", "admin@pop-os": "reachable" },
+      resolveManifest(),
+      fallbackState({
+        observeReachable: async () => {
+          reachable += 1;
+        },
+      }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toEqual({
+      outcome: "selected",
+      answer: {
+        requested: primary.id,
+        selected: primary.id,
+        remoteLabel: primary.remote.label,
+        fallbackActive: false,
+        reason: null,
+        checkedAt: "2026-09-29T10:00:00.000Z",
+      },
+    });
+    expect(reachable).toBe(1);
+    expect(processes.requests.some(({ command }) => command.includes("mutagen"))).toBe(false);
+    await expect(
+      realpath(join(paths.home, ".local", "state", "remote-runner", "locks", dependencies.identity)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("resolve answers the fallback and records an unreachable primary", async () => {
+    const unreachable: string[] = [];
+    const { dependencies, manifest } = await resolveHarness(
+      { "admin@primary": "reachability", "admin@pop-os": "reachable" },
+      resolveManifest(),
+      fallbackState({ observeUnreachable: async (reason) => void unreachable.push(reason) }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toEqual({
+      outcome: "selected",
+      answer: expect.objectContaining({
+        requested: primary.id,
+        selected: fallback.id,
+        remoteLabel: primary.remote.label,
+        fallbackActive: true,
+        reason: "transport",
+      }),
+    });
+    expect(unreachable).toEqual(["transport"]);
+  });
+
+  it("resolve uses a cached negative entry without probing the primary", async () => {
+    const { dependencies, manifest, processes } = await resolveHarness(
+      { "admin@primary": "reachable", "admin@pop-os": "reachable" },
+      resolveManifest(),
+      fallbackState({
+        selectPrimary: async () => false,
+        selectPrimaryDecision: async () => ({
+          usePrimary: false,
+          reason: "dns",
+          checkedAt: "2026-09-29T09:59:00.000Z",
+        }),
+      }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+      outcome: "selected",
+      answer: {
+        selected: fallback.id,
+        fallbackActive: true,
+        reason: "dns",
+        checkedAt: "2026-09-29T09:59:00.000Z",
+      },
+    });
+    expect(
+      processes.requests.some(
+        ({ command, args }) => command === "ssh" && args.some((part) => part === primary.remote.target),
+      ),
+    ).toBe(false);
+  });
+
+  it("resolve selects the local chain end under auto when both remotes are unreachable", async () => {
+    const { dependencies, manifest } = await resolveHarness({
+      "admin@primary": "reachability",
+      "admin@pop-os": "reachability",
+    });
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+      outcome: "selected",
+      answer: {
+        requested: primary.id,
+        selected: fallback.id,
+        remoteLabel: null,
+        fallbackActive: true,
+        reason: "transport",
+      },
+    });
+  });
+
+  it("resolve returns nothing reachable under remote mode", async () => {
+    const { dependencies, manifest } = await resolveHarness({
+      "admin@primary": "reachability",
+      "admin@pop-os": "reachability",
+    });
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "remote")).resolves.toMatchObject({
+      outcome: "unreachable",
+      answer: { requested: primary.id, selected: null, remoteLabel: null, fallbackActive: true },
+    });
+  });
+
+  it("resolve returns a security refusal and records it on the primary", async () => {
+    const paths = await fixture(resolveManifest());
+    const staleKey = Buffer.from("stale-host-key").toString("base64");
+    class StalePinProcesses extends ResolveProcesses {
+      override async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+        if (request.command === "ssh-keyscan") return result(`primary ssh-ed25519 ${staleKey}\n`);
+        return super.run(request);
+      }
+    }
+    const refusals: unknown[] = [];
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new StalePinProcesses({ "admin@primary": "reachable", "admin@pop-os": "reachable" }),
+      now: () => "2026-09-29T10:00:00.000Z",
+      fallbackState: fallbackState({
+        observeRefused: async (...refusal) => {
+          refusals.push(refusal);
+        },
+      }),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+      outcome: "security",
+      answer: { selected: null, reason: "host-key" },
+    });
+    expect(refusals).toEqual([["security", "host-key"]]);
+  });
+
+  it("resolve throws on a local primary fault", async () => {
+    const { dependencies, manifest } = await resolveHarness({
+      "admin@primary": "local",
+      "admin@pop-os": "reachable",
+    });
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).rejects.toMatchObject({
+      failureClass: "local",
+    });
+  });
+
+  it("resolve maps a remote primary refusal to unreachable", async () => {
+    const refusals: unknown[] = [];
+    const { dependencies, manifest } = await resolveHarness(
+      { "admin@primary": "remote", "admin@pop-os": "reachable" },
+      resolveManifest(),
+      fallbackState({
+        observeRefused: async (...refusal) => {
+          refusals.push(refusal);
+        },
+      }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+      outcome: "unreachable",
+      answer: { selected: null, reason: "remote-shell" },
+    });
+    expect(refusals).toEqual([["remote", "remote-shell"]]);
+  });
+
+  it.each([
+    ["security", "security"],
+    ["remote", "unreachable"],
+  ] as const)("resolve maps a %s fault on the fallback to %s", async (failureClass, outcome) => {
+    const { dependencies, manifest } = await resolveHarness(
+      { "admin@primary": "reachable", "admin@pop-os": failureClass },
+      resolveManifest(),
+      fallbackState({ selectPrimary: async () => false }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "remote")).resolves.toMatchObject({
+      outcome,
+      answer: { selected: null },
+    });
+  });
+
+  it("resolve throws on a local fault on the fallback", async () => {
+    const { dependencies, manifest } = await resolveHarness(
+      { "admin@primary": "reachable", "admin@pop-os": "local" },
+      resolveManifest(),
+      fallbackState({ selectPrimary: async () => false }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "remote")).rejects.toMatchObject({
+      failureClass: "local",
+    });
+  });
+
+  it.each([
+    ["security", "security"],
+    ["remote", "unreachable"],
+  ] as const)("resolve maps a %s fault on a plain profile to %s", async (failureClass, outcome) => {
+    const manifestText = validManifest.replaceAll("SHA256:trusted", resolveHostPin);
+    const { dependencies, manifest } = await resolveHarness({ "admin@pop-os": failureClass }, manifestText);
+    const profile = manifest.profiles[0]!;
+
+    await expect(dependencies.resolveProfile!(profile, undefined, "remote")).resolves.toMatchObject({
+      outcome,
+      answer: { selected: null },
+    });
+  });
+
+  it("resolve throws on a local fault on a plain profile", async () => {
+    const manifestText = validManifest.replaceAll("SHA256:trusted", resolveHostPin);
+    const { dependencies, manifest } = await resolveHarness({ "admin@pop-os": "local" }, manifestText);
+
+    await expect(dependencies.resolveProfile!(manifest.profiles[0]!, undefined, "remote")).rejects.toMatchObject({
+      failureClass: "local",
+    });
   });
 });

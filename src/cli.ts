@@ -11,6 +11,20 @@ export interface CliIo {
   stderr(line: string): void;
 }
 
+export interface ResolveAnswer {
+  readonly requested: string;
+  readonly selected: string | null;
+  readonly remoteLabel: string | null;
+  readonly fallbackActive: boolean;
+  readonly reason: string | null;
+  readonly checkedAt: string;
+}
+
+export interface ResolveResult {
+  readonly outcome: "selected" | "unreachable" | "security";
+  readonly answer: ResolveAnswer;
+}
+
 export interface CliDependencies {
   readFile(path: string): Promise<string | Uint8Array>;
   readonly environment?: Readonly<Record<string, string | undefined>>;
@@ -22,6 +36,7 @@ export interface CliDependencies {
     controllerEnsureMs?: number,
     fallback?: Profile,
   ): Promise<number>;
+  resolveProfile?(profile: Profile, fallback: Profile | undefined, mode: RunMode): Promise<ResolveResult>;
   enqueuePrewarm?(profile: Profile, manifestPath: string): Promise<"published" | "coalesced">;
   statusProfile?(profile?: string, manifestPath?: string): Promise<string>;
   doctorProfile?(profile?: string, manifestPath?: string): Promise<readonly DoctorProfileReport[]>;
@@ -37,6 +52,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
 const HELP = [
   "remote-runner install",
   "remote-runner run <profile> [options] [-- <command...>]",
+  "remote-runner resolve <profile> [--manifest <path>] --json",
   "remote-runner prewarm <profile> [--manifest <path>]",
   "remote-runner validate [profile] [--manifest <path>]",
   "remote-runner status [profile] [--manifest <path>]",
@@ -64,6 +80,10 @@ export async function runCli(
     return runSelectedProfile(argv.slice(1), io, dependencies);
   }
 
+  if (argv[0] === "resolve") {
+    return resolveSelectedProfile(argv.slice(1), io, dependencies);
+  }
+
   if (argv[0] === "prewarm") {
     return enqueueSelectedPrewarm(argv.slice(1), io, dependencies);
   }
@@ -82,6 +102,81 @@ export async function runCli(
 
   io.stderr(`unknown command: ${argv[0]}`);
   return 2;
+}
+
+function environmentMode(dependencies: CliDependencies): RunMode | undefined {
+  const value = (dependencies.environment ?? process.env).REMOTE_RUNNER_MODE;
+  if (value === undefined || value === "") return undefined;
+  if (value === "auto" || value === "local" || value === "remote") return value;
+  throw new Error(value);
+}
+
+async function resolveSelectedProfile(
+  argv: readonly string[],
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const profileId = argv[0];
+  if (profileId === undefined || profileId.startsWith("-")) {
+    io.stderr("resolve requires <profile> [--manifest <path>] --json");
+    return 2;
+  }
+  let manifestPath = ".remote-runner.yaml";
+  let manifestSet = false;
+  let json = false;
+  for (let index = 1; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--json" && !json) {
+      json = true;
+      continue;
+    }
+    if (argument === "--manifest" && !manifestSet) {
+      const value = argv[++index];
+      if (value !== undefined && !value.startsWith("-")) {
+        manifestPath = value;
+        manifestSet = true;
+        continue;
+      }
+    }
+    io.stderr("resolve requires <profile> [--manifest <path>] --json");
+    return 2;
+  }
+  if (!json) {
+    io.stderr("resolve requires --json");
+    return 2;
+  }
+  let manifest;
+  try {
+    manifest = await readManifest(manifestPath, dependencies);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    io.stderr(`invalid manifest: ${message}`);
+    return 2;
+  }
+  const profile = manifest.profiles.find((candidate) => candidate.id === profileId);
+  if (profile === undefined) {
+    io.stderr(`profile not found: ${profileId}`);
+    return 2;
+  }
+  let mode: RunMode;
+  try {
+    mode = environmentMode(dependencies) ?? profile.mode;
+  } catch (error) {
+    io.stderr(`invalid REMOTE_RUNNER_MODE: ${error instanceof Error ? error.message : String(error)}`);
+    return 2;
+  }
+  if (dependencies.resolveProfile === undefined) {
+    io.stderr("remote-runner resolve runtime is not configured");
+    return 70;
+  }
+  try {
+    const result = await dependencies.resolveProfile(profile, remoteFallbackOf(manifest, profile), mode);
+    io.stdout(JSON.stringify(result.answer));
+    return result.outcome === "selected" ? 0 : result.outcome === "security" ? 4 : 3;
+  } catch {
+    io.stderr("remote-runner resolve failed");
+    return 70;
+  }
 }
 
 async function runBenchmarkCommand(argv: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
@@ -383,13 +478,11 @@ async function runSelectedProfile(argv: readonly string[], io: CliIo, dependenci
     index += 1;
   }
   if (mode === undefined) {
-    const environmentMode = (dependencies.environment ?? process.env).REMOTE_RUNNER_MODE;
-    if (environmentMode !== undefined && environmentMode !== "") {
-      if (environmentMode !== "auto" && environmentMode !== "local" && environmentMode !== "remote") {
-        io.stderr(`invalid REMOTE_RUNNER_MODE: ${environmentMode}`);
-        return 2;
-      }
-      mode = environmentMode;
+    try {
+      mode = environmentMode(dependencies);
+    } catch (error) {
+      io.stderr(`invalid REMOTE_RUNNER_MODE: ${error instanceof Error ? error.message : String(error)}`);
+      return 2;
     }
   }
   const commandOverride = separator === -1 ? undefined : argv.slice(separator + 1);

@@ -12,6 +12,7 @@ import {
   recordFallback as recordOutage,
   recordRemoteChildStarted as recordRecovery,
   selectPrimary as selectFallbackPrimary,
+  selectPrimaryDecision as selectFallbackPrimaryDecision,
   type DeliveryResult,
   type FallbackContext,
   type FallbackRuntime,
@@ -19,6 +20,7 @@ import {
   type NotificationContext,
   type OutageRuntime,
   type OutageState,
+  type PrimarySelection,
 } from "../notifications/outage.js";
 import { NodeProcessRuntime } from "./process.js";
 import { nodeLockFiles } from "./lock-files.js";
@@ -183,6 +185,7 @@ export interface FallbackNotificationOptions {
 
 export interface FallbackCallbacks {
   readonly selectPrimary: () => Promise<boolean>;
+  readonly selectPrimaryDecision?: () => Promise<PrimarySelection>;
   readonly observeUnreachable: (reason: string) => Promise<void>;
   readonly observeReachable: () => Promise<void>;
   readonly observeRefused: (failureClass: FailureClass, reason: string) => Promise<void>;
@@ -328,27 +331,28 @@ export function createFallbackCallbacks(options: FallbackNotificationOptions): F
     }
   };
 
-  return {
-    selectPrimary: async () => {
-      try {
-        return await selectFallbackPrimary(runtime, options.context);
-      } catch (caught) {
-        if (!(caught instanceof LockTimeoutError)) {
-          options.stderr("remote-runner: Telegram notification state failed");
-          throw new Error("notification state failed");
-        }
-        options.stderr("remote-runner: fallback state busy");
-        return selectFallbackPrimary(
-          {
-            ...runtime,
-            writeState: async (_state: FallbackState) => undefined,
-            warn: () => undefined,
-            withLock: async (operation) => operation(),
-          },
-          options.context,
-        );
+  const select = async <T>(operation: (selectionRuntime: FallbackRuntime) => Promise<T>): Promise<T> => {
+    try {
+      return await operation(runtime);
+    } catch (caught) {
+      if (!(caught instanceof LockTimeoutError)) {
+        options.stderr("remote-runner: Telegram notification state failed");
+        throw new Error("notification state failed");
       }
-    },
+      options.stderr("remote-runner: fallback state busy");
+      return operation({
+        ...runtime,
+        writeState: async (_state: FallbackState) => undefined,
+        warn: () => undefined,
+        withLock: async (lockFreeOperation) => lockFreeOperation(),
+      });
+    }
+  };
+
+  return {
+    selectPrimary: () => select((selectionRuntime) => selectFallbackPrimary(selectionRuntime, options.context)),
+    selectPrimaryDecision: () =>
+      select((selectionRuntime) => selectFallbackPrimaryDecision(selectionRuntime, options.context)),
     observeUnreachable: (reason) => visible(() => observeUnreachable(runtime, options.context, reason)),
     observeReachable: () => visible(() => observeReachable(runtime, options.context)),
     observeRefused: (failureClass, reason) =>

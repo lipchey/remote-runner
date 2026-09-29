@@ -18,7 +18,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:p
 import process from "node:process";
 
 import { runBenchmark, type BenchmarkExecution } from "../benchmark/run-benchmark.js";
-import type { CliDependencies } from "../cli.js";
+import type { CliDependencies, ResolveAnswer, ResolveResult } from "../cli.js";
 import { loadManifestText } from "../config/load-manifest.js";
 import type { ManifestV1, Profile, RunMode } from "../config/types.js";
 import {
@@ -46,7 +46,7 @@ import { createJsonlLogger } from "../runtime/log.js";
 import { RunTelemetry } from "../runtime/telemetry.js";
 import { inspectPrewarmRequest, publishPrewarmRequest } from "../prewarm/queue.js";
 import { INFRASTRUCTURE_EXIT_CODE, runProfile, runProfileLeg, type LegResult } from "../run/run-profile.js";
-import type { FailureClass } from "../run/prepare.js";
+import { PreparationError, type FailureClass } from "../run/prepare.js";
 import { runSsh, type SshProcessRuntime } from "../ssh/client.js";
 import { inspectOwnedSession, MUTAGEN_LIST_ARGUMENTS, mutagenSessionName } from "../sync/mutagen.js";
 import { createProfileRuntime } from "./profile-runtime.js";
@@ -537,6 +537,26 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     runId: (options.createRunId ?? (() => randomUUID().replaceAll("-", "").slice(0, 16)))(),
   });
 
+  const fallbackStateFor = (primary: Profile, fallback: Profile): FallbackCallbacks =>
+    options.fallbackState ??
+    createFallbackCallbacks({
+      home,
+      context: {
+        consumer: primary.consumer,
+        requested: primary.id,
+        fallback: fallback.id,
+        remoteLabel: primary.remote.label,
+        topology: {
+          target: primary.remote.target,
+          hostKeySha256: primary.remote.hostKeySha256,
+          fallback: fallback.id,
+          fallbackTarget: fallback.remote.target,
+        },
+      },
+      configPath: join(home, ".claude", ".telegram-ask.conf"),
+      stderr: (line) => process.stderr.write(`${line}\n`),
+    });
+
   const executeWorkload = async (
     profile: Profile,
     request: RunRequest,
@@ -800,25 +820,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       const result = await single(primary);
       return result.kind === "exit" ? result.status : INFRASTRUCTURE_EXIT_CODE;
     }
-    const fallbackState =
-      options.fallbackState ??
-      createFallbackCallbacks({
-        home,
-        context: {
-          consumer: primary.consumer,
-          requested: primary.id,
-          fallback: fallback.id,
-          remoteLabel: primary.remote.label,
-          topology: {
-            target: primary.remote.target,
-            hostKeySha256: primary.remote.hostKeySha256,
-            fallback: fallback.id,
-            fallbackTarget: fallback.remote.target,
-          },
-        },
-        configPath: join(home, ".claude", ".telegram-ask.conf"),
-        stderr: (line) => process.stderr.write(`${line}\n`),
-      });
+    const fallbackState = fallbackStateFor(primary, fallback);
     if (!(await fallbackState.selectPrimary())) {
       const result = await single(fallback);
       return result.kind === "exit" ? result.status : INFRASTRUCTURE_EXIT_CODE;
@@ -840,6 +842,126 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     return fallbackResult.kind === "exit" ? fallbackResult.status : INFRASTRUCTURE_EXIT_CODE;
   };
 
+  const resolveProfile = async (
+    primary: Profile,
+    fallback: Profile | undefined,
+    mode: RunMode,
+  ): Promise<ResolveResult> => {
+    const now = options.now ?? (() => new Date().toISOString());
+    const answer = (
+      selected: string | null,
+      remoteLabel: string | null,
+      fallbackActive: boolean,
+      reason: string | null,
+      checkedAt = now(),
+    ): ResolveAnswer => ({
+      requested: primary.id,
+      selected,
+      remoteLabel,
+      fallbackActive,
+      reason,
+      checkedAt,
+    });
+    if (mode === "local") {
+      return { outcome: "selected", answer: answer(primary.id, null, false, "mode-local") };
+    }
+
+    const managedSsh = options.managedSsh ?? (await ensureManagedSshTransport(home));
+    const inspect = async (profile: Profile) => {
+      const services = new NodeProfileServices(profile, {
+        home,
+        clientId,
+        sourceRoot,
+        launcherSource: options.launcherSource ?? new Uint8Array(),
+        mutagenCommand,
+        managedSshPath: managedSsh.directory,
+        knownHostsPath: managedSsh.knownHostsPath,
+        processes,
+      });
+      try {
+        await services.validate();
+        await services.probe();
+        return { ok: true as const, checkedAt: now() };
+      } catch (caught) {
+        if (!(caught instanceof PreparationError)) throw caught;
+        return {
+          ok: false as const,
+          checkedAt: now(),
+          error: caught,
+          failureClass: caught.failureClass,
+          reason: caught.reason,
+        };
+      }
+    };
+    const finishFailure = (
+      selectedProfile: Profile,
+      failure: Awaited<ReturnType<typeof inspect>> & { readonly ok: false },
+      fallbackActive: boolean,
+    ): ResolveResult => {
+      if (failure.failureClass === "local") throw failure.error;
+      if (failure.failureClass === "reachability" && mode === "auto" && selectedProfile.fallback === "local") {
+        return {
+          outcome: "selected",
+          answer: answer(selectedProfile.id, null, fallbackActive, failure.reason, failure.checkedAt),
+        };
+      }
+      return {
+        outcome: failure.failureClass === "security" ? "security" : "unreachable",
+        answer: answer(null, null, fallbackActive, failure.reason, failure.checkedAt),
+      };
+    };
+    const remoteFallback = fallback !== undefined && primary.fallback === fallback.id;
+    if (!remoteFallback) {
+      const result = await inspect(primary);
+      return result.ok
+        ? { outcome: "selected", answer: answer(primary.id, primary.remote.label, false, null, result.checkedAt) }
+        : finishFailure(primary, result, false);
+    }
+
+    const fallbackState = fallbackStateFor(primary, fallback);
+    const decision = fallbackState.selectPrimaryDecision
+      ? await fallbackState.selectPrimaryDecision()
+      : {
+          usePrimary: await fallbackState.selectPrimary(),
+          reason: null,
+          checkedAt: null,
+        };
+    let primaryReason = decision.reason;
+    let primaryCheckedAt = decision.checkedAt;
+    if (decision.usePrimary) {
+      const result = await inspect(primary);
+      if (result.ok) {
+        await fallbackState.observeReachable().catch(() => undefined);
+        return {
+          outcome: "selected",
+          answer: answer(primary.id, primary.remote.label, false, null, result.checkedAt),
+        };
+      }
+      if (result.failureClass !== "reachability") {
+        await fallbackState.observeRefused(result.failureClass, result.reason).catch(() => undefined);
+        return finishFailure(primary, result, false);
+      }
+      await fallbackState.observeUnreachable(result.reason).catch(() => undefined);
+      primaryReason = result.reason;
+      primaryCheckedAt = result.checkedAt;
+    }
+
+    const result = await inspect(fallback);
+    if (result.ok) {
+      return {
+        outcome: "selected",
+        answer: answer(
+          fallback.id,
+          primary.remote.label,
+          true,
+          primaryReason ?? "transport",
+          primaryCheckedAt ?? result.checkedAt,
+        ),
+      };
+    }
+    return finishFailure(fallback, result, true);
+  };
+
   const dependencies: NodeCliDependencies = {
     identity,
     environment: process.env,
@@ -850,6 +972,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       const request = createRunRequest(profile, commandOverride);
       return executeRequested(profile, fallback, request, mode ?? profile.mode, controllerEnsureMs);
     },
+    resolveProfile,
     async enqueuePrewarm(profile, manifestPath) {
       await ensureNodeController(home);
       const controller = await new NodeControllerRuntime(home, processes).inspect();

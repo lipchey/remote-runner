@@ -482,23 +482,44 @@ async function deliverFallback(runtime: FallbackRuntime, state: FallbackState): 
   return deliver(runtime, state, MAX_DELIVERIES_PER_HOLD);
 }
 
-export async function selectPrimary(runtime: FallbackRuntime, context: FallbackContext): Promise<boolean> {
+export interface PrimarySelection {
+  readonly usePrimary: boolean;
+  readonly reason: string | null;
+  readonly checkedAt: string | null;
+}
+
+export async function selectPrimaryDecision(
+  runtime: FallbackRuntime,
+  context: FallbackContext,
+): Promise<PrimarySelection> {
   return runtime.withLock(async () => {
     const loaded = await fallbackState(runtime, context);
-    if (loaded.reset) return true;
+    if (loaded.reset) return { usePrimary: true, reason: null, checkedAt: null };
     const state = loaded.state;
-    if (state.refusal !== null) return true;
+    if (state.refusal !== null) return { usePrimary: true, reason: null, checkedAt: null };
     const nowMs = runtime.nowMs();
-    if (state.negative !== null && fresh(state.negative, state.negative.checkedAt, nowMs)) return false;
-    if (state.outage !== null && state.lease !== null && fresh(state.lease, state.lease.takenAt, nowMs)) return false;
+    if (state.negative !== null && fresh(state.negative, state.negative.checkedAt, nowMs)) {
+      return { usePrimary: false, reason: state.outage?.reason ?? "unknown", checkedAt: state.negative.checkedAt };
+    }
+    if (state.outage !== null && state.lease !== null && fresh(state.lease, state.lease.takenAt, nowMs)) {
+      return {
+        usePrimary: false,
+        reason: state.outage.reason,
+        checkedAt: state.negative?.checkedAt ?? state.lease.takenAt,
+      };
+    }
     if (state.outage !== null && state.negative !== null) {
       await runtime.writeState({
         ...state,
         lease: { takenAt: timestamp(runtime), ttlMs: LEASE_MS },
       });
     }
-    return true;
+    return { usePrimary: true, reason: null, checkedAt: null };
   });
+}
+
+export async function selectPrimary(runtime: FallbackRuntime, context: FallbackContext): Promise<boolean> {
+  return (await selectPrimaryDecision(runtime, context)).usePrimary;
 }
 
 export async function observeUnreachable(
