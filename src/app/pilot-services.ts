@@ -1,18 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  access,
-  lstat,
-  mkdir,
-  readdir,
-  readFile,
-  readlink,
-  realpath,
-  rename,
-  rm,
-  stat,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { access, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import process from "node:process";
 
@@ -29,6 +16,7 @@ import { installNode, localNodeVersion } from "../bootstrap/node.js";
 import { installUv } from "../bootstrap/uv.js";
 import type { Profile } from "../config/types.js";
 import { NodeProcessRuntime, runStreamingProcess } from "../node/process.js";
+import { nodeLockFiles } from "../node/lock-files.js";
 import { ensureManagedKnownHost, mutagenSshEnvironment } from "../node/managed-ssh.js";
 import { RemoteToolchainRuntime } from "../node/remote-toolchain.js";
 import { acquireProfileLock, LockTimeoutError } from "../runtime/lock.js";
@@ -608,36 +596,13 @@ export class NodeProfileServices implements ProfileExecutionServices {
   }
 
   async acquireLock(): Promise<() => Promise<void>> {
-    const files = {
-      mkdir: async (path: string) => {
-        await mkdir(path, { mode: 0o700 });
-      },
-      readFile: async (path: string) => new Uint8Array(await readFile(path)),
-      writeFile: async (path: string, contents: Uint8Array, mode: number) => {
-        await writeFile(path, contents, { flag: "wx", mode });
-      },
-      symlink: async (target: string, path: string) => {
-        await symlink(target, path);
-      },
-      readlink: (path: string) => readlink(path),
-      readdir: (path: string) => readdir(path),
-      /* lstat, not stat: the age of a quarantined symlink is the age of the link itself, and its
-         target may not exist at all. */
-      modifiedAt: async (path: string) => (await lstat(path)).mtimeMs,
-      rename: async (from: string, to: string) => {
-        await rename(from, to);
-      },
-      remove: async (path: string) => {
-        await rm(path, { recursive: true });
-      },
-    };
     const notice = setTimeout(() => {
       this.write("remote-runner: another run holds this workspace; waiting for it to finish\n");
     }, LOCK_WAIT_NOTICE_MS);
     try {
       return await acquireProfileLock(
         {
-          files,
+          files: nodeLockFiles(),
           processes: this.processes,
           clock: {
             now: () => Date.now(),
