@@ -95,7 +95,7 @@ async function failClosed(runtime: RunProfileRuntime): Promise<number> {
   return INFRASTRUCTURE_EXIT_CODE;
 }
 
-function mayFallback(mode: RunMode, profile: Pick<Profile, "fallback">): boolean {
+export function mayFallback(mode: RunMode, profile: Pick<Profile, "fallback">): boolean {
   return mode === "auto" && profile.fallback === "local";
 }
 

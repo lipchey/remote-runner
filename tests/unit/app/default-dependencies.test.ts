@@ -1697,38 +1697,87 @@ describe("remote fallback orchestration", () => {
     expect(records.every(({ requested, selected }) => requested === profile.id && selected === profile.id)).toBe(true);
   });
 
-  it("benchmarking a remote-fallback profile neither runs the fallback nor writes v2 state", async () => {
-    const paths = await fixture(remoteFallbackManifest());
-    let legs = 0;
-    let selections = 0;
+  it("benchmarking an unreachable remote-fallback profile returns 75 without running fallback or writing v2 state", async () => {
+    const paths = await fixture(resolveManifest());
+    await seedResolveKnownHosts(paths);
+    class BenchmarkProcesses extends ResolveProcesses {
+      primaryRequests = 0;
+      fallbackRequests = 0;
+
+      override async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+        if (request.args.some((part) => part.includes("admin@primary"))) this.primaryRequests += 1;
+        if (request.args.some((part) => part.includes("admin@pop-os"))) this.fallbackRequests += 1;
+        return super.run(request);
+      }
+    }
+    const processes = new BenchmarkProcesses({ "admin@primary": "reachability" });
     const dependencies = await createNodeCliDependencies({
       ...paths,
       clientId: "test-client",
       now: () => "2026-07-31T12:34:56.000Z",
-      executeProfile: async () => 75,
-      executeLeg: async () => {
-        legs += 1;
-        return { kind: "failover", reason: "transport" };
-      },
-      fallbackState: fallbackState({
-        selectPrimary: async () => {
-          selections += 1;
-          return true;
-        },
-      }),
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
     });
     const profile = (await dependencies.loadManifest()).profiles.find(({ id }) => id === "verify-full-pop-os")!;
 
-    const report = (await dependencies.benchmarkProfile!(profile)) as { rows: Array<{ status: number }> };
+    const report = (await dependencies.benchmarkProfile!(profile)) as {
+      rows: Array<{ location: string; status: number }>;
+    };
+    const remote = report.rows.find(({ location }) => location === "remote");
 
-    expect(report.rows.every(({ status }) => status === 75)).toBe(true);
-    expect({ legs, selections }).toEqual({ legs: 0, selections: 0 });
+    expect(remote?.status).toBe(75);
+    expect(processes.primaryRequests).toBeGreaterThan(0);
+    expect(processes.fallbackRequests).toBe(0);
     await expect(
       readFile(
         join(paths.home, ".local", "state", "remote-runner", "fallback", profile.consumer, profile.id, "state.json"),
       ),
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("resolve reports fallback active for an explicit local leg", async () => {
+    const manifestText = validManifest.replaceAll("SHA256:trusted", resolveHostPin);
+    const { dependencies, manifest } = await resolveHarness({ "admin@pop-os": "reachable" }, manifestText);
+    const profile = manifest.profiles[0]!;
+
+    await expect(dependencies.resolveProfile!(profile, undefined, "local")).resolves.toMatchObject({
+      outcome: "selected",
+      answer: { selected: profile.id, remoteLabel: null, fallbackActive: true, reason: "mode-local" },
+    });
+  });
+
+  it.each(["security", "remote", "local"] as const)(
+    "resolve selects a plain profile's local leg after a %s failure under auto",
+    async (failureClass) => {
+      const manifestText = validManifest.replaceAll("SHA256:trusted", resolveHostPin);
+      const { dependencies, manifest } = await resolveHarness({ "admin@pop-os": failureClass }, manifestText);
+      const profile = manifest.profiles[0]!;
+
+      await expect(dependencies.resolveProfile!(profile, undefined, "auto")).resolves.toMatchObject({
+        outcome: "selected",
+        answer: { selected: profile.id, remoteLabel: null, fallbackActive: true },
+      });
+    },
+  );
+
+  it.each(["security", "remote", "local"] as const)(
+    "resolve selects the fallback profile's local leg after a %s failure under auto",
+    async (failureClass) => {
+      const { dependencies, manifest } = await resolveHarness(
+        { "admin@primary": "reachable", "admin@pop-os": failureClass },
+        resolveManifest(),
+        fallbackState({ selectPrimary: async () => false }),
+      );
+      const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+      const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+      await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+        outcome: "selected",
+        answer: { selected: fallback.id, remoteLabel: null, fallbackActive: true },
+      });
+    },
+  );
 
   it("resolve answers the reachable primary without Mutagen or a profile lock", async () => {
     let reachable = 0;
@@ -1760,6 +1809,37 @@ describe("remote fallback orchestration", () => {
     await expect(
       realpath(join(paths.home, ".local", "state", "remote-runner", "locks", dependencies.identity)),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("resolve stops the Mutagen daemon when managed SSH transport changed", async () => {
+    const paths = await fixture(resolveManifest());
+    await seedResolveKnownHosts(paths);
+    const order: string[] = [];
+    class ChangedTransportProcesses extends ResolveProcesses {
+      override async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+        if (request.args[0] === "daemon" && request.args[1] === "stop") order.push("daemon-stop");
+        if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-home-probe")) {
+          order.push("home-probe");
+        }
+        return super.run(request);
+      }
+    }
+    const processes = new ChangedTransportProcesses({ "admin@primary": "reachable" });
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      managedSsh: { changed: true, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+      outcome: "selected",
+      answer: { selected: primary.id },
+    });
+    expect(order.slice(0, 2)).toEqual(["daemon-stop", "home-probe"]);
   });
 
   it("resolve answers the fallback and records an unreachable primary", async () => {

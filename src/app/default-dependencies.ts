@@ -45,7 +45,14 @@ import { clientNamespace, resolveClientIdentity, worktreeIdentity } from "../run
 import { createJsonlLogger } from "../runtime/log.js";
 import { RunTelemetry } from "../runtime/telemetry.js";
 import { inspectPrewarmRequest, publishPrewarmRequest } from "../prewarm/queue.js";
-import { INFRASTRUCTURE_EXIT_CODE, runProfile, runProfileLeg, type LegResult } from "../run/run-profile.js";
+import {
+  INFRASTRUCTURE_EXIT_CODE,
+  LOCAL_RERUN_POINTLESS_REASONS,
+  mayFallback,
+  runProfile,
+  runProfileLeg,
+  type LegResult,
+} from "../run/run-profile.js";
 import { PreparationError, type FailureClass } from "../run/prepare.js";
 import { runSsh, type SshProcessRuntime } from "../ssh/client.js";
 import { inspectOwnedSession, MUTAGEN_LIST_ARGUMENTS, mutagenSessionName } from "../sync/mutagen.js";
@@ -534,12 +541,10 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
   const loadManifest = async (manifestPath = ".remote-runner.yaml"): Promise<ManifestV1> =>
     loadManifestText(await readFile(resolve(sourceRoot, manifestPath), "utf8"));
 
-  let resourcesPromise:
-    Promise<{ readonly managedSsh: ManagedSshTransport; readonly launcherSource: Uint8Array }> | undefined;
-  const executionResources = () =>
-    (resourcesPromise ??= (async () => {
+  let managedSshPromise: Promise<ManagedSshTransport> | undefined;
+  const managedSshTransport = () =>
+    (managedSshPromise ??= (async () => {
       const managedSsh = options.managedSsh ?? (await ensureManagedSshTransport(home));
-      const launcherSource = options.launcherSource ?? (await readLauncherSource());
       if (managedSsh.changed) {
         const stopped = await processes.run({
           command: mutagenCommand,
@@ -555,6 +560,15 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
           throw new Error("unable to restart Mutagen after managed SSH transport update");
         }
       }
+      return managedSsh;
+    })());
+
+  let resourcesPromise:
+    Promise<{ readonly managedSsh: ManagedSshTransport; readonly launcherSource: Uint8Array }> | undefined;
+  const executionResources = () =>
+    (resourcesPromise ??= (async () => {
+      const managedSsh = await managedSshTransport();
+      const launcherSource = options.launcherSource ?? (await readLauncherSource());
       return { managedSsh, launcherSource };
     })());
 
@@ -890,10 +904,10 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       checkedAt,
     });
     if (mode === "local") {
-      return { outcome: "selected", answer: answer(primary.id, null, false, "mode-local") };
+      return { outcome: "selected", answer: answer(primary.id, null, true, "mode-local") };
     }
 
-    const managedSsh = options.managedSsh ?? (await ensureManagedSshTransport(home));
+    const managedSsh = await managedSshTransport();
     const inspect = async (profile: Profile) => {
       const services = new NodeProfileServices(profile, {
         home,
@@ -925,13 +939,13 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       failure: Awaited<ReturnType<typeof inspect>> & { readonly ok: false },
       fallbackActive: boolean,
     ): ResolveResult => {
-      if (failure.failureClass === "local") throw failure.error;
-      if (failure.failureClass === "reachability" && mode === "auto" && selectedProfile.fallback === "local") {
+      if (mayFallback(mode, selectedProfile) && !LOCAL_RERUN_POINTLESS_REASONS.has(failure.reason)) {
         return {
           outcome: "selected",
-          answer: answer(selectedProfile.id, null, fallbackActive, failure.reason, failure.checkedAt),
+          answer: answer(selectedProfile.id, null, true, failure.reason, failure.checkedAt),
         };
       }
+      if (failure.failureClass === "local") throw failure.error;
       return {
         outcome: failure.failureClass === "security" ? "security" : "unreachable",
         answer: answer(null, null, fallbackActive, failure.reason, failure.checkedAt),
