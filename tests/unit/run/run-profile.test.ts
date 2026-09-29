@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   INFRASTRUCTURE_EXIT_CODE,
   WORKLOAD_COMMAND_REASON,
+  isRemoteFallback,
   runProfile,
+  runProfileLeg,
   type RunProfileRuntime,
 } from "../../../src/run/run-profile.js";
 import type { FailureClass, PrepareResult } from "../../../src/run/prepare.js";
@@ -149,6 +151,106 @@ describe("secrets on the local leg", () => {
 });
 
 const profile = { mode: "auto" as const, fallback: "local" as const };
+const remoteFallbackProfile = { mode: "auto" as const, fallback: "verify-full" };
+
+describe("remote profile fallback", () => {
+  it("recognizes only profile ids as remote fallbacks", () => {
+    expect(isRemoteFallback("verify-full")).toBe(true);
+    expect(isRemoteFallback("local")).toBe(false);
+    expect(isRemoteFallback("fail")).toBe(false);
+  });
+
+  it("fails over when preparation stays unreachable", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [failed("transport", true, "reachability"), failed("transport", true, "reachability")];
+
+    expect(await runProfileLeg(runtime, remoteFallbackProfile, ["./verify"])).toEqual({
+      kind: "failover",
+      reason: "transport",
+    });
+    expect(runtime.calls).toEqual(["prepare", "prepare"]);
+  });
+
+  it("fails over under --mode remote too", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [failed("transport", true, "reachability"), failed("transport", true, "reachability")];
+
+    expect(await runProfileLeg(runtime, remoteFallbackProfile, ["./verify"], "remote")).toEqual({
+      kind: "failover",
+      reason: "transport",
+    });
+  });
+
+  it("never fails over in local mode", async () => {
+    const runtime = new FakeRuntime();
+
+    expect(await runProfileLeg(runtime, remoteFallbackProfile, ["./verify"], "local")).toEqual({
+      kind: "exit",
+      status: 17,
+    });
+    expect(runtime.calls).toEqual(["local:./verify"]);
+  });
+
+  it.each([
+    ["security", "host-key"],
+    ["local", "transport"],
+    ["remote", "sync"],
+  ] as const)("fails closed on a %s failure", async (failureClass, reason) => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [failed(reason, false, failureClass)];
+
+    expect(await runProfileLeg(runtime, remoteFallbackProfile, ["./verify"])).toEqual({
+      kind: "exit",
+      status: INFRASTRUCTURE_EXIT_CODE,
+    });
+    expect(runtime.calls).toEqual(["prepare", "fail-closed"]);
+  });
+
+  it("does not fail over when transport is lost just before the start acknowledgement", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [prepared(runtime)];
+    runtime.remoteKind = "not-started";
+    runtime.notStartedReason = "connection-lost";
+
+    expect(await runProfileLeg(runtime, remoteFallbackProfile, ["./verify"])).toEqual({
+      kind: "exit",
+      status: INFRASTRUCTURE_EXIT_CODE,
+    });
+    expect(runtime.calls).not.toContain("local:./verify");
+  });
+
+  it("does not fail over when transport is lost just after the start acknowledgement", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [prepared(runtime)];
+    runtime.remoteExit = INFRASTRUCTURE_EXIT_CODE;
+
+    expect(await runProfileLeg(runtime, remoteFallbackProfile, ["./verify"])).toEqual({
+      kind: "exit",
+      status: INFRASTRUCTURE_EXIT_CODE,
+    });
+    expect(runtime.calls).toContain("marker");
+  });
+
+  it("does not fail over when the ssh client never spawned at child start", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [prepared(runtime)];
+    runtime.remoteKind = "not-started";
+    runtime.notStartedReason = "child-start";
+
+    expect(await runProfileLeg(runtime, remoteFallbackProfile, ["./verify"])).toEqual({
+      kind: "exit",
+      status: INFRASTRUCTURE_EXIT_CODE,
+    });
+  });
+
+  it("maps a failover leg to 75 in the runProfile wrapper", async () => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [failed("transport", false, "reachability")];
+
+    expect(await runProfile(runtime, remoteFallbackProfile, ["./verify"])).toBe(INFRASTRUCTURE_EXIT_CODE);
+    expect(runtime.calls).toEqual(["prepare"]);
+  });
+});
 
 describe("run profile selection", () => {
   it("local mode bypasses every remote operation and returns the local exit exactly", async () => {
