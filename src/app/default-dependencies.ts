@@ -993,7 +993,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         outcome: "selected",
         answer: answer(
           fallback.id,
-          primary.remote.label,
+          fallback.remote.label,
           true,
           primaryReason ?? "transport",
           primaryCheckedAt ?? result.checkedAt,

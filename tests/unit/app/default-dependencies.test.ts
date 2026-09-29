@@ -1857,7 +1857,7 @@ describe("remote fallback orchestration", () => {
       answer: expect.objectContaining({
         requested: primary.id,
         selected: fallback.id,
-        remoteLabel: primary.remote.label,
+        remoteLabel: fallback.remote.label,
         fallbackActive: true,
         reason: "transport",
       }),
@@ -1885,6 +1885,7 @@ describe("remote fallback orchestration", () => {
       outcome: "selected",
       answer: {
         selected: fallback.id,
+        remoteLabel: fallback.remote.label,
         fallbackActive: true,
         reason: "dns",
         checkedAt: "2026-09-29T09:59:00.000Z",
