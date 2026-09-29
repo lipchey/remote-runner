@@ -1,12 +1,29 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { runMain } from "../../src/main.js";
-import { launcherAssetCandidates } from "../../src/app/default-dependencies.js";
+import { createNodeCliDependencies, launcherAssetCandidates } from "../../src/app/default-dependencies.js";
+import type { FallbackCallbacks } from "../../src/node/notifications.js";
 import type { InstallReceipt } from "../../src/node/install-receipt.js";
 import type { PrewarmRequest } from "../../src/prewarm/queue.js";
 import { validManifest } from "./config/manifest-fixture.js";
+
+const profileBlock = validManifest.slice(validManifest.indexOf("  - id:"));
+
+function remoteFallbackManifest(): string {
+  const fallback = validManifest.replace(
+    'workload: { command: ["./scripts/verify", "--full"], childEnvironment:',
+    'workload: { command: ["./scripts/fallback"], childEnvironment:',
+  );
+  const primary = profileBlock
+    .replace("id: verify-full", "id: verify-full-pop-os")
+    .replace("fallback: local", "fallback: verify-full")
+    .replace("label: pop-os, target: admin@pop-os", "label: ariadne-runner, target: admin@primary");
+  return `${fallback}${primary}`;
+}
 
 describe("executable entrypoint", () => {
   it("routes install before ordinary profile dependencies and reports the stable executable", async () => {
@@ -189,6 +206,55 @@ describe("executable entrypoint", () => {
       ["controller-health"],
       ["run", "verify-full", undefined, "remote"],
     ]);
+  });
+
+  it("prewarms the selected fallback profile in remote mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "remote-runner-main-fallback-"));
+    try {
+      const sourceRoot = join(root, "source");
+      const home = join(root, "home");
+      const manifestPath = join(sourceRoot, ".remote-runner.yaml");
+      await mkdir(sourceRoot, { recursive: true });
+      await writeFile(manifestPath, remoteFallbackManifest());
+      const legs: unknown[] = [];
+      const fallbackState: FallbackCallbacks = {
+        selectPrimary: async () => false,
+        observeUnreachable: async () => undefined,
+        observeReachable: async () => undefined,
+        observeRefused: async () => undefined,
+        observePrimaryChildStarted: async () => undefined,
+      };
+      const request: PrewarmRequest = {
+        schemaVersion: 1,
+        consumer: "ariadne",
+        profile: "verify-full-pop-os",
+        identity: "0123456789abcdef01234567",
+        sourceRoot,
+        manifestPath,
+      };
+      const code = await runMain(["controller"], { stdout: () => undefined, stderr: () => undefined }, undefined, {
+        installLocal: async () => ({ executablePath: "/unused", version: "0.1.0", appIdentity: "a".repeat(24) }),
+        createCliDependencies: async () => {
+          const dependencies = await createNodeCliDependencies({
+            sourceRoot,
+            home,
+            clientId: "test-client",
+            fallbackState,
+            executeLeg: async (profile, _command, mode) => {
+              legs.push([profile.id, mode]);
+              return { kind: "exit", status: 0 };
+            },
+          });
+          return { ...dependencies, ensureController: async () => undefined };
+        },
+        runController: async (runPrewarm) => runPrewarm(request),
+      });
+
+      expect(code).toBe(0);
+      expect(legs).toEqual([["verify-full", "remote"]]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("publishes the executable bin from main rather than the inert CLI module", async () => {

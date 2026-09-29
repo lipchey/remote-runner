@@ -19,7 +19,7 @@ import process from "node:process";
 
 import { runBenchmark, type BenchmarkExecution } from "../benchmark/run-benchmark.js";
 import type { CliDependencies, ResolveAnswer, ResolveResult } from "../cli.js";
-import { loadManifestText } from "../config/load-manifest.js";
+import { loadManifestText, remoteFallbackOf } from "../config/load-manifest.js";
 import type { ManifestV1, Profile, RunMode } from "../config/types.js";
 import {
   doctor,
@@ -335,6 +335,33 @@ async function inspectOutage(path: string): Promise<"clear" | "active" | "pendin
     return parsed.outageActive ? "active" : "clear";
   } catch {
     return "unknown";
+  }
+}
+
+async function inspectFallbackOutage(
+  path: string,
+): Promise<{ readonly outage: "clear" | "active" | "pending" | "unknown"; readonly active: boolean }> {
+  const contents = await readOptionalUtf8(path);
+  if (contents === undefined) return { outage: "clear", active: false };
+  try {
+    const parsed = JSON.parse(contents) as {
+      readonly schemaVersion?: unknown;
+      readonly outage?: unknown;
+      readonly queue?: unknown;
+    };
+    const active =
+      typeof parsed.outage === "object" &&
+      parsed.outage !== null &&
+      "reason" in parsed.outage &&
+      typeof parsed.outage.reason === "string" &&
+      "since" in parsed.outage &&
+      typeof parsed.outage.since === "string";
+    if (parsed.schemaVersion !== 2 || !Array.isArray(parsed.queue) || (parsed.outage !== null && !active)) {
+      return { outage: "unknown", active: false };
+    }
+    return { outage: parsed.queue.length > 0 ? "pending" : active ? "active" : "clear", active };
+  } catch {
+    return { outage: "unknown", active: false };
   }
 }
 
@@ -994,7 +1021,8 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       });
     },
     async statusProfile(profileId, manifestPath) {
-      const profiles = selectedProfiles(await loadManifest(manifestPath), profileId);
+      const manifest = await loadManifest(manifestPath);
+      const profiles = selectedProfiles(manifest, profileId);
       const controllerState = await new NodeControllerRuntime(home, processes).inspect();
       const controller = !controllerState.compatible ? "incompatible" : controllerState.running ? "running" : "stopped";
       const lines: string[] = [];
@@ -1008,22 +1036,45 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         });
         const session = sessionResult.exitCode === 0 ? sessionStatus(sessionResult.stdout, expectedSession) : "unknown";
         const remote = await inspectRemoteStatus(processes, profile, identity, diagnosticSsh.knownHostsPath, clientId);
-        const outage = await inspectOutage(join(profileRoot(home, profile, identity), "outage.json"));
+        const fallback = remoteFallbackOf(manifest, profile);
+        const fallbackOutage =
+          fallback === undefined
+            ? undefined
+            : {
+                ...(await inspectFallbackOutage(
+                  join(
+                    home,
+                    ".local",
+                    "state",
+                    "remote-runner",
+                    "fallback",
+                    profile.consumer,
+                    profile.id,
+                    "state.json",
+                  ),
+                )),
+                id: fallback.id,
+              };
+        const outage =
+          fallbackOutage?.outage ?? (await inspectOutage(join(profileRoot(home, profile, identity), "outage.json")));
         const prewarm = await inspectPrewarmRequest(home, {
           consumer: profile.consumer,
           profile: profile.id,
           identity,
         });
+        const line = formatStatus({
+          profile: profile.id,
+          controller,
+          prewarm: prewarm.state,
+          ...(prewarm.queue === undefined ? {} : { prewarmQueue: prewarm.queue }),
+          session,
+          ...remote,
+          outage,
+        });
         lines.push(
-          formatStatus({
-            profile: profile.id,
-            controller,
-            prewarm: prewarm.state,
-            ...(prewarm.queue === undefined ? {} : { prewarmQueue: prewarm.queue }),
-            session,
-            ...remote,
-            outage,
-          }),
+          fallbackOutage === undefined
+            ? line
+            : `${line} fallback=${fallbackOutage.active ? `active(${fallbackOutage.id})` : "inactive"}`,
         );
       }
       return lines.join("\n");

@@ -1326,6 +1326,70 @@ it.each(["statusProfile", "doctorProfile", "logsProfile"] as const)(
 );
 
 describe("remote fallback orchestration", () => {
+  it("status reads v2 outage state only for a remote-fallback profile", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+    const statePath = join(
+      paths.home,
+      ".local",
+      "state",
+      "remote-runner",
+      "fallback",
+      primary.consumer,
+      primary.id,
+      "state.json",
+    );
+    await mkdir(dirname(statePath), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schemaVersion: 2,
+        consumer: primary.consumer,
+        primary: primary.id,
+        topology: {
+          target: primary.remote.target,
+          hostKeySha256: primary.remote.hostKeySha256,
+          fallback: fallback.id,
+          fallbackTarget: fallback.remote.target,
+        },
+        outage: { reason: "transport", since: "2026-09-29T10:00:00.000Z" },
+        refusal: null,
+        negative: { checkedAt: "2026-09-29T10:00:00.000Z", ttlMs: 60_000 },
+        lease: null,
+        lastRecoveryAt: null,
+        backoffTtlMs: 120_000,
+        queue: [],
+      }),
+    );
+
+    await expect(dependencies.statusProfile!(primary.id)).resolves.toContain(
+      "outage=active fallback=active(verify-full)",
+    );
+
+    const plainPaths = await fixture();
+    const plain = await createNodeCliDependencies({
+      ...plainPaths,
+      clientId: "test-client",
+      managedSsh: {
+        changed: false,
+        directory: plainPaths.managedSshPath,
+        knownHostsPath: plainPaths.knownHostsPath,
+      },
+      processes: new FakeProcesses(),
+    });
+    await expect(plain.statusProfile!("verify-full")).resolves.toBe(
+      "verify-full controller=running prewarm=idle session=watching workspace=ready fingerprint=current outage=clear",
+    );
+  });
+
   it("runs the fallback profile when the primary is unreachable", async () => {
     const paths = await fixture(remoteFallbackManifest());
     const legs: string[] = [];
