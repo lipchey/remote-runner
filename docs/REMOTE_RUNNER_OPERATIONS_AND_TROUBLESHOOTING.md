@@ -92,6 +92,9 @@ two remote legs. In `auto`, an unreachable primary selects the remote fallback a
 still end locally. `remote` permits the second remote but forbids its local end; `local` runs only the
 requested profile locally. Without a command override, each remote leg uses its own
 `workload.command`; an explicit command after `--` is shared by both legs.
+Every profile that names or is named as a remote fallback must match
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` in its `id`, `consumer`, and `remote.label`; the manifest is a
+usage error (exit 2) if any of those fields fails the rule.
 
 Install remote-runner 0.2.0 on the workstation before committing a manifest that names a profile id
 in `fallback`. Version 0.1.0 rejects the whole manifest, so even direct runs of its other profiles
@@ -101,24 +104,35 @@ then exit 2.
 one-hop selection without taking the workload lock, creating or inspecting a Mutagen session, or
 starting a workload. The JSON fields are `requested`, `selected`, `remoteLabel`, `fallbackActive`,
 `reason`, and `checkedAt`. Treat the result as advisory: the selected host can change state before
-the subsequent run.
+the subsequent run. `fallbackActive` is true whenever the selected leg is local or is the named
+fallback; it is false only when the requested profile is selected remotely.
 
-| Exit | `resolve` meaning                                                                        |
-| ---- | ---------------------------------------------------------------------------------------- |
-| `0`  | A remote or local selection exists.                                                      |
-| `2`  | Usage, manifest, or unknown-profile error.                                               |
-| `3`  | Every permitted hop is unreachable, or a hop has a `remote`-class refusal.               |
-| `4`  | A hop has a `security`-class refusal such as host-key or authentication failure.         |
-| `70` | Runtime failure, including a `local`-class fault such as missing `ssh` or `ssh-keyscan`. |
+Under `auto`, a plain profile or the chain's fallback profile selects its own `fallback: local` leg
+whenever the same `run` would rerun locally, including `security`, `local`, and `remote` failures.
+The primary of a named pair remains strict: its `security`, `local`, and `remote` refusals do not
+spend the fallback. `remote` mode forbids every local end.
 
-The classifier is the same on the primary, fallback, and a plain profile:
+| Exit | `resolve` meaning                                                                       |
+| ---- | --------------------------------------------------------------------------------------- |
+| `0`  | A remote or local selection exists.                                                     |
+| `2`  | Usage, manifest, or unknown-profile error.                                              |
+| `3`  | No runnable selection; the same run request would exit 75 before starting the workload. |
+| `4`  | A `security` refusal prevents selection; local execution was not selected.              |
+| `70` | A runtime or `local`-class fault prevents selection; local execution was not selected.  |
 
-| Class          | Typical conditions                                                                                           | Remote-fallback action                                                             |
-| -------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `reachability` | DNS failure, refused/timed-out connection, no route                                                          | Record the primary outage and try the fallback.                                    |
-| `security`     | Host-key or authentication failure; owned Mutagen name with foreign endpoints, mode, ignores, or a duplicate | Fail closed; `resolve` exits 4 for the SSH cases because it never touches Mutagen. |
-| `local`        | Local SSH tool did not spawn, local state or descriptor failure                                              | Fail closed; `resolve` exits 70.                                                   |
-| `remote`       | Remote shell, capacity, workspace, setup, or other remote-side refusal                                       | Fail closed; `resolve` exits 3.                                                    |
+Classification is the same on the primary, fallback, and a plain profile; selection is not:
+
+| Class          | Typical conditions                                                                                           | Selection action                                                                                  |
+| -------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `reachability` | DNS failure, refused/timed-out connection, no route                                                          | A named primary records the outage and tries F; a plain/F local end under `auto` selects locally. |
+| `security`     | Host-key or authentication failure; owned Mutagen name with foreign endpoints, mode, ignores, or a duplicate | P fails closed; a plain/F local end under `auto` selects locally, otherwise `resolve` exits 4.    |
+| `local`        | Local SSH tool did not spawn, local state or descriptor failure                                              | P fails closed; a plain/F local end under `auto` selects locally, otherwise `resolve` exits 70.   |
+| `remote`       | Remote shell, capacity, workspace, setup, or other remote-side refusal                                       | P fails closed; a plain/F local end under `auto` selects locally, otherwise `resolve` exits 3.    |
+
+On first use, an unreachable host now reports `dns` or `transport`, retries enrollment once, then
+runs a `fallback: local` profile locally under `auto` and raises the v1 outage alert. A scanned key
+that does not uniquely match the pin reports `host-key`/`security`, is not retried, and still runs
+that local leg with its v1 alert because `host-key` is an outage reason.
 
 A `security`, `local`, or `remote` refusal of the primary blocks runs of that primary by design; it
 does not silently spend the named fallback. Until the primary is fixed, the operator escape hatch is
@@ -158,8 +172,8 @@ topology mismatch clears outage, refusal, cache, and lease while retaining queue
 `fallback=inactive`.
 
 A refusal clears the negative entry and probe lease. While `refusal` is set, selection probes the
-primary instead of skipping it from an old outage cache, so a repaired primary can recover and a
-still-broken one fails closed by its own current probe.
+primary instead of skipping it from an old outage cache. If that probe is unreachable, it clears a
+`remote` refusal and activates the negative cache; `security` and `local` refusals remain fail-closed.
 
 The v2 Telegram kinds are `primary-down`, `primary-refused`, and `primary-recovered`. Down means the
 primary was unreachable and selection moved to the fallback. Refused means the primary failed
@@ -169,6 +183,8 @@ starts and states whether it cleared an outage, refusal, or both. The guarantee 
 durable enqueue per transition plus at-least-once delivery: a crash after Telegram accepts a send but
 before the queue write can repeat that message. A busy state lock skips the current transition; the next primary probe
 re-observes a skipped outage, and the next primary child start re-observes a skipped recovery.
+If the 64-event v2 queue is full, the next transition drops the oldest event with one stderr warning
+and still persists the state change.
 
 Every run record names `requested` and `selected`. On failover, the primary log ends that leg with
 `run-failover {to, reason}` and the fallback log continues under the same `runId`. Treat

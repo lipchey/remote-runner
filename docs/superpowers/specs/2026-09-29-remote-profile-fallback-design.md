@@ -49,11 +49,17 @@ Today's facts the design builds on:
 | `fallback` names no profile in the manifest                                  | `unknown fallback profile: <id>`          |
 | target's own `fallback` is a profile id                                      | `fallback <id> must not name a remote fallback` |
 | target has a different `consumer`                                            | `fallback <id> belongs to another consumer` |
+| either endpoint has an invalid v2 event field                                | `invalid fallback event field <field>: <value>` |
 
 `types.ts` gets `fallback: "local" | "fail" | string` plus a helper
 `remoteFallbackOf(manifest, profile): Profile | undefined` exported from `load-manifest.ts`.
 The manifest also validates `consumer` with Mutagen's session-component rule because it is part of
 the v2 state namespace and session name.
+
+For every profile that names or is named as a remote fallback, `id`, `consumer`, and `remote.label`
+must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. This is checked at manifest load, so an invalid pair
+is a usage error (exit 2), never a selection-time event-construction failure (exit 70). The v2 state
+and event validators repeat the rule as defense in depth.
 
 **Reserved env (contract 6).** `RESERVED_CHILD_ENVIRONMENT = ["REMOTE_RUNNER_SELECTED_PROFILE",
 "REMOTE_RUNNER_REMOTE_LABEL"]` is exported from `load-manifest.ts`. `environment()`
@@ -106,9 +112,12 @@ Mechanics:
 ### 3.1 Behaviour change on existing profiles
 
 An un-enrolled unreachable host used to report `validation` (a local reason, no outage,
-`src/notifications/outage.ts:77`). It now reports `dns`/`transport`, so a `fallback: local`
-profile's first-use outage raises the same alert a known host would. Nothing else in the
-local-fallback path reads `failureClass`.
+`src/notifications/outage.ts:77`). It now reports `dns`/`transport`, retries enrollment once, then a
+`fallback: local` profile in `auto` runs locally and raises its v1 outage alert. A scan that returns
+keys but cannot uniquely match the pin now reports `host-key`/`security`; it is not retried, but the
+same local fallback still runs and raises the v1 alert because `host-key` is an outage reason.
+`failureClass` does not otherwise change the existing local-fallback decision, which remains based
+on mode, fallback policy, and whether the reason makes a local rerun pointless.
 
 ## 4. Selection and the one-hop chain (contract 2, 5)
 
@@ -235,7 +244,7 @@ and `Remote run refused — <class>`.
 | Function                       | Effect                                                                                         | Message                                        |
 | ------------------------------ | ---------------------------------------------------------------------------------------------- | ---------------------------------------------- |
 | `selectPrimary(now)`           | a refusal always probes P; otherwise fresh `negative` → skip; expired and no live lease → take lease, use P; live lease during an outage → skip | none |
-| `observeUnreachable(reason)`   | set `negative` (TTL rule below), clear `lease`; if `outage` null → set it                       | `primary-down`, once per outage                |
+| `observeUnreachable(reason)`   | set `negative` (TTL rule below), clear `lease` and a `remote` refusal; if `outage` null → set it | `primary-down`, once per outage                |
 | `observeReachable()`           | clear `negative` and `lease` (probe of P succeeded); `outage` stays                             | none                                           |
 | `observeRefused(class, reason)`| clear `negative` and `lease`; `class !== "remote"` or `isOutageReason(reason)`; if `refusal` differs in (class, reason) → set it | `primary-refused`, once per (class, reason) episode, **regardless of `outage`** |
 | `observePrimaryChildStarted()` | if `outage` or `refusal` → clear both, clear `negative`, set `lastRecoveryAt`                    | `primary-recovered`, once                      |
@@ -250,11 +259,13 @@ node `LockFileSystem` adapter moved out of `NodeProfileServices.acquireLock`
 (`src/app/pilot-services.ts:601-624`) into `src/node/lock-files.ts`, wait budget 30 s, lease 120 s.
 The fallback directory is created recursively with mode 0700 before the first lock acquisition.
 Delivery under the lock sends at most 4 queued events (each capped by the 5 s Telegram timeout,
-`src/notifications/telegram.ts:5`); the remainder stays queued for the next holder. On
-`LockTimeoutError`, `selectPrimary` falls back to a lock-free read of the atomically written file
-without taking a lease, and a transition is skipped with the stderr line `remote-runner: fallback
-state busy`. A skipped unreachable transition is re-observed by the next primary probe; a skipped
-recovery leaves `outage` set and is re-observed by the next primary child start.
+`src/notifications/telegram.ts:5`); the remainder stays queued for the next holder. When an enqueue
+finds a full v2 queue, the oldest event is dropped with one stderr warning and the transition is
+still durably written. On `LockTimeoutError`, `selectPrimary` falls back to a lock-free read of the
+atomically written file without taking a lease, and a transition is skipped with the stderr line
+`remote-runner: fallback state busy`. A skipped unreachable transition is re-observed by the next
+primary probe; a skipped recovery leaves `outage` set and is re-observed by the next primary child
+start.
 
 The delivery guarantee is exactly-once durable enqueue per transition plus at-least-once delivery.
 A crash after Telegram accepts `send` but before the queue write can repeat one message.
@@ -308,15 +319,19 @@ is the only output. Mode comes from `REMOTE_RUNNER_MODE` or the profile, as for 
 Algorithm, using the same services and cache as `run` but only `validate()` + `probe()` — no lock,
 no `pauseSync`, so no Mutagen session is created:
 
-1. mode `local` → `{selected: P, remoteLabel: null, fallbackActive: false, reason: "mode-local"}`, exit 0.
+1. mode `local` → `{selected: P, remoteLabel: null, fallbackActive: true, reason: "mode-local"}`, exit 0.
 2. P has a remote fallback: `selectPrimary`; if P is not skipped, check P. Reachable →
    `observeReachable`, answer P. `reachability` → `observeUnreachable` (sends the failover message
    if this is the transition), continue with F. `security`/`local`/`remote` → `observeRefused`,
-   then answer or throw according to the class.
-3. Check F (or P, for a profile without a remote fallback). Reachable → answer it. Unreachable →
-   its own `fallback: local` under `auto` → `{selected: <it>, remoteLabel: null, fallbackActive:
-   true}`, exit 0; otherwise nothing is reachable. P, F, and a plain profile classify failures the
-   same way: `security` → exit 4, `local` → 70, and `remote` or no reachable hop → 3.
+   then fail closed according to the class; the primary never spends F on a refusal.
+3. Check F (or P, for a profile without a remote fallback). Reachable → answer it. On any failure
+   for which `runProfileLeg` would run that profile locally — `auto`, `fallback: local`, and a reason
+   that does not make a local rerun pointless — answer `{selected: <it>, remoteLabel: null,
+   fallbackActive: true}`, regardless of failure class. Otherwise `security` → exit 4, `local` → 70,
+   and `remote` or no reachable hop → 3.
+
+`fallbackActive` is true when the selection is a named fallback or any local leg. It is false only
+when the requested profile is selected remotely.
 
 Output: `{"requested","selected","remoteLabel","fallbackActive","reason","checkedAt"}` on stdout for
 exit 0, 3 and 4; `selected`/`remoteLabel` are `null` when nothing is selected, `reason` is `null`
@@ -327,7 +342,7 @@ fact was established (probe time or the cache entry's `checkedAt`).
 | ---- | ----------------------------------------------------------------------------------- | ----------------------------------- |
 | 0    | a selection exists (remote or local end of the chain)                               | success                             |
 | 2    | usage, manifest or unknown profile                                                  | same                                |
-| 3    | nothing runnable: every hop unreachable, or a `remote`-class refusal; `run` would exit 75 before starting | unused                   |
+| 3    | no runnable selection; the same `run` request would exit 75 before starting the workload | unused                   |
 | 4    | security refusal (`host-key`, `authentication`); alert raised                        | unused                              |
 | 70   | runtime error, including a `local`-class fault (ssh/ssh-keyscan missing, EMFILE)    | runtime unavailable / threw         |
 
@@ -393,7 +408,9 @@ that names a profile id in `fallback` as a whole.
   sync is untyped (`remote`), so the run fails closed (75, alert) rather than falling over. Typing
   every remote step would be a much larger change. No negative entry is written; the next run probes
   P and falls over only if that probe classifies the host as unreachable.
-- **D5 — first-use reason change** on `fallback: local` profiles (§3.1).
+- **D5 — first-use changes on `fallback: local` profiles.** Unreachable enrollment reports
+  `dns`/`transport`, retries once, then runs locally with a v1 outage alert. A non-unique pin match
+  reports `host-key`/`security`, is not retried, and still runs locally with its v1 alert (§3.1).
 - **D6 — security repeats.** "Always delivered" is implemented as: never suppressed by a transport
   outage, one message per (class, reason) episode, the episode ending at the next primary child
   start. Delivering every occurrence would page ~20 times per stale pin.
@@ -404,14 +421,16 @@ that names a profile id in `fallback` as a whole.
   so a remote sample on another host would be mislabelled. A benchmark of P with P down exits 75
   and writes its reason to stderr/log only.
 - **D9 — prewarm selects at execution time** (§9), not at enqueue.
-- **D10 — `resolve` also answers plain profiles and mode `local`**; it needs no v2 state for them.
+- **D10 — `resolve` also answers plain profiles and mode `local`**; any selected local leg reports
+  `fallbackActive: true`, and plain/F `fallback: local` profiles mirror `run` under `auto`.
 - **D11 — markers only on the workload child**, not on setup/ensure commands.
 - **D12 — lock timeout degrades to a lock-free read** (§6); the transition is skipped, never guessed,
   and the next relevant observation retries it.
 - **D13 — Mutagen mode/ignore/duplicate mismatches are `security` too**, not only the endpoint
   mismatch: each is a session under the owned name this run did not create.
-- **D14 — `local`-class faults exit 70 from `resolve`**, sharing "runtime unavailable" instead of
-  taking a third new code.
+- **D14 — `local`-class faults exit 70 from `resolve` only when local execution is not selected.** A
+  plain/F `fallback: local` profile under `auto` selects its local leg when `run` would; the strict
+  primary and `remote` mode still use 70, sharing "runtime unavailable" instead of a third new code.
 - **D15 — refusal escape hatch.** A `security`, `local`, or `remote` refusal blocks P; an operator who
   needs continuity runs F by name until P is fixed.
 

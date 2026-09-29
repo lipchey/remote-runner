@@ -81,6 +81,10 @@ describe("remote-runner operations guide", () => {
       "Version 0.1.0 rejects the whole manifest",
       "A `security`, `local`, or `remote` refusal",
       "remote-runner run <fallback>",
+      "true whenever the selected leg is local",
+      "retries enrollment once",
+      "[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+      "the same run request would exit 75 before starting the workload",
     ])
       expect(runbook).toContain(topic);
     expect(runbook).toMatch(/^\| `3`\s+\|/mu);

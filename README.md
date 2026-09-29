@@ -85,20 +85,26 @@ explicit diagnostic override. `fallback` accepts `local`, `fail`, or another pro
 manifest and consumer. A profile-id fallback is one remote hop only: its target profile must end in
 `local` or `fail`. `auto` may traverse that remote hop and then the target's local fallback;
 `remote` permits the remote hop but forbids the local end; `local` runs only the requested profile
-locally.
+locally. Every profile that names or is named as a remote fallback must keep its `id`, `consumer`,
+and `remote.label` within `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`; violations reject the manifest as a
+usage error.
 
 `remote-runner resolve <profile> [--manifest <path>] --json` applies the same mode, reachability
 cache, and one-hop selection without starting a workload, taking the profile lock, or creating a
 Mutagen session. Its JSON reports `requested`, `selected`, `remoteLabel`, `fallbackActive`, `reason`,
 and `checkedAt`; the answer is advisory because reachability can change before `run`.
+`fallbackActive` is true for a named fallback or any local leg, and false only when the requested
+profile is selected remotely. Under `auto`, a plain profile or the chain's fallback profile selects
+its `fallback: local` leg whenever the same `run` would rerun locally, regardless of failure class.
+The primary of a named pair still fails closed on `security`, `local`, and `remote` refusals.
 
-| Exit | `resolve` result                                                                   |
-| ---- | ---------------------------------------------------------------------------------- |
-| `0`  | A remote or local selection exists.                                                |
-| `2`  | Usage, manifest, or profile error.                                                 |
-| `3`  | Nothing is reachable, or the selected hop has a `remote`-class refusal.            |
-| `4`  | The selected hop has a `security`-class refusal.                                   |
-| `70` | Runtime failure, including a `local`-class fault such as a missing SSH executable. |
+| Exit | `resolve` result                                                                          |
+| ---- | ----------------------------------------------------------------------------------------- |
+| `0`  | A remote or local selection exists.                                                       |
+| `2`  | Usage, manifest, or profile error.                                                        |
+| `3`  | No runnable selection; the same `run` request would exit 75 before starting the workload. |
+| `4`  | A `security` refusal prevents selection; local execution was not selected.                |
+| `70` | A runtime or `local`-class fault prevents selection; local execution was not selected.    |
 
 See [Rollback from remote fallback](docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md#rollback-from-remote-fallback)
 before reverting the runner or consumer manifest.
