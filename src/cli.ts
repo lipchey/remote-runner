@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 
-import { loadManifestText } from "./config/load-manifest.js";
+import { loadManifestText, remoteFallbackOf } from "./config/load-manifest.js";
 import type { Profile, RunMode } from "./config/types.js";
 import { corpusJson, formatCorpus, type CorpusOptions, type CorpusReport } from "./diagnostics/corpus.js";
 import type { DoctorProfileReport } from "./diagnostics/doctor.js";
@@ -17,9 +17,10 @@ export interface CliDependencies {
   ensureController?(): Promise<void>;
   runProfile?(
     profile: Profile,
-    command: readonly string[],
+    commandOverride: readonly string[] | undefined,
     mode?: RunMode,
     controllerEnsureMs?: number,
+    fallback?: Profile,
   ): Promise<number>;
   enqueuePrewarm?(profile: Profile, manifestPath: string): Promise<"published" | "coalesced">;
   statusProfile?(profile?: string, manifestPath?: string): Promise<string>;
@@ -412,7 +413,7 @@ async function runSelectedProfile(argv: readonly string[], io: CliIo, dependenci
     io.stderr(`profile not found: ${profileId}`);
     return 2;
   }
-  const command = commandOverride ?? profile.workload.command;
+  const fallback = remoteFallbackOf(manifest, profile);
   if (dependencies.runProfile === undefined || dependencies.ensureController === undefined) {
     io.stderr("remote-runner execution runtime is not configured");
     return 70;
@@ -426,7 +427,7 @@ async function runSelectedProfile(argv: readonly string[], io: CliIo, dependenci
     try {
       await dependencies.ensureController();
     } catch {
-      if (effectiveMode !== "auto" || profile.fallback !== "local") {
+      if (effectiveMode !== "auto" || (profile.fallback !== "local" && fallback?.fallback !== "local")) {
         io.stderr("remote-runner controller repair failed");
         return 70;
       }
@@ -435,7 +436,7 @@ async function runSelectedProfile(argv: readonly string[], io: CliIo, dependenci
     controllerEnsureMs = Math.round(performance.now() - startedMs);
   }
   try {
-    return await dependencies.runProfile(profile, command, effectiveMode, controllerEnsureMs);
+    return await dependencies.runProfile(profile, commandOverride, effectiveMode, controllerEnsureMs, fallback);
   } catch {
     io.stderr("remote-runner execution failed");
     return 70;

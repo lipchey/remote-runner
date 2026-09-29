@@ -181,6 +181,14 @@ export interface FallbackNotificationOptions {
   readonly lockWaitMs?: number;
 }
 
+export interface FallbackCallbacks {
+  readonly selectPrimary: () => Promise<boolean>;
+  readonly observeUnreachable: (reason: string) => Promise<void>;
+  readonly observeReachable: () => Promise<void>;
+  readonly observeRefused: (failureClass: FailureClass, reason: string) => Promise<void>;
+  readonly observePrimaryChildStarted: () => Promise<void>;
+}
+
 async function readOptionalJson(path: string): Promise<unknown> {
   try {
     return JSON.parse(await readFile(path, "utf8")) as unknown;
@@ -253,13 +261,7 @@ async function releaseFallbackLock(release: () => Promise<void>, waitBudgetMs: n
   }
 }
 
-export function createFallbackCallbacks(options: FallbackNotificationOptions): {
-  readonly selectPrimary: () => Promise<boolean>;
-  readonly observeUnreachable: (reason: string) => Promise<void>;
-  readonly observeReachable: () => Promise<void>;
-  readonly observeRefused: (failureClass: FailureClass, reason: string) => Promise<void>;
-  readonly observePrimaryChildStarted: () => Promise<void>;
-} {
+export function createFallbackCallbacks(options: FallbackNotificationOptions): FallbackCallbacks {
   if (!CONSUMER.test(options.context.consumer) || !PROFILE.test(options.context.requested)) {
     throw new Error("fallback namespace is invalid");
   }

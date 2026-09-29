@@ -187,7 +187,7 @@ describe("executable entrypoint", () => {
       ["dependencies", request.sourceRoot],
       ["read", request.manifestPath],
       ["controller-health"],
-      ["run", "verify-full", ["./scripts/verify", "--full"], "remote"],
+      ["run", "verify-full", undefined, "remote"],
     ]);
   });
 

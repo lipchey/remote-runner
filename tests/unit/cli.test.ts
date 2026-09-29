@@ -5,6 +5,17 @@ import { summarizeCorpus, type CorpusOptions, type CorpusRecord } from "../../sr
 import type { DiagnosticStatus } from "../../src/diagnostics/doctor.js";
 import { validManifest } from "./config/manifest-fixture.js";
 
+const profileBlock = validManifest.slice(validManifest.indexOf("  - id:"));
+
+function remoteFallbackManifest(fallbackPolicy: "local" | "fail" = "local"): string {
+  const fallback = validManifest.replace("fallback: local", `fallback: ${fallbackPolicy}`);
+  const primary = profileBlock
+    .replace("id: verify-full", "id: verify-full-pop-os")
+    .replace("fallback: local", "fallback: verify-full")
+    .replace("label: pop-os, target: admin@pop-os", "label: ariadne-runner, target: admin@primary");
+  return `${fallback}${primary}`;
+}
+
 function collect(stdout: string[]): CliIo {
   return { stdout: (line) => stdout.push(line), stderr: () => undefined };
 }
@@ -151,8 +162,8 @@ describe("runCli", () => {
         ensureController: async () => {
           calls.push(["controller"]);
         },
-        runProfile: async (profile, command, mode) => {
-          calls.push(["run", profile.id, command, mode]);
+        runProfile: async (profile, command, mode, _controllerEnsureMs, fallback) => {
+          calls.push(["run", profile.id, command, mode, fallback?.id]);
           return 29;
         },
       },
@@ -160,7 +171,7 @@ describe("runCli", () => {
     expect(code).toBe(29);
     expect(calls).toEqual([
       ["read", "profile.yaml"],
-      ["run", "verify-full", ["./scripts/verify", "--full"], "local"],
+      ["run", "verify-full", ["./scripts/verify", "--full"], "local", undefined],
     ]);
   });
 
@@ -204,7 +215,26 @@ describe("runCli", () => {
     );
 
     expect(code).toBe(0);
-    expect(calls).toEqual([["verify-full", ["./scripts/verify", "--full"], "remote"]]);
+    expect(calls).toEqual([["verify-full", undefined, "remote"]]);
+  });
+
+  it("run passes the resolved fallback profile and command override separately", async () => {
+    const calls: unknown[] = [];
+    const code = await runCli(
+      ["run", "verify-full-pop-os", "--", "./explicit", "--flag"],
+      { stdout: () => undefined, stderr: () => undefined },
+      {
+        readFile: async () => remoteFallbackManifest(),
+        ensureController: async () => undefined,
+        runProfile: async (profile, commandOverride, mode, _controllerEnsureMs, fallback) => {
+          calls.push([profile.id, commandOverride, mode, fallback?.id]);
+          return 0;
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([["verify-full-pop-os", ["./explicit", "--flag"], "auto", "verify-full"]]);
   });
 
   it("queues prewarm without entering the attached profile execution path", async () => {
@@ -279,6 +309,53 @@ describe("runCli", () => {
       "error:remote-runner controller unavailable; continuing automatic fallback policy",
       "run:auto",
     ]);
+  });
+
+  it("controller repair failure continues when the remote fallback ends locally", async () => {
+    const calls: string[] = [];
+    const code = await runCli(
+      ["run", "verify-full-pop-os"],
+      { stdout: () => undefined, stderr: (line) => calls.push(`error:${line}`) },
+      {
+        readFile: async () => remoteFallbackManifest("local"),
+        ensureController: async () => {
+          calls.push("controller");
+          throw new Error("stopped");
+        },
+        runProfile: async (_profile, _command, _mode, _controllerEnsureMs, fallback) => {
+          calls.push(`run:${fallback?.id}`);
+          return 0;
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([
+      "controller",
+      "error:remote-runner controller unavailable; continuing automatic fallback policy",
+      "run:verify-full",
+    ]);
+  });
+
+  it("controller repair failure exits 70 when the remote fallback fails closed", async () => {
+    let ran = false;
+    const code = await runCli(
+      ["run", "verify-full-pop-os"],
+      { stdout: () => undefined, stderr: () => undefined },
+      {
+        readFile: async () => remoteFallbackManifest("fail"),
+        ensureController: async () => {
+          throw new Error("stopped");
+        },
+        runProfile: async () => {
+          ran = true;
+          return 0;
+        },
+      },
+    );
+
+    expect(code).toBe(70);
+    expect(ran).toBe(false);
   });
 
   it("does not require the controller locally and fails closed when remote is forced", async () => {
