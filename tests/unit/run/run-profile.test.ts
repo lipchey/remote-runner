@@ -6,7 +6,7 @@ import {
   runProfile,
   type RunProfileRuntime,
 } from "../../../src/run/run-profile.js";
-import type { PrepareResult } from "../../../src/run/prepare.js";
+import type { FailureClass, PrepareResult } from "../../../src/run/prepare.js";
 
 class FakeRuntime implements RunProfileRuntime {
   readonly calls: string[] = [];
@@ -65,7 +65,12 @@ function prepared(runtime: FakeRuntime): PrepareResult {
     },
   };
 }
-const failed = (reason = "transport", retryable = false): PrepareResult => ({ ok: false, reason, retryable });
+const failed = (reason = "transport", retryable = false, failureClass: FailureClass = "remote"): PrepareResult => ({
+  ok: false,
+  reason,
+  retryable,
+  failureClass,
+});
 
 describe("early lock release", () => {
   it("keeps the started workload when releasing the lock fails, then releases after it exits", async () => {

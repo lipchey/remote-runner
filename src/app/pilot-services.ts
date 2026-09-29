@@ -41,8 +41,9 @@ import type { RemoteExecutionResult } from "../run/run-profile.js";
 import { isOutageReason, stableReason } from "../notifications/outage.js";
 import { encodeSecretFrame, type SecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
-import { classifySshFailure } from "../ssh/probe.js";
+import { classifySshFailure, failureClassOf } from "../ssh/probe.js";
 import {
+  HostKeyScanError,
   REMOTE_BUSY_EXIT_CODE,
   runSsh,
   sshArguments,
@@ -50,7 +51,7 @@ import {
   type BoundedProcessResult,
   type SshProcessRuntime,
 } from "../ssh/client.js";
-import { MutagenSyncLifecycle, type PausedMutagenSession } from "../sync/mutagen.js";
+import { MutagenOwnershipError, MutagenSyncLifecycle, type PausedMutagenSession } from "../sync/mutagen.js";
 import { reconcileWorkspace } from "../workspace/git-workspace.js";
 import {
   pruneRemoteWorkspaces,
@@ -590,12 +591,17 @@ export class NodeProfileServices implements ProfileExecutionServices {
   async validate(): Promise<void> {
     await mkdir(this.lockRoot, { recursive: true, mode: 0o700 });
     await mkdir(dirname(this.knownHostsPath), { recursive: true, mode: 0o700 });
-    await ensureManagedKnownHost(this.processes, {
-      target: this.profile.remote.target,
-      trustedFingerprint: this.profile.remote.hostKeySha256,
-      knownHostsPath: this.knownHostsPath,
-      connectTimeoutSeconds: this.profile.probes.connectTimeoutSeconds,
-    });
+    try {
+      await ensureManagedKnownHost(this.processes, {
+        target: this.profile.remote.target,
+        trustedFingerprint: this.profile.remote.hostKeySha256,
+        knownHostsPath: this.knownHostsPath,
+        connectTimeoutSeconds: this.profile.probes.connectTimeoutSeconds,
+      });
+    } catch (caught) {
+      if (!(caught instanceof HostKeyScanError)) throw caught;
+      throw new PreparationError(caught.reason, true, { cause: caught, failureClass: caught.failureClass });
+    }
   }
 
   async acquireLock(): Promise<() => Promise<void>> {
@@ -664,7 +670,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
     );
     if (homeResult.exitCode !== 0) {
       const reason = classifySshFailure(decode(homeResult.stderr, "SSH home probe"), homeResult);
-      throw new PreparationError(reason, true);
+      throw new PreparationError(reason, true, { failureClass: failureClassOf(reason, homeResult) });
     }
     const remoteHome = decode(homeResult.stdout, "SSH home probe").replace(/\r?\n$/u, "");
     try {
@@ -688,9 +694,9 @@ export class NodeProfileServices implements ProfileExecutionServices {
       CAPTURE_BYTES,
     );
     if (capacityResult.exitCode !== 0) {
-      if (capacityResult.exitCode === 73) throw new PreparationError("workspace", false);
+      if (capacityResult.spawned && capacityResult.exitCode === 73) throw new PreparationError("workspace", false);
       const reason = classifySshFailure(decode(capacityResult.stderr, "SSH capacity probe"), capacityResult);
-      throw new PreparationError(reason, true);
+      throw new PreparationError(reason, true, { failureClass: failureClassOf(reason, capacityResult) });
     }
     const capacity = decode(capacityResult.stdout, "SSH capacity probe").trim();
     if (!/^(?:0|[1-9][0-9]*)$/u.test(capacity)) throw new PreparationError("capacity", false);
@@ -743,15 +749,20 @@ export class NodeProfileServices implements ProfileExecutionServices {
 
   async pauseSync(): Promise<void> {
     const paths = this.paths();
-    this.pausedSession = await this.mutagen.pauseForGitReconcile({
-      consumer: this.profile.consumer,
-      profile: this.profile.id,
-      identity: this.identity,
-      canonicalAlphaRoot: await realpath(this.options.sourceRoot),
-      betaTarget: this.profile.remote.target,
-      betaRoot: paths.workspace,
-      ignores: this.profile.sync.ignores,
-    });
+    try {
+      this.pausedSession = await this.mutagen.pauseForGitReconcile({
+        consumer: this.profile.consumer,
+        profile: this.profile.id,
+        identity: this.identity,
+        canonicalAlphaRoot: await realpath(this.options.sourceRoot),
+        betaTarget: this.profile.remote.target,
+        betaRoot: paths.workspace,
+        ignores: this.profile.sync.ignores,
+      });
+    } catch (caught) {
+      if (!(caught instanceof MutagenOwnershipError)) throw caught;
+      throw new PreparationError("sync", false, { cause: caught, failureClass: "security" });
+    }
   }
 
   async reconcileWorkspace(): Promise<void> {
@@ -779,7 +790,13 @@ export class NodeProfileServices implements ProfileExecutionServices {
     if (this.pausedSession === undefined) throw new Error("Mutagen session was not paused");
     const descriptor = this.pausedSession;
     this.pausedSession = undefined;
-    const { flushDurationMs } = await this.mutagen.resumeAndFlush(descriptor);
+    let flushDurationMs: number;
+    try {
+      ({ flushDurationMs } = await this.mutagen.resumeAndFlush(descriptor));
+    } catch (caught) {
+      if (!(caught instanceof MutagenOwnershipError)) throw caught;
+      throw new PreparationError("sync", false, { cause: caught, failureClass: "security" });
+    }
     /* Moved out of `sync-resume`, not added beside it — that span already covers the flush's time. */
     this.options.telemetry?.add("sync-flush", flushDurationMs);
     this.options.telemetry?.add("sync-resume", -flushDurationMs);

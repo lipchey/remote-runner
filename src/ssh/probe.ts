@@ -1,3 +1,5 @@
+import type { FailureClass } from "../run/prepare.js";
+
 export type UnavailableReason =
   "dns" | "host-key" | "authentication" | "transport" | "remote-shell" | "capacity" | "bootstrap";
 
@@ -28,4 +30,11 @@ export function classifySshFailure(
     return "transport";
   }
   return "remote-shell";
+}
+
+export function failureClassOf(reason: UnavailableReason, result: { readonly spawned: boolean }): FailureClass {
+  if (!result.spawned) return "local";
+  if (reason === "dns" || reason === "transport") return "reachability";
+  if (reason === "host-key" || reason === "authentication") return "security";
+  return "remote";
 }

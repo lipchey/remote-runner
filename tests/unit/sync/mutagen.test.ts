@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   MANDATORY_MUTAGEN_IGNORES,
+  MutagenOwnershipError,
   MutagenSyncLifecycle,
   compileIgnores,
   inspectOwnedSession,
@@ -359,12 +360,19 @@ describe("Mutagen one-way lifecycle", () => {
     ["alpha mismatch", session("paused", { alpha: "/other" })],
     ["beta mismatch", session("paused", { beta: "runner@example.test:/other" })],
     ["mode mismatch", session("paused", { mode: "two-way-resolved" })],
-    ["conflict", session("watching", { conflicts: [{}] })],
-  ])("fails closed on %s before pausing", async (_label, listing) => {
+  ])("throws MutagenOwnershipError on %s before pausing", async (_label, listing) => {
     const processes = new FakeProcesses([{}, { stdout: listing }]);
     const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
 
-    await expect(lifecycle.pauseForGitReconcile(options)).rejects.toThrow();
+    await expect(lifecycle.pauseForGitReconcile(options)).rejects.toBeInstanceOf(MutagenOwnershipError);
+    expect(commandNames(processes)).toEqual(["daemon start", "sync list"]);
+  });
+
+  it("fails closed on conflicts before pausing", async () => {
+    const processes = new FakeProcesses([{}, { stdout: session("watching", { conflicts: [{}] }) }]);
+    const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([]));
+
+    await expect(lifecycle.pauseForGitReconcile(options)).rejects.toThrow("Mutagen session has conflicts");
     expect(commandNames(processes)).toEqual(["daemon start", "sync list"]);
   });
 
@@ -410,7 +418,7 @@ describe("Mutagen one-way lifecycle", () => {
     const lifecycle = new MutagenSyncLifecycle(processes, new FakeClock([100]));
     const paused = await lifecycle.pauseForGitReconcile(options);
 
-    await expect(lifecycle.resumeAndFlush(paused)).rejects.toThrowError("Mutagen session ignore mismatch");
+    await expect(lifecycle.resumeAndFlush(paused)).rejects.toBeInstanceOf(MutagenOwnershipError);
   });
 
   it("resumes only on explicit invocation, flushes, inspects, and returns measured transfer data", async () => {

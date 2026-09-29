@@ -82,22 +82,36 @@ describe("remote preparation", () => {
   });
 
   it.each([
-    ["validate", "validation", false],
-    ["lock", "lock", false],
-    ["probe", "transport", true],
-    ["workload-lock", "lock", false],
-    ["sync-pause", "sync", false],
-    ["git-workspace", "workspace", false],
-    ["sync-resume-flush", "sync", false],
-    ["bootstrap", "bootstrap", false],
-    ["secrets", "secrets", false],
-  ])("classifies %s failure as %s and releases an acquired lock", async (step, reason, retryable) => {
+    ["validate", "validation", false, "local"],
+    ["lock", "lock", false, "remote"],
+    ["probe", "transport", true, "remote"],
+    ["workload-lock", "lock", false, "remote"],
+    ["sync-pause", "sync", false, "remote"],
+    ["git-workspace", "workspace", false, "remote"],
+    ["sync-resume-flush", "sync", false, "remote"],
+    ["bootstrap", "bootstrap", false, "remote"],
+    ["secrets", "secrets", false, "remote"],
+  ])("classifies %s failure as %s and releases an acquired lock", async (step, reason, retryable, failureClass) => {
     const runtime = new FakePreparation();
     runtime.failAt = step;
     runtime.retryable = retryable;
     const result = await prepareRemote(runtime);
-    expect(result).toEqual({ ok: false, reason, retryable });
+    expect(result).toEqual({ ok: false, reason, retryable, failureClass });
     expect(runtime.calls.includes("release")).toBe(runtime.calls.includes("lock") && step !== "lock");
+  });
+
+  it("surfaces a PreparationError failure class", async () => {
+    const runtime = new FakePreparation();
+    runtime.probe = async () => {
+      throw new PreparationError("host-key", false, { failureClass: "security" });
+    };
+
+    expect(await prepareRemote(runtime)).toEqual({
+      ok: false,
+      reason: "host-key",
+      retryable: false,
+      failureClass: "security",
+    });
   });
 
   it("reports a diagnosable failure as a single sanitized line", async () => {
@@ -140,7 +154,12 @@ describe("remote preparation", () => {
     thrown.bootstrap = async () => {
       throw "bare string";
     };
-    expect(await prepareRemote(thrown)).toEqual({ ok: false, reason: "bootstrap", retryable: false });
+    expect(await prepareRemote(thrown)).toEqual({
+      ok: false,
+      reason: "bootstrap",
+      retryable: false,
+      failureClass: "remote",
+    });
   });
 
   it("preserves an explicit stable capacity reason from the probe boundary", async () => {
@@ -150,7 +169,12 @@ describe("remote preparation", () => {
       throw new PreparationError("capacity", false);
     };
 
-    expect(await prepareRemote(runtime)).toEqual({ ok: false, reason: "capacity", retryable: false });
+    expect(await prepareRemote(runtime)).toEqual({
+      ok: false,
+      reason: "capacity",
+      retryable: false,
+      failureClass: "remote",
+    });
     expect(runtime.calls).toEqual(["validate", "lock", "probe", "release"]);
   });
 
@@ -163,6 +187,7 @@ describe("remote preparation", () => {
       ok: false,
       reason: "authentication",
       retryable: false,
+      failureClass: "remote",
     });
   });
 });

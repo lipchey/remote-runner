@@ -25,6 +25,7 @@ import type { Profile } from "../../../src/config/types.js";
 import type { NodeProcessRuntime, StreamingProcessRequest } from "../../../src/node/process.js";
 import { pathIdentity, worktreeIdentity } from "../../../src/runtime/identity.js";
 import { RunTelemetry } from "../../../src/runtime/telemetry.js";
+import { prepareRemote } from "../../../src/run/prepare.js";
 import { REMOTE_BUSY_EXIT_CODE, type BoundedProcessRequest } from "../../../src/ssh/client.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
@@ -65,7 +66,131 @@ function withSecretProvider(source: Profile, provider: string[] = answeringProvi
   };
 }
 
+interface ProcessOutcome {
+  readonly exitCode?: number;
+  readonly stdout?: string;
+  readonly stderr?: string;
+  readonly spawned?: boolean;
+  readonly spawnErrorCode?: string;
+}
+
+function fakeProcesses(...outcomes: ProcessOutcome[]): NodeProcessRuntime {
+  return {
+    async run() {
+      const outcome = outcomes.shift();
+      if (outcome === undefined) throw new Error("unexpected process call");
+      return {
+        exitCode: outcome.exitCode ?? 0,
+        stdout: new TextEncoder().encode(outcome.stdout ?? ""),
+        stderr: new TextEncoder().encode(outcome.stderr ?? ""),
+        outputTruncated: false,
+        spawned: outcome.spawned ?? true,
+        ...(outcome.spawnErrorCode === undefined ? {} : { spawnErrorCode: outcome.spawnErrorCode }),
+      };
+    },
+    async isAlive() {
+      return false;
+    },
+  } as NodeProcessRuntime;
+}
+
+async function prepareProbeFailure(outcome: ProcessOutcome) {
+  const services = new NodeProfileServices(profile, {
+    clientId: "test-client",
+    home: "/tmp/remote-runner-test-home",
+    sourceRoot: process.cwd(),
+    launcherSource: new Uint8Array(),
+    processes: fakeProcesses(outcome),
+  });
+  services.validate = async () => undefined;
+  services.acquireLock = async () => async () => undefined;
+  return prepareRemote(services);
+}
+
 describe("pilot service boundaries", () => {
+  it("classifies missing ssh as a local transport failure", async () => {
+    expect(await prepareProbeFailure({ exitCode: 127, spawned: false, spawnErrorCode: "ENOENT" })).toMatchObject({
+      ok: false,
+      reason: "transport",
+      failureClass: "local",
+    });
+  });
+
+  it("classifies an un-enrolled unreachable primary as reachability", async () => {
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-keyscan-"));
+    try {
+      const services = new NodeProfileServices(profile, {
+        clientId: "test-client",
+        home,
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array(),
+        processes: fakeProcesses({ exitCode: 1 }),
+      });
+
+      expect(await prepareRemote(services)).toMatchObject({
+        ok: false,
+        reason: "transport",
+        failureClass: "reachability",
+      });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies DNS failure as reachability", async () => {
+    expect(
+      await prepareProbeFailure({
+        exitCode: 255,
+        stderr: "ssh: Could not resolve hostname pop-os: nodename nor servname provided",
+      }),
+    ).toMatchObject({ ok: false, reason: "dns", failureClass: "reachability" });
+  });
+
+  it("classifies authentication failure as security", async () => {
+    expect(
+      await prepareProbeFailure({ exitCode: 255, stderr: "admin@pop-os: Permission denied (publickey)." }),
+    ).toMatchObject({ ok: false, reason: "authentication", failureClass: "security" });
+  });
+
+  it("classifies a stale host-key pin as security", async () => {
+    expect(
+      await prepareProbeFailure({ exitCode: 255, stderr: "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!" }),
+    ).toMatchObject({ ok: false, reason: "host-key", failureClass: "security" });
+  });
+
+  it("classifies a Mutagen endpoint mismatch as security", async () => {
+    const identity = worktreeIdentity(process.cwd(), "test-client");
+    const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      processes: fakeProcesses(
+        {},
+        {
+          stdout: JSON.stringify([
+            {
+              identifier: `sync_${identity}`,
+              name: `remote-runner-${profile.consumer}-${profile.id}-${identity}`,
+              alpha: { protocol: "local", path: await realpath(process.cwd()) },
+              beta: { url: "admin@other:/srv/other" },
+              mode: "one-way-replica",
+              ignore: { paths: [] },
+              paused: true,
+            },
+          ]),
+        },
+      ),
+    });
+    services.validate = async () => undefined;
+    services.acquireLock = async () => async () => undefined;
+    services.probe = async () => undefined;
+    services.touchActivity = async () => undefined;
+    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", profile, identity, "test-client") });
+
+    expect(await prepareRemote(services)).toMatchObject({ ok: false, reason: "sync", failureClass: "security" });
+  });
+
   it.each([0, 7])(
     "prepares local dependencies before announcing or starting work (setup exit %s)",
     async (setupExit) => {
