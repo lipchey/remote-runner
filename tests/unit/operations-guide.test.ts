@@ -56,4 +56,38 @@ describe("remote-runner operations guide", () => {
     ])
       expect(runbook).toContain(topic);
   });
+
+  it("documents remote fallback operation and rollback", async () => {
+    const runbook = await readFile(
+      new URL("../../docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md", import.meta.url),
+      "utf8",
+    );
+
+    for (const topic of [
+      "Remote fallback",
+      "Rollback from remote fallback",
+      "remote-runner resolve",
+      "REMOTE_RUNNER_SELECTED_PROFILE",
+      "REMOTE_RUNNER_REMOTE_LABEL",
+      "exactly-once",
+      "at-least-once",
+      "run-finish",
+      "run-error",
+      "run-failover",
+      "summary.records",
+      "remote-runner status <profile>",
+      "remote-runner logs <profile>",
+      "0.2.0",
+      "Version 0.1.0 rejects the whole manifest",
+      "A `security`, `local`, or `remote` refusal",
+      "remote-runner run <fallback>",
+      "true whenever the selected leg is local",
+      "retries enrollment once",
+      "[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+      "the same run request would exit 75 before starting the workload",
+    ])
+      expect(runbook).toContain(topic);
+    expect(runbook).toMatch(/^\| `3`\s+\|/mu);
+    expect(runbook).toMatch(/^\| `4`\s+\|/mu);
+  });
 });

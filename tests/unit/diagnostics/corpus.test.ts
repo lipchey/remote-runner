@@ -106,6 +106,48 @@ test("only a finish that reached the remote provider counts as a dispatch", () =
   expect(summary.undispatched).toBe(1);
 });
 
+test("legacy and run-failover records coexist without double-counting outcomes", async () => {
+  const path = `${ROOT}/ariadne/verify-full/identity/runner.log`;
+  const read = await readCorpus(
+    corpusRuntime({
+      [path]: [
+        JSON.stringify({
+          event: "run-finish",
+          at: "2026-08-01T00:00:00Z",
+          status: 0,
+          provider: "remote",
+          durationMs: 1000,
+        }),
+        JSON.stringify({
+          event: "run-failover",
+          at: "2026-08-01T00:01:00Z",
+          requested: "verify-full-pop-os",
+          selected: "verify-full-pop-os",
+          to: "verify-full",
+          reason: "transport",
+        }),
+      ].join("\n"),
+    }),
+    ROOT,
+  );
+  const summary = summarizeCorpus(read.records);
+
+  expect(read.unparsed).toBe(0);
+  expect(read.records).toHaveLength(2);
+  expect(read.records[1]).toMatchObject({
+    event: "run-failover",
+    requested: "verify-full-pop-os",
+    selected: "verify-full-pop-os",
+    to: "verify-full",
+    reason: "transport",
+  });
+  expect(summary.records).toBe(2);
+  expect(summary.dispatched).toEqual({ total: 1, status: { "0": 1 } });
+  expect(summary.undispatched).toBe(0);
+  expect(summary.deferred).toEqual({});
+  expect(summary.failures).toEqual([]);
+});
+
 test("a first-ever dispatch is excluded from the returning-cold count even when its bootstrap is cold", () => {
   const summary = summarizeCorpus([
     { ...finish("2026-08-01T00:00:00Z", { phases: { bootstrap: 12_000 } }), identity: "fresh" },

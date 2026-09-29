@@ -282,16 +282,23 @@ function ignoresMatch(record: SessionRecord, expected: { readonly ignores: reado
   );
 }
 
+export class MutagenOwnershipError extends DiagnosableError {
+  constructor(message: string) {
+    super(message);
+    this.name = "MutagenOwnershipError";
+  }
+}
+
 function assertOwnedRecord(record: SessionRecord, expected: ValidatedSession, repairableIgnores = false): void {
   if (record.alpha !== expected.alpha || record.beta !== expected.beta) {
-    throw new DiagnosableError("Mutagen session endpoint mismatch");
+    throw new MutagenOwnershipError("Mutagen session endpoint mismatch");
   }
-  if (record.mode !== "one-way-replica") throw new DiagnosableError("Mutagen session mode mismatch");
+  if (record.mode !== "one-way-replica") throw new MutagenOwnershipError("Mutagen session mode mismatch");
   /* Tolerated only before the pause, where drift is still repairable by recreation: once a
      descriptor is prepared, a session swapped in under the owned name must never sync under
      exclusions this run did not compile. */
   if (!repairableIgnores && !ignoresMatch(record, expected)) {
-    throw new DiagnosableError("Mutagen session ignore mismatch");
+    throw new MutagenOwnershipError("Mutagen session ignore mismatch");
   }
 }
 
@@ -321,7 +328,7 @@ export function inspectOwnedSession(listing: Uint8Array, expected: OwnedSessionE
     const name = mutagenSessionName(expected.consumer, expected.profile, expected.identity);
     assertCanonicalAbsolutePath(expected.canonicalAlphaRoot, "Mutagen alpha root");
     const matches = parseListing(listing).filter((record) => record.name === name);
-    if (matches.length > 1) throw new DiagnosableError("multiple Mutagen sessions have the owned name");
+    if (matches.length > 1) throw new MutagenOwnershipError("multiple Mutagen sessions have the owned name");
     const record = matches[0];
     /* A missing session is the normal state before the first run and after retention: the next run
        creates it. */
@@ -395,7 +402,7 @@ export class MutagenSyncLifecycle {
       throw new DiagnosableError("Mutagen session list failed");
     }
     const matches = parseListing(result.stdout).filter(({ name }) => name === expected.name);
-    if (matches.length > 1) throw new DiagnosableError("multiple Mutagen sessions have the owned name");
+    if (matches.length > 1) throw new MutagenOwnershipError("multiple Mutagen sessions have the owned name");
     const match = matches[0];
     if (match) assertOwnedRecord(match, expected, repairableIgnores);
     return match;

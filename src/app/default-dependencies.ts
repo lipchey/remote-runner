@@ -18,8 +18,8 @@ import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:p
 import process from "node:process";
 
 import { runBenchmark, type BenchmarkExecution } from "../benchmark/run-benchmark.js";
-import type { CliDependencies } from "../cli.js";
-import { loadManifestText } from "../config/load-manifest.js";
+import type { CliDependencies, ResolveAnswer, ResolveResult } from "../cli.js";
+import { loadManifestText, remoteFallbackOf } from "../config/load-manifest.js";
 import type { ManifestV1, Profile, RunMode } from "../config/types.js";
 import {
   doctor,
@@ -32,7 +32,11 @@ import {
 import { readCorpus, summarizeCorpus } from "../diagnostics/corpus.js";
 import { formatInstallVersion, readInstalledReceipt } from "../node/install-receipt.js";
 import { mutagenDarwinArchitecture } from "../install/mutagen.js";
-import { createNodeNotificationCallbacks } from "../node/notifications.js";
+import {
+  createFallbackCallbacks,
+  createNodeNotificationCallbacks,
+  type FallbackCallbacks,
+} from "../node/notifications.js";
 import { ensureNodeController, NodeControllerRuntime } from "../node/controller.js";
 import { ensureManagedSshTransport, mutagenSshEnvironment, type ManagedSshTransport } from "../node/managed-ssh.js";
 import { NodeProcessRuntime } from "../node/process.js";
@@ -41,7 +45,15 @@ import { clientNamespace, resolveClientIdentity, worktreeIdentity } from "../run
 import { createJsonlLogger } from "../runtime/log.js";
 import { RunTelemetry } from "../runtime/telemetry.js";
 import { inspectPrewarmRequest, publishPrewarmRequest } from "../prewarm/queue.js";
-import { runProfile } from "../run/run-profile.js";
+import {
+  INFRASTRUCTURE_EXIT_CODE,
+  LOCAL_RERUN_POINTLESS_REASONS,
+  mayFallback,
+  runProfile,
+  runProfileLeg,
+  type LegResult,
+} from "../run/run-profile.js";
+import { PreparationError, type FailureClass } from "../run/prepare.js";
 import { runSsh, type SshProcessRuntime } from "../ssh/client.js";
 import { inspectOwnedSession, MUTAGEN_LIST_ARGUMENTS, mutagenSessionName } from "../sync/mutagen.js";
 import { createProfileRuntime } from "./profile-runtime.js";
@@ -55,6 +67,12 @@ const LEGACY_GENERATED_ROOT = "~/.cache/remote-runner/workspaces";
 const WORKSPACE_ABSENT_EXIT = 79;
 const WORKSPACE_SCOPED_PROBES = new Set(["remote.workspace", "secrets.persistence"]);
 const decoder = new TextDecoder("utf-8", { fatal: true });
+
+interface RunRequest {
+  readonly requested: Profile;
+  readonly commandOverride?: readonly string[];
+  readonly runId: string;
+}
 
 export interface NodeCliDependencyOptions {
   readonly home?: string;
@@ -75,6 +93,17 @@ export interface NodeCliDependencyOptions {
       readonly onRemoteChildStarted: () => void;
     },
   ) => Promise<number>;
+  readonly executeLeg?: (
+    profile: Profile,
+    command: readonly string[],
+    mode: RunMode,
+    hooks: {
+      readonly onUnavailable: (reason: string, detail?: string) => void;
+      readonly onRemoteChildStarted: () => Promise<void>;
+      readonly recordRefusal?: (failureClass: FailureClass, reason: string) => Promise<void>;
+    },
+  ) => Promise<LegResult>;
+  readonly fallbackState?: FallbackCallbacks;
 }
 
 export interface NodeCliDependencies extends CliDependencies {
@@ -316,6 +345,33 @@ async function inspectOutage(path: string): Promise<"clear" | "active" | "pendin
   }
 }
 
+async function inspectFallbackOutage(
+  path: string,
+): Promise<{ readonly outage: "clear" | "active" | "pending" | "unknown"; readonly active: boolean }> {
+  const contents = await readOptionalUtf8(path);
+  if (contents === undefined) return { outage: "clear", active: false };
+  try {
+    const parsed = JSON.parse(contents) as {
+      readonly schemaVersion?: unknown;
+      readonly outage?: unknown;
+      readonly queue?: unknown;
+    };
+    const active =
+      typeof parsed.outage === "object" &&
+      parsed.outage !== null &&
+      "reason" in parsed.outage &&
+      typeof parsed.outage.reason === "string" &&
+      "since" in parsed.outage &&
+      typeof parsed.outage.since === "string";
+    if (parsed.schemaVersion !== 2 || !Array.isArray(parsed.queue) || (parsed.outage !== null && !active)) {
+      return { outage: "unknown", active: false };
+    }
+    return { outage: parsed.queue.length > 0 ? "pending" : active ? "active" : "clear", active };
+  } catch {
+    return { outage: "unknown", active: false };
+  }
+}
+
 async function resolveRemoteWorkspace(
   options: {
     readonly knownHostsPath: string;
@@ -485,12 +541,10 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
   const loadManifest = async (manifestPath = ".remote-runner.yaml"): Promise<ManifestV1> =>
     loadManifestText(await readFile(resolve(sourceRoot, manifestPath), "utf8"));
 
-  let resourcesPromise:
-    Promise<{ readonly managedSsh: ManagedSshTransport; readonly launcherSource: Uint8Array }> | undefined;
-  const executionResources = () =>
-    (resourcesPromise ??= (async () => {
+  let managedSshPromise: Promise<ManagedSshTransport> | undefined;
+  const managedSshTransport = () =>
+    (managedSshPromise ??= (async () => {
       const managedSsh = options.managedSsh ?? (await ensureManagedSshTransport(home));
-      const launcherSource = options.launcherSource ?? (await readLauncherSource());
       if (managedSsh.changed) {
         const stopped = await processes.run({
           command: mutagenCommand,
@@ -506,21 +560,60 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
           throw new Error("unable to restart Mutagen after managed SSH transport update");
         }
       }
+      return managedSsh;
+    })());
+
+  let resourcesPromise:
+    Promise<{ readonly managedSsh: ManagedSshTransport; readonly launcherSource: Uint8Array }> | undefined;
+  const executionResources = () =>
+    (resourcesPromise ??= (async () => {
+      const managedSsh = await managedSshTransport();
+      const launcherSource = options.launcherSource ?? (await readLauncherSource());
       return { managedSsh, launcherSource };
     })());
 
+  const createRunRequest = (requested: Profile, commandOverride?: readonly string[]): RunRequest => ({
+    requested,
+    ...(commandOverride === undefined ? {} : { commandOverride }),
+    runId: (options.createRunId ?? (() => randomUUID().replaceAll("-", "").slice(0, 16)))(),
+  });
+
+  const fallbackStateFor = (primary: Profile, fallback: Profile): FallbackCallbacks =>
+    options.fallbackState ??
+    createFallbackCallbacks({
+      home,
+      context: {
+        consumer: primary.consumer,
+        requested: primary.id,
+        fallback: fallback.id,
+        remoteLabel: primary.remote.label,
+        topology: {
+          target: primary.remote.target,
+          hostKeySha256: primary.remote.hostKeySha256,
+          fallback: fallback.id,
+          fallbackTarget: fallback.remote.target,
+        },
+      },
+      configPath: join(home, ".claude", ".telegram-ask.conf"),
+      stderr: (line) => process.stderr.write(`${line}\n`),
+    });
+
   const executeWorkload = async (
     profile: Profile,
-    command: readonly string[],
+    request: RunRequest,
     mode: RunMode,
     onUnavailable: (reason: string, detail?: string) => void,
     onRemoteChildStarted: () => void,
     telemetry: RunTelemetry,
+    fallbackState: FallbackCallbacks | undefined,
+    allowFailover: boolean,
+    useLegInjection: boolean,
   ): Promise<{
-    readonly status: number;
+    readonly result: LegResult;
     readonly provider: "remote" | "local";
     readonly remoteChildStarted: boolean;
   }> => {
+    const command = request.commandOverride ?? profile.workload.command;
     /* Local to this call's own async activation, unlike the closure-shared variables they replace:
        overlapping executeProfile calls each get their own binding, so one run's fallback to local
        can never bleed into a concurrently running remote run's record. */
@@ -530,21 +623,44 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       remoteChildStarted = true;
       onRemoteChildStarted();
     };
+    const injectedLeg = useLegInjection ? options.executeLeg : undefined;
+    if (injectedLeg !== undefined) {
+      const injectedResult = await injectedLeg(profile, command, mode, {
+        onUnavailable,
+        onRemoteChildStarted: async () => {
+          markRemoteChildStarted();
+          try {
+            await fallbackState?.observePrimaryChildStarted();
+          } catch {
+            return;
+          }
+        },
+        ...(fallbackState === undefined ? {} : { recordRefusal: fallbackState.observeRefused }),
+      });
+      const result =
+        allowFailover || injectedResult.kind === "exit"
+          ? injectedResult
+          : { kind: "exit" as const, status: INFRASTRUCTURE_EXIT_CODE };
+      return { result, provider, remoteChildStarted };
+    }
     const injected = options.executeProfile;
     if (injected !== undefined) {
       const status = await injected(profile, command, mode, {
         onUnavailable,
         onRemoteChildStarted: markRemoteChildStarted,
       });
-      return { status, provider, remoteChildStarted };
+      return { result: { kind: "exit", status }, provider, remoteChildStarted };
     }
     const resources = await executionResources();
-    const notifications = createNodeNotificationCallbacks({
-      statePath: join(profileRoot(home, profile, identity), "outage.json"),
-      configPath: join(home, ".claude", ".telegram-ask.conf"),
-      context: { consumer: profile.consumer, profile: profile.id, remoteLabel: profile.remote.label },
-      stderr: (line) => process.stderr.write(`${line}\n`),
-    });
+    const notifications =
+      fallbackState === undefined
+        ? createNodeNotificationCallbacks({
+            statePath: join(profileRoot(home, profile, identity), "outage.json"),
+            configPath: join(home, ".claude", ".telegram-ask.conf"),
+            context: { consumer: profile.consumer, profile: profile.id, remoteLabel: profile.remote.label },
+            stderr: (line) => process.stderr.write(`${line}\n`),
+          })
+        : undefined;
     const services = new NodeProfileServices(profile, {
       home,
       clientId,
@@ -554,12 +670,15 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       managedSshPath: resources.managedSsh.directory,
       knownHostsPath: resources.managedSsh.knownHostsPath,
       processes,
-      recordFallback: notifications.recordFallback,
+      ...(notifications === undefined
+        ? { recordRefusal: fallbackState!.observeRefused }
+        : { recordFallback: notifications.recordFallback }),
       /* Marked before the notification, whose throw the caller swallows: a run already executing
          remotely may not report that it never started. */
       recordRemoteChildStarted: async () => {
         markRemoteChildStarted();
-        await notifications.recordRemoteChildStarted();
+        if (notifications === undefined) await fallbackState!.observePrimaryChildStarted();
+        else await notifications.recordRemoteChildStarted();
       },
       onLocalExecution: () => {
         provider = "local";
@@ -567,16 +686,25 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       onUnavailable,
       telemetry,
     });
-    const status = await runProfile(createProfileRuntime(services, telemetry), profile, command, mode);
-    return { status, provider, remoteChildStarted };
+    const runtime = createProfileRuntime(services, telemetry);
+    const result = allowFailover
+      ? await runProfileLeg(runtime, profile, command, mode)
+      : { kind: "exit" as const, status: await runProfile(runtime, profile, command, mode) };
+    return { result, provider, remoteChildStarted };
   };
 
   const executeProfile = async (
     profile: Profile,
-    command: readonly string[],
+    request: RunRequest,
     mode: RunMode,
-    controllerEnsureMs?: number,
-  ): Promise<number> => {
+    execution: {
+      readonly allowFailover: boolean;
+      readonly useLegInjection: boolean;
+      readonly fallbackState?: FallbackCallbacks;
+      readonly failoverTo?: string;
+      readonly controllerEnsureMs?: number;
+    },
+  ): Promise<LegResult> => {
     const root = profileRoot(home, profile, identity);
     const logger = createJsonlLogger(
       {
@@ -599,14 +727,13 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     /* A prewarm and a manual run interleave their records in this one file, so every record of a
        run carries the same runId and the writer's pid; the operator detail stays on the paired
        run-unavailable record, which only that runId finds. */
-    const runId = (options.createRunId ?? (() => randomUUID().replaceAll("-", "").slice(0, 16)))();
     /* Monotonic: a wall clock corrected backwards mid-run would otherwise report a negative run. */
     const startedMs = performance.now();
     const telemetry = new RunTelemetry();
     /* Stays outside `phases`: it precedes `startedMs`, so folding it in would over-explain the phase-sum duration. */
     const measurements = (): Record<string, unknown> => ({
       ...telemetry.snapshot(),
-      ...(controllerEnsureMs === undefined ? {} : { controllerEnsureMs }),
+      ...(execution.controllerEnsureMs === undefined ? {} : { controllerEnsureMs: execution.controllerEnsureMs }),
     });
     /* The unavailable callback fires mid-run: chaining it keeps its record ahead of the terminal
        one without the workload ever waiting on a diagnostic write. */
@@ -617,15 +744,17 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     await writeLog({
       at: now(),
       event: "run-start",
-      runId,
+      runId: request.runId,
       pid: process.pid,
       profile: profile.id,
+      requested: request.requested.id,
+      selected: profile.id,
       mode,
     });
     try {
-      const { status, provider, remoteChildStarted } = await executeWorkload(
+      const { result, provider, remoteChildStarted } = await executeWorkload(
         profile,
-        command,
+        request,
         mode,
         (reason, detail) => {
           unavailableReason = reason;
@@ -633,9 +762,11 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
             writeLog({
               at: now(),
               event: "run-unavailable",
-              runId,
+              runId: request.runId,
               pid: process.pid,
               profile: profile.id,
+              requested: request.requested.id,
+              selected: profile.id,
               mode,
               reason,
               ...(detail === undefined ? {} : { detail }),
@@ -648,33 +779,58 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
           unavailableReason = undefined;
         },
         telemetry,
+        execution.fallbackState,
+        execution.allowFailover,
+        execution.useLegInjection,
       );
       await unavailable;
-      await writeLog({
-        at: now(),
-        event: "run-finish",
-        runId,
-        pid: process.pid,
-        profile: profile.id,
-        mode,
-        status,
-        provider,
-        /* Not derivable from `provider`: a run that failed in preparation still reports the remote
-           provider. Only the start marker says the workload reached the remote. */
-        remoteChildStarted,
-        ...(unavailableReason === undefined ? {} : { unavailableReason }),
-        durationMs: Math.round(performance.now() - startedMs),
-        ...measurements(),
-      });
-      return status;
+      if (result.kind === "failover") {
+        if (execution.failoverTo === undefined) throw new Error("fallback profile is unavailable");
+        await writeLog({
+          at: now(),
+          event: "run-failover",
+          runId: request.runId,
+          pid: process.pid,
+          profile: profile.id,
+          requested: request.requested.id,
+          selected: profile.id,
+          mode,
+          to: execution.failoverTo,
+          reason: result.reason,
+          durationMs: Math.round(performance.now() - startedMs),
+          ...measurements(),
+        });
+      } else {
+        await writeLog({
+          at: now(),
+          event: "run-finish",
+          runId: request.runId,
+          pid: process.pid,
+          profile: profile.id,
+          requested: request.requested.id,
+          selected: profile.id,
+          mode,
+          status: result.status,
+          provider,
+          /* Not derivable from `provider`: a run that failed in preparation still reports the remote
+             provider. Only the start marker says the workload reached the remote. */
+          remoteChildStarted,
+          ...(unavailableReason === undefined ? {} : { unavailableReason }),
+          durationMs: Math.round(performance.now() - startedMs),
+          ...measurements(),
+        });
+      }
+      return result;
     } catch (caught) {
       await unavailable;
       await writeLog({
         at: now(),
         event: "run-error",
-        runId,
+        runId: request.runId,
         pid: process.pid,
         profile: profile.id,
+        requested: request.requested.id,
+        selected: profile.id,
         mode,
         error: caught instanceof Error ? caught.name : "UnknownError",
         ...(unavailableReason === undefined ? {} : { unavailableReason }),
@@ -688,14 +844,176 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
     }
   };
 
+  const executeRequested = async (
+    primary: Profile,
+    fallback: Profile | undefined,
+    request: RunRequest,
+    mode: RunMode,
+    controllerEnsureMs?: number,
+  ): Promise<number> => {
+    const single = (profile: Profile) =>
+      executeProfile(profile, request, mode, {
+        allowFailover: false,
+        useLegInjection: true,
+        ...(controllerEnsureMs === undefined ? {} : { controllerEnsureMs }),
+      });
+    if (mode === "local" || fallback === undefined || primary.fallback !== fallback.id) {
+      const result = await single(primary);
+      return result.kind === "exit" ? result.status : INFRASTRUCTURE_EXIT_CODE;
+    }
+    const fallbackState = fallbackStateFor(primary, fallback);
+    if (!(await fallbackState.selectPrimary())) {
+      const result = await single(fallback);
+      return result.kind === "exit" ? result.status : INFRASTRUCTURE_EXIT_CODE;
+    }
+    const primaryResult = await executeProfile(primary, request, mode, {
+      allowFailover: true,
+      useLegInjection: true,
+      fallbackState,
+      failoverTo: fallback.id,
+      ...(controllerEnsureMs === undefined ? {} : { controllerEnsureMs }),
+    });
+    if (primaryResult.kind === "exit") return primaryResult.status;
+    try {
+      await fallbackState.observeUnreachable(primaryResult.reason);
+    } catch {
+      /* Notification state cannot make a known-unreachable primary safe to execute. */
+    }
+    const fallbackResult = await single(fallback);
+    return fallbackResult.kind === "exit" ? fallbackResult.status : INFRASTRUCTURE_EXIT_CODE;
+  };
+
+  const resolveProfile = async (
+    primary: Profile,
+    fallback: Profile | undefined,
+    mode: RunMode,
+  ): Promise<ResolveResult> => {
+    const now = options.now ?? (() => new Date().toISOString());
+    const answer = (
+      selected: string | null,
+      remoteLabel: string | null,
+      fallbackActive: boolean,
+      reason: string | null,
+      checkedAt = now(),
+    ): ResolveAnswer => ({
+      requested: primary.id,
+      selected,
+      remoteLabel,
+      fallbackActive,
+      reason,
+      checkedAt,
+    });
+    if (mode === "local") {
+      return { outcome: "selected", answer: answer(primary.id, null, true, "mode-local") };
+    }
+
+    const managedSsh = await managedSshTransport();
+    const inspect = async (profile: Profile) => {
+      const services = new NodeProfileServices(profile, {
+        home,
+        clientId,
+        sourceRoot,
+        launcherSource: options.launcherSource ?? new Uint8Array(),
+        mutagenCommand,
+        managedSshPath: managedSsh.directory,
+        knownHostsPath: managedSsh.knownHostsPath,
+        processes,
+      });
+      try {
+        await services.validate();
+        await services.probe();
+        return { ok: true as const, checkedAt: now() };
+      } catch (caught) {
+        if (!(caught instanceof PreparationError)) throw caught;
+        return {
+          ok: false as const,
+          checkedAt: now(),
+          error: caught,
+          failureClass: caught.failureClass,
+          reason: caught.reason,
+        };
+      }
+    };
+    const finishFailure = (
+      selectedProfile: Profile,
+      failure: Awaited<ReturnType<typeof inspect>> & { readonly ok: false },
+      fallbackActive: boolean,
+    ): ResolveResult => {
+      if (mayFallback(mode, selectedProfile) && !LOCAL_RERUN_POINTLESS_REASONS.has(failure.reason)) {
+        return {
+          outcome: "selected",
+          answer: answer(selectedProfile.id, null, true, failure.reason, failure.checkedAt),
+        };
+      }
+      if (failure.failureClass === "local") throw failure.error;
+      return {
+        outcome: failure.failureClass === "security" ? "security" : "unreachable",
+        answer: answer(null, null, fallbackActive, failure.reason, failure.checkedAt),
+      };
+    };
+    const remoteFallback = fallback !== undefined && primary.fallback === fallback.id;
+    if (!remoteFallback) {
+      const result = await inspect(primary);
+      return result.ok
+        ? { outcome: "selected", answer: answer(primary.id, primary.remote.label, false, null, result.checkedAt) }
+        : finishFailure(primary, result, false);
+    }
+
+    const fallbackState = fallbackStateFor(primary, fallback);
+    const decision = fallbackState.selectPrimaryDecision
+      ? await fallbackState.selectPrimaryDecision()
+      : {
+          usePrimary: await fallbackState.selectPrimary(),
+          reason: null,
+          checkedAt: null,
+        };
+    let primaryReason = decision.reason;
+    let primaryCheckedAt = decision.checkedAt;
+    if (decision.usePrimary) {
+      const result = await inspect(primary);
+      if (result.ok) {
+        await fallbackState.observeReachable().catch(() => undefined);
+        return {
+          outcome: "selected",
+          answer: answer(primary.id, primary.remote.label, false, null, result.checkedAt),
+        };
+      }
+      if (result.failureClass !== "reachability") {
+        await fallbackState.observeRefused(result.failureClass, result.reason).catch(() => undefined);
+        return finishFailure(primary, result, false);
+      }
+      await fallbackState.observeUnreachable(result.reason).catch(() => undefined);
+      primaryReason = result.reason;
+      primaryCheckedAt = result.checkedAt;
+    }
+
+    const result = await inspect(fallback);
+    if (result.ok) {
+      return {
+        outcome: "selected",
+        answer: answer(
+          fallback.id,
+          primary.remote.label,
+          true,
+          primaryReason ?? "transport",
+          primaryCheckedAt ?? result.checkedAt,
+        ),
+      };
+    }
+    return finishFailure(fallback, result, true);
+  };
+
   const dependencies: NodeCliDependencies = {
     identity,
     environment: process.env,
     loadManifest,
     readFile: async (path) => readFile(path),
     ensureController: () => ensureNodeController(home),
-    runProfile: (profile, command, mode, controllerEnsureMs) =>
-      executeProfile(profile, command, mode ?? profile.mode, controllerEnsureMs),
+    runProfile: (profile, commandOverride, mode, controllerEnsureMs, fallback) => {
+      const request = createRunRequest(profile, commandOverride);
+      return executeRequested(profile, fallback, request, mode ?? profile.mode, controllerEnsureMs);
+    },
+    resolveProfile,
     async enqueuePrewarm(profile, manifestPath) {
       await ensureNodeController(home);
       const controller = await new NodeControllerRuntime(home, processes).inspect();
@@ -717,7 +1035,8 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
       });
     },
     async statusProfile(profileId, manifestPath) {
-      const profiles = selectedProfiles(await loadManifest(manifestPath), profileId);
+      const manifest = await loadManifest(manifestPath);
+      const profiles = selectedProfiles(manifest, profileId);
       const controllerState = await new NodeControllerRuntime(home, processes).inspect();
       const controller = !controllerState.compatible ? "incompatible" : controllerState.running ? "running" : "stopped";
       const lines: string[] = [];
@@ -731,22 +1050,45 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         });
         const session = sessionResult.exitCode === 0 ? sessionStatus(sessionResult.stdout, expectedSession) : "unknown";
         const remote = await inspectRemoteStatus(processes, profile, identity, diagnosticSsh.knownHostsPath, clientId);
-        const outage = await inspectOutage(join(profileRoot(home, profile, identity), "outage.json"));
+        const fallback = remoteFallbackOf(manifest, profile);
+        const fallbackOutage =
+          fallback === undefined
+            ? undefined
+            : {
+                ...(await inspectFallbackOutage(
+                  join(
+                    home,
+                    ".local",
+                    "state",
+                    "remote-runner",
+                    "fallback",
+                    profile.consumer,
+                    profile.id,
+                    "state.json",
+                  ),
+                )),
+                id: fallback.id,
+              };
+        const outage =
+          fallbackOutage?.outage ?? (await inspectOutage(join(profileRoot(home, profile, identity), "outage.json")));
         const prewarm = await inspectPrewarmRequest(home, {
           consumer: profile.consumer,
           profile: profile.id,
           identity,
         });
+        const line = formatStatus({
+          profile: profile.id,
+          controller,
+          prewarm: prewarm.state,
+          ...(prewarm.queue === undefined ? {} : { prewarmQueue: prewarm.queue }),
+          session,
+          ...remote,
+          outage,
+        });
         lines.push(
-          formatStatus({
-            profile: profile.id,
-            controller,
-            prewarm: prewarm.state,
-            ...(prewarm.queue === undefined ? {} : { prewarmQueue: prewarm.queue }),
-            session,
-            ...remote,
-            outage,
-          }),
+          fallbackOutage === undefined
+            ? line
+            : `${line} fallback=${fallbackOutage.active ? `active(${fallbackOutage.id})` : "inactive"}`,
         );
       }
       return lines.join("\n");
@@ -805,9 +1147,16 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
           now: options.now ?? (() => new Date().toISOString()),
           async runSample(execution: BenchmarkExecution) {
             const startedAt = performance.now();
-            const status = await executeProfile(profile, execution.command, execution.location);
+            const request = createRunRequest(profile, execution.command);
+            const result = await executeProfile(profile, request, execution.location, {
+              allowFailover: false,
+              useLegInjection: false,
+            });
             const finishedAt = performance.now();
-            return { elapsedMs: Math.max(0, finishedAt - startedAt), status };
+            return {
+              elapsedMs: Math.max(0, finishedAt - startedAt),
+              status: result.kind === "exit" ? result.status : INFRASTRUCTURE_EXIT_CODE,
+            };
           },
           async writeReceipt(path, contents) {
             const target = confinedPath(sourceRoot, path);

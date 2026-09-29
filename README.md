@@ -23,6 +23,9 @@ immutable self-contained application plus a closed receipt, and updates the stab
 installed package version and immutable application identity. That one installation is shared by
 every consumer project; projects do not copy or link runner source files into their repositories.
 
+Install version 0.2.0 on the workstation before any consumer manifest first names a profile id in
+`fallback`. Version 0.1.0 rejects that whole manifest, including otherwise unchanged profiles.
+
 Merging upstream does not upgrade that installation. `remote-runner install --check` compares the
 application identity of the command consumers actually resolve with the identity the current
 checkout builds, writes nothing, and exits 1 when they differ. Invoke it through the installed
@@ -70,6 +73,7 @@ From a repository containing `.remote-runner.yaml`:
 
 ```sh
 remote-runner run verify-full
+remote-runner resolve verify-full --json
 remote-runner prewarm verify-full
 remote-runner status verify-full
 remote-runner doctor verify-full
@@ -77,7 +81,35 @@ remote-runner doctor verify-full
 
 `run` uses the profile's declared workload by default. `REMOTE_RUNNER_MODE=auto|local|remote`
 selects the mode without consumer-side parsing. A command after `--` remains available as an
-explicit diagnostic override. `prewarm` validates the profile, coalesces an equivalent request in
+explicit diagnostic override. `fallback` accepts `local`, `fail`, or another profile id in the same
+manifest and consumer. A profile-id fallback is one remote hop only: its target profile must end in
+`local` or `fail`. `auto` may traverse that remote hop and then the target's local fallback;
+`remote` permits the remote hop but forbids the local end; `local` runs only the requested profile
+locally. Every profile that names or is named as a remote fallback must keep its `id`, `consumer`,
+and `remote.label` within `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`; violations reject the manifest as a
+usage error.
+
+`remote-runner resolve <profile> [--manifest <path>] --json` applies the same mode, reachability
+cache, and one-hop selection without starting a workload, taking the profile lock, or creating a
+Mutagen session. Its JSON reports `requested`, `selected`, `remoteLabel`, `fallbackActive`, `reason`,
+and `checkedAt`; the answer is advisory because reachability can change before `run`.
+`fallbackActive` is true for a named fallback or any local leg, and false only when the requested
+profile is selected remotely. Under `auto`, a plain profile or the chain's fallback profile selects
+its `fallback: local` leg whenever the same `run` would rerun locally, regardless of failure class.
+The primary of a named pair still fails closed on `security`, `local`, and `remote` refusals.
+
+| Exit | `resolve` result                                                                          |
+| ---- | ----------------------------------------------------------------------------------------- |
+| `0`  | A remote or local selection exists.                                                       |
+| `2`  | Usage, manifest, or profile error.                                                        |
+| `3`  | No runnable selection; the same `run` request would exit 75 before starting the workload. |
+| `4`  | A `security` refusal prevents selection; local execution was not selected.                |
+| `70` | A runtime or `local`-class fault prevents selection; local execution was not selected.    |
+
+See [Rollback from remote fallback](docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md#rollback-from-remote-fallback)
+before reverting the runner or consumer manifest.
+
+`prewarm` validates the profile, coalesces an equivalent request in
 the controller-owned durable queue, and returns after that handoff; synchronization, setup, and the
 remote workload continue in the background. A handoff failure remains fail-soft so a worktree
 creation hook never fails, and the first ordinary `run` retries everything. `status` reports
@@ -122,6 +154,11 @@ not mean failure: a run that fell back to local and succeeded still names what p
 False is weaker than it looks — the marker rides the child's spawn event, so a failure in the
 window before it arrives can leave a remote workload alive — but it is the closest thing to a
 retry-safety signal the runner has, and the one channel a workload cannot influence.
+
+Every record also names `requested` and `selected`. A remote failover writes `run-failover` as the
+primary leg's terminal record and continues under the same `runId` in the fallback profile's log.
+Corpus `summary.records` includes `run-failover`; workload outcome totals still come from terminal
+workload records and do not double-count the failover marker.
 
 The 74-79 codes returned by the remote retention and probe snippets are internal to their callers
 and never become the CLI's exit status.

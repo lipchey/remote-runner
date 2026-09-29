@@ -25,6 +25,7 @@ import type { Profile } from "../../../src/config/types.js";
 import type { NodeProcessRuntime, StreamingProcessRequest } from "../../../src/node/process.js";
 import { pathIdentity, worktreeIdentity } from "../../../src/runtime/identity.js";
 import { RunTelemetry } from "../../../src/runtime/telemetry.js";
+import { prepareRemote, type FailureClass } from "../../../src/run/prepare.js";
 import { REMOTE_BUSY_EXIT_CODE, type BoundedProcessRequest } from "../../../src/ssh/client.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
@@ -65,7 +66,131 @@ function withSecretProvider(source: Profile, provider: string[] = answeringProvi
   };
 }
 
+interface ProcessOutcome {
+  readonly exitCode?: number;
+  readonly stdout?: string;
+  readonly stderr?: string;
+  readonly spawned?: boolean;
+  readonly spawnErrorCode?: string;
+}
+
+function fakeProcesses(...outcomes: ProcessOutcome[]): NodeProcessRuntime {
+  return {
+    async run() {
+      const outcome = outcomes.shift();
+      if (outcome === undefined) throw new Error("unexpected process call");
+      return {
+        exitCode: outcome.exitCode ?? 0,
+        stdout: new TextEncoder().encode(outcome.stdout ?? ""),
+        stderr: new TextEncoder().encode(outcome.stderr ?? ""),
+        outputTruncated: false,
+        spawned: outcome.spawned ?? true,
+        ...(outcome.spawnErrorCode === undefined ? {} : { spawnErrorCode: outcome.spawnErrorCode }),
+      };
+    },
+    async isAlive() {
+      return false;
+    },
+  } as NodeProcessRuntime;
+}
+
+async function prepareProbeFailure(outcome: ProcessOutcome) {
+  const services = new NodeProfileServices(profile, {
+    clientId: "test-client",
+    home: "/tmp/remote-runner-test-home",
+    sourceRoot: process.cwd(),
+    launcherSource: new Uint8Array(),
+    processes: fakeProcesses(outcome),
+  });
+  services.validate = async () => undefined;
+  services.acquireLock = async () => async () => undefined;
+  return prepareRemote(services);
+}
+
 describe("pilot service boundaries", () => {
+  it("classifies missing ssh as a local transport failure", async () => {
+    expect(await prepareProbeFailure({ exitCode: 127, spawned: false, spawnErrorCode: "ENOENT" })).toMatchObject({
+      ok: false,
+      reason: "transport",
+      failureClass: "local",
+    });
+  });
+
+  it("classifies an un-enrolled unreachable primary as reachability", async () => {
+    const home = await mkdtemp(join(tmpdir(), "remote-runner-keyscan-"));
+    try {
+      const services = new NodeProfileServices(profile, {
+        clientId: "test-client",
+        home,
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array(),
+        processes: fakeProcesses({ exitCode: 1 }),
+      });
+
+      expect(await prepareRemote(services)).toMatchObject({
+        ok: false,
+        reason: "transport",
+        failureClass: "reachability",
+      });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies DNS failure as reachability", async () => {
+    expect(
+      await prepareProbeFailure({
+        exitCode: 255,
+        stderr: "ssh: Could not resolve hostname pop-os: nodename nor servname provided",
+      }),
+    ).toMatchObject({ ok: false, reason: "dns", failureClass: "reachability" });
+  });
+
+  it("classifies authentication failure as security", async () => {
+    expect(
+      await prepareProbeFailure({ exitCode: 255, stderr: "admin@pop-os: Permission denied (publickey)." }),
+    ).toMatchObject({ ok: false, reason: "authentication", failureClass: "security" });
+  });
+
+  it("classifies a stale host-key pin as security", async () => {
+    expect(
+      await prepareProbeFailure({ exitCode: 255, stderr: "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!" }),
+    ).toMatchObject({ ok: false, reason: "host-key", failureClass: "security" });
+  });
+
+  it("classifies a Mutagen endpoint mismatch as security", async () => {
+    const identity = worktreeIdentity(process.cwd(), "test-client");
+    const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      processes: fakeProcesses(
+        {},
+        {
+          stdout: JSON.stringify([
+            {
+              identifier: `sync_${identity}`,
+              name: `remote-runner-${profile.consumer}-${profile.id}-${identity}`,
+              alpha: { protocol: "local", path: await realpath(process.cwd()) },
+              beta: { url: "admin@other:/srv/other" },
+              mode: "one-way-replica",
+              ignore: { paths: [] },
+              paused: true,
+            },
+          ]),
+        },
+      ),
+    });
+    services.validate = async () => undefined;
+    services.acquireLock = async () => async () => undefined;
+    services.probe = async () => undefined;
+    services.touchActivity = async () => undefined;
+    Object.assign(services, { remotePaths: resolveRemotePaths("/home/admin", profile, identity, "test-client") });
+
+    expect(await prepareRemote(services)).toMatchObject({ ok: false, reason: "sync", failureClass: "security" });
+  });
+
   it.each([0, 7])(
     "prepares local dependencies before announcing or starting work (setup exit %s)",
     async (setupExit) => {
@@ -150,6 +275,33 @@ describe("pilot service boundaries", () => {
 
     expect(exitCode).toBe(0);
     expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("manifest|1|local");
+  });
+
+  it("sets local child profile markers after inherited environment values", async () => {
+    const chunks: Uint8Array[] = [];
+    const inherited = process.env.REMOTE_RUNNER_REMOTE_LABEL;
+    process.env.REMOTE_RUNNER_REMOTE_LABEL = "inherited";
+    try {
+      const services = new NodeProfileServices(withSecretProvider(profile), {
+        clientId: "test-client",
+        home: "/tmp/remote-runner-test-home",
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array(),
+        stdout: (chunk) => chunks.push(chunk),
+        stderr: () => undefined,
+      });
+
+      await services.runLocal([
+        process.execPath,
+        "-e",
+        "process.stdout.write(`${process.env.REMOTE_RUNNER_SELECTED_PROFILE}|${process.env.REMOTE_RUNNER_REMOTE_LABEL}`)",
+      ]);
+
+      expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("verify-full|");
+    } finally {
+      if (inherited === undefined) delete process.env.REMOTE_RUNNER_REMOTE_LABEL;
+      else process.env.REMOTE_RUNNER_REMOTE_LABEL = inherited;
+    }
   });
 
   it("carries the allowlisted secrets into the local child, as the remote launcher does", async () => {
@@ -766,6 +918,28 @@ describe("pilot service boundaries", () => {
     expect(recorded).toEqual(["transport"]);
   });
 
+  it("forwards typed refusals instead of writing the v1 outage channel", async () => {
+    const refusals: Array<readonly [FailureClass, string]> = [];
+    const fallbacks: string[] = [];
+    const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      recordFallback: async (reason) => {
+        fallbacks.push(reason);
+      },
+      recordRefusal: async (failureClass, reason) => {
+        refusals.push([failureClass, reason]);
+      },
+    });
+
+    await services.recordOutage("host-key", "security");
+
+    expect(refusals).toEqual([["security", "host-key"]]);
+    expect(fallbacks).toEqual([]);
+  });
+
   it("builds fixed child argv without putting secret values into it", () => {
     const args = remoteChildArguments(
       "/remote/node/bin/node",
@@ -782,6 +956,12 @@ describe("pilot service boundaries", () => {
     expect(serialized).toContain("NEON_DEV_DATABASE_URL");
     expect(serialized).toContain("REMOTE_RUNNER_CHILD");
     expect(args).toContain("REMOTE_RUNNER_PROVIDER=remote");
+    expect(args).toContain("REMOTE_RUNNER_SELECTED_PROFILE=verify-full");
+    expect(args).toContain("REMOTE_RUNNER_REMOTE_LABEL=pop-os");
+    expect(args.indexOf("REMOTE_RUNNER_SELECTED_PROFILE=verify-full")).toBeGreaterThan(
+      args.indexOf("REMOTE_RUNNER_PROVIDER=remote"),
+    );
+    expect(args.indexOf("REMOTE_RUNNER_REMOTE_LABEL=pop-os")).toBeGreaterThan(args.indexOf("REMOTE_RUNNER_CHILD=1"));
     expect(args).toContain("PATH=/remote/node/bin:/remote/uv:/usr/bin:/bin");
     expect(args).toContain("/remote/profile/.locks/0123456789abcdef01234567");
     expect(args[2]).toContain("flock -x 9");

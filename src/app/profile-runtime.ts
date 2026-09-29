@@ -1,6 +1,6 @@
 import { stableReason } from "../notifications/outage.js";
 import type { RunTelemetry } from "../runtime/telemetry.js";
-import { prepareRemote, type PreparationRuntime } from "../run/prepare.js";
+import { prepareRemote, type FailureClass, type PreparationRuntime } from "../run/prepare.js";
 import { WORKLOAD_COMMAND_REASON, type RemoteExecutionResult, type RunProfileRuntime } from "../run/run-profile.js";
 
 export interface ProfileExecutionServices extends PreparationRuntime {
@@ -11,7 +11,7 @@ export interface ProfileExecutionServices extends PreparationRuntime {
   ): Promise<RemoteExecutionResult>;
   runLocal(command: readonly string[], prepared?: Readonly<Record<string, string>>): Promise<number>;
   recordFallback(reason: string): Promise<void>;
-  recordOutage(reason: string): Promise<void>;
+  recordOutage(reason: string, failureClass?: FailureClass): Promise<void>;
   recordRemoteChildStarted(): Promise<void>;
   reportUnavailable(reason: string, detail?: string): void;
 }
@@ -46,6 +46,7 @@ function timedPreparation(services: ProfileExecutionServices, telemetry: RunTele
 
 export function createProfileRuntime(services: ProfileExecutionServices, telemetry?: RunTelemetry): RunProfileRuntime {
   let pendingFallbackReason: string | undefined;
+  let pendingFailureClass: FailureClass | undefined;
   let reportedReason: string | undefined;
   let reportedDetail: string | undefined;
   const preparation = telemetry === undefined ? services : timedPreparation(services, telemetry);
@@ -54,11 +55,13 @@ export function createProfileRuntime(services: ProfileExecutionServices, telemet
       const result = await prepareRemote(preparation);
       if (result.ok) {
         pendingFallbackReason = undefined;
+        pendingFailureClass = undefined;
         reportedReason = undefined;
         reportedDetail = undefined;
       } else {
         const reason = stableReason(result.reason);
         pendingFallbackReason = reason;
+        pendingFailureClass = result.failureClass;
         /* The prepare loop retries a retryable failure, and one run reporting the same failure twice
            reads as two outages to the operator and to the run log. Only a byte-identical repeat is
            suppressed: the detail is what makes a wedged sync diagnosable, so the same reason
@@ -84,6 +87,7 @@ export function createProfileRuntime(services: ProfileExecutionServices, telemet
           started = true;
           await onChildStarted();
           pendingFallbackReason = undefined;
+          pendingFailureClass = undefined;
           try {
             await services.recordRemoteChildStarted();
           } catch {
@@ -109,6 +113,7 @@ export function createProfileRuntime(services: ProfileExecutionServices, telemet
            applied here, so a secrets frame that could not be encoded stays `secrets`. */
         const reason = stableReason(result.reason);
         pendingFallbackReason = reason;
+        pendingFailureClass = "remote";
         report(services, reason);
       }
       return result;
@@ -116,6 +121,7 @@ export function createProfileRuntime(services: ProfileExecutionServices, telemet
     async runLocal(command, prepared) {
       const reason = pendingFallbackReason;
       pendingFallbackReason = undefined;
+      pendingFailureClass = undefined;
       if (reason !== undefined) {
         try {
           await services.recordFallback(reason);
@@ -131,8 +137,10 @@ export function createProfileRuntime(services: ProfileExecutionServices, telemet
        has no local run to consume it. */
     async failClosed() {
       const reason = pendingFallbackReason;
+      const failureClass = pendingFailureClass;
       pendingFallbackReason = undefined;
-      if (reason !== undefined) await services.recordOutage(reason);
+      pendingFailureClass = undefined;
+      if (reason !== undefined) await services.recordOutage(reason, failureClass);
     },
   };
 }

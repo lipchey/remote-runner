@@ -9,7 +9,7 @@ export interface Profile {
   id: string;
   consumer: string;
   mode: RunMode;
-  fallback: "local" | "fail";
+  fallback: "local" | "fail" | string;
   remote: {
     label: string;
     target: string;

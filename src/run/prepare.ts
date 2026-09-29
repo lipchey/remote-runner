@@ -28,6 +28,8 @@ export type PreparationReason =
   | "consumer-setup"
   | "secrets";
 
+export type FailureClass = "reachability" | "local" | "security" | "remote";
+
 export class RetryablePreparationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -36,13 +38,16 @@ export class RetryablePreparationError extends Error {
 }
 
 export class PreparationError extends Error {
+  readonly failureClass: FailureClass;
+
   constructor(
     readonly reason: PreparationReason,
     readonly retryable: boolean,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { readonly failureClass?: FailureClass },
   ) {
     super(`remote preparation failed: ${reason}`, options);
     this.name = "PreparationError";
+    this.failureClass = options?.failureClass ?? "remote";
   }
 }
 
@@ -68,6 +73,7 @@ export type PrepareResult =
       readonly ok: false;
       readonly reason: PreparationReason | string;
       readonly retryable: boolean;
+      readonly failureClass: FailureClass;
       readonly detail?: string;
     };
 
@@ -137,7 +143,7 @@ export async function prepareRemote(runtime: PreparationRuntime): Promise<Prepar
       try {
         await release();
       } catch {
-        return { ok: false, reason: "lock", retryable: false };
+        return { ok: false, reason: "lock", retryable: false, failureClass: "local" };
       }
     }
     const detail = preparationDetail(caught);
@@ -145,6 +151,7 @@ export async function prepareRemote(runtime: PreparationRuntime): Promise<Prepar
       ok: false,
       reason: caught instanceof PreparationError ? caught.reason : reasonFor(step),
       retryable: caught instanceof PreparationError ? caught.retryable : caught instanceof RetryablePreparationError,
+      failureClass: caught instanceof PreparationError ? caught.failureClass : step === "validate" ? "local" : "remote",
       ...(detail === undefined ? {} : { detail }),
     };
   }

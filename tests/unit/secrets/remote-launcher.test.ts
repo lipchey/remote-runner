@@ -44,10 +44,11 @@ async function runLauncher(
     "-e",
     "process.stdout.write(process.env.SECRET === 'secret-canary' ? 'present' : 'missing')",
   ],
+  environment: NodeJS.ProcessEnv = {},
 ) {
   const child = spawn(process.execPath, [launcher, JSON.stringify(allow), "--", ...command], {
     stdio: ["pipe", "pipe", "pipe", "pipe"],
-    env: { PATH: process.env.PATH ?? "" },
+    env: { PATH: process.env.PATH ?? "", ...environment },
   });
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
@@ -70,6 +71,18 @@ describe("fixed remote launcher", () => {
   it("emits the child marker only after a valid frame reaches the fixed child", async () => {
     const result = await runLauncher(encodeSecretFrame({ SECRET: "secret-canary" }, ["SECRET"]).stdin);
     expect(result).toEqual({ code: 0, signal: null, stdout: "present", stderr: "", marker: "RR_CHILD_STARTED\n" });
+  });
+
+  it("keeps runner markers authoritative over allowlisted secrets", async () => {
+    const name = "REMOTE_RUNNER_SELECTED_PROFILE";
+    const result = await runLauncher(
+      encodeSecretFrame({ [name]: "from-secret" }, [name]).stdin,
+      [name],
+      [process.execPath, "-e", `process.stdout.write(String(process.env.${name}))`],
+      { [name]: "verify-full" },
+    );
+
+    expect(result).toMatchObject({ code: 0, stdout: "verify-full", marker: "RR_CHILD_STARTED\n" });
   });
 
   it.each([

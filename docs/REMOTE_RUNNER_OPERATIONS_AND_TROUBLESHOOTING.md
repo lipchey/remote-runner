@@ -84,6 +84,116 @@ unknown outcome and never a licence to retry. A `run-unavailable` record names t
 operator detail when the failure carried one; join it by `runId` for that detail, and for any run
 whose terminal record has no reason.
 
+## Remote fallback
+
+A profile may use `fallback: local`, `fallback: fail`, or name one other profile in the same
+manifest and consumer. A named target must itself end in `local` or `fail`, so the chain has at most
+two remote legs. In `auto`, an unreachable primary selects the remote fallback and that profile may
+still end locally. `remote` permits the second remote but forbids its local end; `local` runs only the
+requested profile locally. Without a command override, each remote leg uses its own
+`workload.command`; an explicit command after `--` is shared by both legs.
+Every profile that names or is named as a remote fallback must match
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` in its `id`, `consumer`, and `remote.label`; the manifest is a
+usage error (exit 2) if any of those fields fails the rule.
+
+Install remote-runner 0.2.0 on the workstation before committing a manifest that names a profile id
+in `fallback`. Version 0.1.0 rejects the whole manifest, so even direct runs of its other profiles
+then exit 2.
+
+`remote-runner resolve <profile> [--manifest <path>] --json` applies the same mode, cache, and
+one-hop selection without taking the workload lock, creating or inspecting a Mutagen session, or
+starting a workload. The JSON fields are `requested`, `selected`, `remoteLabel`, `fallbackActive`,
+`reason`, and `checkedAt`. Treat the result as advisory: the selected host can change state before
+the subsequent run. `fallbackActive` is true whenever the selected leg is local or is the named
+fallback; it is false only when the requested profile is selected remotely.
+
+Under `auto`, a plain profile or the chain's fallback profile selects its own `fallback: local` leg
+whenever the same `run` would rerun locally, including `security`, `local`, and `remote` failures.
+The primary of a named pair remains strict: its `security`, `local`, and `remote` refusals do not
+spend the fallback. `remote` mode forbids every local end.
+
+| Exit | `resolve` meaning                                                                       |
+| ---- | --------------------------------------------------------------------------------------- |
+| `0`  | A remote or local selection exists.                                                     |
+| `2`  | Usage, manifest, or unknown-profile error.                                              |
+| `3`  | No runnable selection; the same run request would exit 75 before starting the workload. |
+| `4`  | A `security` refusal prevents selection; local execution was not selected.              |
+| `70` | A runtime or `local`-class fault prevents selection; local execution was not selected.  |
+
+Classification is the same on the primary, fallback, and a plain profile; selection is not:
+
+| Class          | Typical conditions                                                                                           | Selection action                                                                                  |
+| -------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `reachability` | DNS failure, refused/timed-out connection, no route                                                          | A named primary records the outage and tries F; a plain/F local end under `auto` selects locally. |
+| `security`     | Host-key or authentication failure; owned Mutagen name with foreign endpoints, mode, ignores, or a duplicate | P fails closed; a plain/F local end under `auto` selects locally, otherwise `resolve` exits 4.    |
+| `local`        | Local SSH tool did not spawn, local state or descriptor failure                                              | P fails closed; a plain/F local end under `auto` selects locally, otherwise `resolve` exits 70.   |
+| `remote`       | Remote shell, capacity, workspace, setup, or other remote-side refusal                                       | P fails closed; a plain/F local end under `auto` selects locally, otherwise `resolve` exits 3.    |
+
+On first use, an unreachable host now reports `dns` or `transport`, retries enrollment once, then
+runs a `fallback: local` profile locally under `auto` and raises the v1 outage alert. A scanned key
+that does not uniquely match the pin reports `host-key`/`security`, is not retried, and still runs
+that local leg with its v1 alert because `host-key` is an outage reason.
+
+A `security`, `local`, or `remote` refusal of the primary blocks runs of that primary by design; it
+does not silently spend the named fallback. Until the primary is fixed, the operator escape hatch is
+to run the fallback profile explicitly: `remote-runner run <fallback>`.
+
+The shared state is
+`~/.local/state/remote-runner/fallback/<consumer>/<primary>/state.json`, guarded by the sibling
+`lock` directory. Its schema is:
+
+```json
+{
+  "schemaVersion": 2,
+  "consumer": "ariadne",
+  "primary": "verify-full-pop-os",
+  "topology": {
+    "target": "admin@pop-os",
+    "hostKeySha256": "SHA256:…",
+    "fallback": "verify-full",
+    "fallbackTarget": "admin@ariadne-runner"
+  },
+  "outage": { "reason": "transport", "since": "2026-09-29T10:00:00.000Z" },
+  "refusal": null,
+  "negative": { "checkedAt": "2026-09-29T10:00:00.000Z", "ttlMs": 60000 },
+  "lease": null,
+  "lastRecoveryAt": null,
+  "backoffTtlMs": 120000,
+  "queue": []
+}
+```
+
+A fresh negative entry skips the primary. Its TTL starts at 60 seconds, doubles up to 10 minutes,
+and a new outage within 15 minutes of recovery resumes the persisted back-off instead of restarting
+at 60 seconds. After expiry, one caller takes a 60-second probe lease while other callers continue
+to the fallback. A backward clock step expires rather than extends a future-dated cache entry. A
+topology mismatch clears outage, refusal, cache, and lease while retaining queued notifications.
+`status <primary>` reads this v2 file and appends `fallback=active(<fallback>)` or
+`fallback=inactive`.
+
+A refusal clears the negative entry and probe lease. While `refusal` is set, selection probes the
+primary instead of skipping it from an old outage cache. If that probe is unreachable, it clears a
+`remote` refusal and activates the negative cache; `security` and `local` refusals remain fail-closed.
+
+The v2 Telegram kinds are `primary-down`, `primary-refused`, and `primary-recovered`. Down means the
+primary was unreachable and selection moved to the fallback. Refused means the primary failed
+closed; `class=security reason=sync` specifically means a Mutagen session under the owned name had
+foreign endpoints, mode, ignores, or a duplicate. Recovered is emitted only after the primary child
+starts and states whether it cleared an outage, refusal, or both. The guarantee is exactly-once
+durable enqueue per transition plus at-least-once delivery: a crash after Telegram accepts a send but
+before the queue write can repeat that message. A busy state lock skips the current transition; the next primary probe
+re-observes a skipped outage, and the next primary child start re-observes a skipped recovery.
+If the 64-event v2 queue is full, the next transition drops the oldest event with one stderr warning
+and still persists the state change.
+
+Every run record names `requested` and `selected`. On failover, the primary log ends that leg with
+`run-failover {to, reason}` and the fallback log continues under the same `runId`. Treat
+`run-failover`, `run-finish`, and `run-error` as terminal leg records. Global corpus
+`summary.records` counts `run-failover`; outcome totals still use workload terminal records, so the
+transition is not a second workload result. The workload child receives runner-owned
+`REMOTE_RUNNER_SELECTED_PROFILE` and `REMOTE_RUNNER_REMOTE_LABEL`; the local leg sets the latter to
+the empty string. Setup and ensure commands do not receive either marker.
+
 ## Stable reason-code index
 
 | Reason                   | Read-only diagnosis                                                                                              |
@@ -395,8 +505,9 @@ take a long time.
 
 Confirm `/Users/admin/.claude/.telegram-ask.conf` is a regular file owned by the current user with mode
 `0600`; do not print it. `remote-runner doctor <profile>` and the notification queue status are safe to
-share. An outage is sent once, repeats while one is already open are deduplicated, and recovery is
-sent only after the remote child-start marker. The message never promises a local run: the fallback
+share. An outage transition is durably enqueued once, repeats while one is already open are
+deduplicated, and delivery is at least once; recovery is enqueued only after the remote child-start
+marker. The message never promises a local run: the fallback
 branch and the fail-closed branch raise the same outage, so the text cannot name either. A
 `connection-lost`
 outage is the one that arrives after the marker had already been seen, so the recovery for the
@@ -431,6 +542,48 @@ only paths whose name carries the selected worktree identity.
 Run `remote-runner doctor <profile>` before and after installing a signed, checksum-verified release.
 The installer may replace only its owned executable, plist, and bundled Mutagen paths; compatible
 state is preserved. A running controller is restarted when the executable or plist changes.
+Install version 0.2.0 before any consumer manifest names a profile id in `fallback`; version 0.1.0
+rejects such a manifest whole. On the first v2 access, the runner renames the primary profile's v1
+`outage.json` files to `outage.v1-retired.json` under the v2 lock. It does not deliver their queued
+events; fallback and plain profiles keep their v1 state.
+
+## Rollback from remote fallback
+
+Version 0.1.0 cannot read a manifest whose `fallback` names a profile id: it rejects the entire
+manifest, so reverting the installed runner first would also break direct runs of unchanged profiles.
+Use this order:
+
+1. Stop dispatching remote-fallback profiles. Run the following for both the primary and fallback:
+
+   ```sh
+   remote-runner status <profile>
+   remote-runner logs <profile>
+   ```
+
+   Wait until neither status contains `prewarm=queued` or `prewarm=running`. Join log records by
+   `runId` and wait until every `run-start` has a terminal `run-finish`, `run-error`, or
+   `run-failover` record.
+
+2. Revert the consumer first: remove the primary or set its `fallback` to `local` or `fail`, then
+   commit the manifest so no profile names another profile in `fallback`.
+3. Reinstall the accepted old revision and confirm the installed identity:
+
+   ```sh
+   git checkout <accepted-sha>
+   pnpm install
+   pnpm verify
+   node dist/src/main.js install
+   remote-runner install --check
+   ```
+
+   The launcher asset reinstalls itself by digest on the next run.
+
+4. Read `~/.local/state/remote-runner/fallback/<consumer>/<primary>/state.json`. If `queue` is
+   non-empty, relay the undelivered events manually, then delete only that primary's fallback-state
+   directory. Retired `outage.v1-retired.json` files may be deleted; old code creates fresh v1 state.
+5. The fallback profile's Mutagen sessions keep their names and need no action. After checking their
+   endpoints, terminate sessions for the removed primary with
+   `mutagen sync terminate remote-runner-<consumer>-<primary>-<identity>`.
 
 ## Uninstall
 

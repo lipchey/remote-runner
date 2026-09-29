@@ -1,18 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  access,
-  lstat,
-  mkdir,
-  readdir,
-  readFile,
-  readlink,
-  realpath,
-  rename,
-  rm,
-  stat,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { access, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import process from "node:process";
 
@@ -29,20 +16,22 @@ import { installNode, localNodeVersion } from "../bootstrap/node.js";
 import { installUv } from "../bootstrap/uv.js";
 import type { Profile } from "../config/types.js";
 import { NodeProcessRuntime, runStreamingProcess } from "../node/process.js";
+import { nodeLockFiles } from "../node/lock-files.js";
 import { ensureManagedKnownHost, mutagenSshEnvironment } from "../node/managed-ssh.js";
 import { RemoteToolchainRuntime } from "../node/remote-toolchain.js";
 import { acquireProfileLock, LockTimeoutError } from "../runtime/lock.js";
 import { clientNamespace, resolveClientIdentity, worktreeIdentity } from "../runtime/identity.js";
 import type { RunPhase, RunTelemetry } from "../runtime/telemetry.js";
-import { PreparationError } from "../run/prepare.js";
+import { PreparationError, type FailureClass } from "../run/prepare.js";
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
 import { INFRASTRUCTURE_EXIT_CODE, WORKLOAD_COMMAND_REASON } from "../run/run-profile.js";
 import type { RemoteExecutionResult } from "../run/run-profile.js";
 import { isOutageReason, stableReason } from "../notifications/outage.js";
 import { encodeSecretFrame, type SecretFrame } from "../secrets/frame.js";
 import { readDotenvSecrets, runSecretProvider } from "../secrets/provider.js";
-import { classifySshFailure } from "../ssh/probe.js";
+import { classifySshFailure, failureClassOf } from "../ssh/probe.js";
 import {
+  HostKeyScanError,
   REMOTE_BUSY_EXIT_CODE,
   runSsh,
   sshArguments,
@@ -50,7 +39,7 @@ import {
   type BoundedProcessResult,
   type SshProcessRuntime,
 } from "../ssh/client.js";
-import { MutagenSyncLifecycle, type PausedMutagenSession } from "../sync/mutagen.js";
+import { MutagenOwnershipError, MutagenSyncLifecycle, type PausedMutagenSession } from "../sync/mutagen.js";
 import { reconcileWorkspace } from "../workspace/git-workspace.js";
 import {
   pruneRemoteWorkspaces,
@@ -148,7 +137,7 @@ export function remoteChildArguments(
   workspace: string,
   workloadLock: string,
   pathEnvironment: string,
-  profile: Pick<Profile, "workload" | "secrets">,
+  profile: Pick<Profile, "id" | "remote" | "workload" | "secrets">,
   command: readonly string[],
 ): readonly string[] {
   for (const [label, path] of [
@@ -184,6 +173,8 @@ export function remoteChildArguments(
     ...childEnvironment.map(([name, value]) => `${name}=${value}`),
     "REMOTE_RUNNER_CHILD=1",
     "REMOTE_RUNNER_PROVIDER=remote",
+    `REMOTE_RUNNER_SELECTED_PROFILE=${profile.id}`,
+    `REMOTE_RUNNER_REMOTE_LABEL=${profile.remote.label}`,
     node,
     launcher,
     JSON.stringify(profile.secrets.allow),
@@ -429,6 +420,7 @@ export interface NodeProfileServicesOptions {
   readonly stdout?: (chunk: Uint8Array) => void;
   readonly stderr?: (chunk: Uint8Array) => void;
   readonly recordFallback?: (reason: string) => Promise<void>;
+  readonly recordRefusal?: (failureClass: FailureClass, reason: string) => Promise<void>;
   readonly recordRemoteChildStarted?: () => Promise<void>;
   readonly onLocalExecution?: () => void;
   readonly onUnavailable?: (reason: string, detail?: string) => void;
@@ -590,45 +582,27 @@ export class NodeProfileServices implements ProfileExecutionServices {
   async validate(): Promise<void> {
     await mkdir(this.lockRoot, { recursive: true, mode: 0o700 });
     await mkdir(dirname(this.knownHostsPath), { recursive: true, mode: 0o700 });
-    await ensureManagedKnownHost(this.processes, {
-      target: this.profile.remote.target,
-      trustedFingerprint: this.profile.remote.hostKeySha256,
-      knownHostsPath: this.knownHostsPath,
-      connectTimeoutSeconds: this.profile.probes.connectTimeoutSeconds,
-    });
+    try {
+      await ensureManagedKnownHost(this.processes, {
+        target: this.profile.remote.target,
+        trustedFingerprint: this.profile.remote.hostKeySha256,
+        knownHostsPath: this.knownHostsPath,
+        connectTimeoutSeconds: this.profile.probes.connectTimeoutSeconds,
+      });
+    } catch (caught) {
+      if (!(caught instanceof HostKeyScanError)) throw caught;
+      throw new PreparationError(caught.reason, true, { cause: caught, failureClass: caught.failureClass });
+    }
   }
 
   async acquireLock(): Promise<() => Promise<void>> {
-    const files = {
-      mkdir: async (path: string) => {
-        await mkdir(path, { mode: 0o700 });
-      },
-      readFile: async (path: string) => new Uint8Array(await readFile(path)),
-      writeFile: async (path: string, contents: Uint8Array, mode: number) => {
-        await writeFile(path, contents, { flag: "wx", mode });
-      },
-      symlink: async (target: string, path: string) => {
-        await symlink(target, path);
-      },
-      readlink: (path: string) => readlink(path),
-      readdir: (path: string) => readdir(path),
-      /* lstat, not stat: the age of a quarantined symlink is the age of the link itself, and its
-         target may not exist at all. */
-      modifiedAt: async (path: string) => (await lstat(path)).mtimeMs,
-      rename: async (from: string, to: string) => {
-        await rename(from, to);
-      },
-      remove: async (path: string) => {
-        await rm(path, { recursive: true });
-      },
-    };
     const notice = setTimeout(() => {
       this.write("remote-runner: another run holds this workspace; waiting for it to finish\n");
     }, LOCK_WAIT_NOTICE_MS);
     try {
       return await acquireProfileLock(
         {
-          files,
+          files: nodeLockFiles(),
           processes: this.processes,
           clock: {
             now: () => Date.now(),
@@ -664,7 +638,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
     );
     if (homeResult.exitCode !== 0) {
       const reason = classifySshFailure(decode(homeResult.stderr, "SSH home probe"), homeResult);
-      throw new PreparationError(reason, true);
+      throw new PreparationError(reason, true, { failureClass: failureClassOf(reason, homeResult) });
     }
     const remoteHome = decode(homeResult.stdout, "SSH home probe").replace(/\r?\n$/u, "");
     try {
@@ -688,9 +662,9 @@ export class NodeProfileServices implements ProfileExecutionServices {
       CAPTURE_BYTES,
     );
     if (capacityResult.exitCode !== 0) {
-      if (capacityResult.exitCode === 73) throw new PreparationError("workspace", false);
+      if (capacityResult.spawned && capacityResult.exitCode === 73) throw new PreparationError("workspace", false);
       const reason = classifySshFailure(decode(capacityResult.stderr, "SSH capacity probe"), capacityResult);
-      throw new PreparationError(reason, true);
+      throw new PreparationError(reason, true, { failureClass: failureClassOf(reason, capacityResult) });
     }
     const capacity = decode(capacityResult.stdout, "SSH capacity probe").trim();
     if (!/^(?:0|[1-9][0-9]*)$/u.test(capacity)) throw new PreparationError("capacity", false);
@@ -743,15 +717,20 @@ export class NodeProfileServices implements ProfileExecutionServices {
 
   async pauseSync(): Promise<void> {
     const paths = this.paths();
-    this.pausedSession = await this.mutagen.pauseForGitReconcile({
-      consumer: this.profile.consumer,
-      profile: this.profile.id,
-      identity: this.identity,
-      canonicalAlphaRoot: await realpath(this.options.sourceRoot),
-      betaTarget: this.profile.remote.target,
-      betaRoot: paths.workspace,
-      ignores: this.profile.sync.ignores,
-    });
+    try {
+      this.pausedSession = await this.mutagen.pauseForGitReconcile({
+        consumer: this.profile.consumer,
+        profile: this.profile.id,
+        identity: this.identity,
+        canonicalAlphaRoot: await realpath(this.options.sourceRoot),
+        betaTarget: this.profile.remote.target,
+        betaRoot: paths.workspace,
+        ignores: this.profile.sync.ignores,
+      });
+    } catch (caught) {
+      if (!(caught instanceof MutagenOwnershipError)) throw caught;
+      throw new PreparationError("sync", false, { cause: caught, failureClass: "security" });
+    }
   }
 
   async reconcileWorkspace(): Promise<void> {
@@ -779,7 +758,13 @@ export class NodeProfileServices implements ProfileExecutionServices {
     if (this.pausedSession === undefined) throw new Error("Mutagen session was not paused");
     const descriptor = this.pausedSession;
     this.pausedSession = undefined;
-    const { flushDurationMs } = await this.mutagen.resumeAndFlush(descriptor);
+    let flushDurationMs: number;
+    try {
+      ({ flushDurationMs } = await this.mutagen.resumeAndFlush(descriptor));
+    } catch (caught) {
+      if (!(caught instanceof MutagenOwnershipError)) throw caught;
+      throw new PreparationError("sync", false, { cause: caught, failureClass: "security" });
+    }
     /* Moved out of `sync-resume`, not added beside it — that span already covers the flush's time. */
     this.options.telemetry?.add("sync-flush", flushDurationMs);
     this.options.telemetry?.add("sync-resume", -flushDurationMs);
@@ -1097,8 +1082,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
        remote child, reused so the substituted run carries what the substituted-for one would have,
        and so a provider with side effects is not invoked twice; only a run that never got that far
        collects here. Values that cannot be collected fail the run closed rather than running a
-       workload the remote would not have run. Spread last, matching the remote launcher, which
-       merges them over an environment that already carries the markers. */
+       workload the remote would not have run. */
       const secrets =
         prepared ??
         (await this.collectSecrets().catch((caught: unknown) => {
@@ -1118,6 +1102,8 @@ export class NodeProfileServices implements ProfileExecutionServices {
           REMOTE_RUNNER_CHILD: "1",
           REMOTE_RUNNER_PROVIDER: "local",
           ...secrets,
+          REMOTE_RUNNER_SELECTED_PROFILE: this.profile.id,
+          REMOTE_RUNNER_REMOTE_LABEL: "",
         },
         marker: new TextEncoder().encode("\0REMOTE_RUNNER_UNUSED_MARKER\0"),
         onMarker: async () => undefined,
@@ -1152,11 +1138,15 @@ export class NodeProfileServices implements ProfileExecutionServices {
      swallowed it and the notification state still has an outage open under the PREVIOUS reason — so
      this call dedupes into silence, and the next healthy run sends a recovery naming that stale
      reason. Narrow (the state write itself has to fail) and noticed, not overlooked. */
-  async recordOutage(reason: string): Promise<void> {
+  async recordOutage(reason: string, failureClass?: FailureClass): Promise<void> {
     /* The operator still sees the stderr line; only the outage channel is spared reasons that say
        nothing about the remote being reachable. */
     const stable = stableReason(reason);
-    if (isOutageReason(stable)) await this.options.recordFallback?.(stable);
+    if (this.options.recordRefusal !== undefined) {
+      await this.options.recordRefusal(failureClass ?? "remote", stable);
+    } else if (isOutageReason(stable)) {
+      await this.options.recordFallback?.(stable);
+    }
   }
 
   async recordRemoteChildStarted(): Promise<void> {

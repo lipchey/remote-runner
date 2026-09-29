@@ -17,7 +17,14 @@ const WORKLOAD_SPAWN_ERRORS = new Set(["ENOENT", "EACCES", "EISDIR", "ENOTDIR", 
 const MAX_FRAME_BYTES = 128 * 1024;
 const MAX_SECRET_BYTES = 64 * 1024;
 const SECRET_NAME = /^[A-Z][A-Z0-9_]*$/u;
+const RUNNER_MARKERS = ["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL"];
 const decoder = new TextDecoder("utf-8", { fatal: true });
+
+function runnerMarkers() {
+  return Object.fromEntries(
+    RUNNER_MARKERS.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]),
+  );
+}
 
 function fail(message, code = 64) {
   process.stderr.write(`remote-runner launcher: ${message}\n`);
@@ -151,7 +158,7 @@ async function launch() {
   let child;
   try {
     child = spawn(control.command[0], control.command.slice(1), {
-      env: { ...process.env, ...secrets },
+      env: { ...process.env, ...secrets, ...runnerMarkers() },
       stdio: ["ignore", "inherit", "inherit"],
     });
   } catch (error) {

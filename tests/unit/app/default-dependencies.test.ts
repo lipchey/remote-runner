@@ -14,14 +14,35 @@ import {
 } from "../../../src/app/default-dependencies.js";
 import { DIAGNOSTIC_PROBES } from "../../../src/diagnostics/doctor.js";
 import { formatInstallReceipt } from "../../../src/node/install-receipt.js";
+import type { FallbackCallbacks } from "../../../src/node/notifications.js";
 import { consumeNextPrewarmRequest, inspectPrewarmRequest } from "../../../src/prewarm/queue.js";
 import { worktreeIdentity } from "../../../src/runtime/identity.js";
+import { runProfileLeg } from "../../../src/run/run-profile.js";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../../src/ssh/client.js";
 import { compileIgnores, mutagenSessionName } from "../../../src/sync/mutagen.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
 const temporaryRoots: string[] = [];
 const MANIFEST_COMPILED_IGNORES = compileIgnores(["node_modules", ".git"]);
+const profileBlock = validManifest.slice(validManifest.indexOf("  - id:"));
+
+function remoteFallbackManifest(fallbackPolicy: "local" | "fail" = "local"): string {
+  const fallback = validManifest
+    .replace("fallback: local", `fallback: ${fallbackPolicy}`)
+    .replace(
+      'workload: { command: ["./scripts/verify", "--full"], childEnvironment:',
+      'workload: { command: ["./scripts/fallback"], childEnvironment:',
+    );
+  const primary = profileBlock
+    .replace("id: verify-full", "id: verify-full-pop-os")
+    .replace("fallback: local", "fallback: verify-full")
+    .replace("label: pop-os, target: admin@pop-os", "label: ariadne-runner, target: admin@primary")
+    .replace(
+      'workload: { command: ["./scripts/verify", "--full"], childEnvironment:',
+      'workload: { command: ["./scripts/primary"], childEnvironment:',
+    );
+  return `${fallback}${primary}`;
+}
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -63,11 +84,29 @@ function result(stdout = "", exitCode = 0): BoundedProcessResult {
   };
 }
 
+const resolveHostKey = new TextEncoder().encode("resolve-host-key");
+const resolveHostPin = `SHA256:${createHash("sha256").update(resolveHostKey).digest("base64").replace(/=+$/u, "")}`;
+
+function resolveManifest(fallbackPolicy: "local" | "fail" = "local"): string {
+  return remoteFallbackManifest(fallbackPolicy).replaceAll("SHA256:trusted", resolveHostPin);
+}
+
+async function seedResolveKnownHosts(paths: { readonly knownHostsPath: string }): Promise<void> {
+  await mkdir(dirname(paths.knownHostsPath), { recursive: true });
+  const key = Buffer.from(resolveHostKey).toString("base64");
+  await writeFile(paths.knownHostsPath, `primary ssh-ed25519 ${key}\npop-os ssh-ed25519 ${key}\n`, { mode: 0o600 });
+}
+
+type ResolveProbeOutcome = "reachable" | "reachability" | "remote" | "security" | "local";
+
 interface RunRecord {
   readonly event: string;
   readonly runId: string;
   readonly pid: number;
   readonly profile?: string;
+  readonly requested?: string;
+  readonly selected?: string;
+  readonly to?: string;
   readonly mode?: string;
   readonly status?: number;
   readonly provider?: string;
@@ -82,8 +121,19 @@ interface RunRecord {
   readonly controllerEnsureMs?: number;
 }
 
-async function runRecords(dependencies: NodeCliDependencies): Promise<RunRecord[]> {
-  return ((await dependencies.logsProfile?.("verify-full")) ?? []).map((line) => JSON.parse(line) as RunRecord);
+async function runRecords(dependencies: NodeCliDependencies, profile = "verify-full"): Promise<RunRecord[]> {
+  return ((await dependencies.logsProfile?.(profile)) ?? []).map((line) => JSON.parse(line) as RunRecord);
+}
+
+function fallbackState(patch: Partial<FallbackCallbacks> = {}): FallbackCallbacks {
+  return {
+    selectPrimary: async () => true,
+    observeUnreachable: async () => undefined,
+    observeReachable: async () => undefined,
+    observeRefused: async () => undefined,
+    observePrimaryChildStarted: async () => undefined,
+    ...patch,
+  };
 }
 
 interface WorkloadHooks {
@@ -148,6 +198,48 @@ class FakeProcesses {
   async isAlive() {
     return false;
   }
+}
+
+class ResolveProcesses extends FakeProcesses {
+  constructor(private readonly outcomes: Readonly<Record<string, ResolveProbeOutcome>>) {
+    super();
+  }
+
+  override async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+    if (request.command !== "ssh") return super.run(request);
+    const target = request.args.find((part) => part === "admin@primary" || part === "admin@pop-os");
+    const outcome = target === undefined ? undefined : this.outcomes[target];
+    if (request.args.at(-1)?.includes("remote-runner-home-probe")) {
+      if (outcome === "reachable") return result("/home/admin\n");
+      if (outcome === "local") return { ...result("", 127), spawned: false, spawnErrorCode: "ENOENT" };
+      if (outcome === "security") {
+        return { ...result("", 255), stderr: new TextEncoder().encode("Permission denied (publickey).") };
+      }
+      if (outcome === "remote") return result("", 1);
+      return { ...result("", 255), stderr: new TextEncoder().encode("Connection refused") };
+    }
+    if (request.args.at(-1)?.includes("remote-runner-capacity-probe")) return result("999999999999\n");
+    return super.run(request);
+  }
+}
+
+async function resolveHarness(
+  outcomes: Readonly<Record<string, ResolveProbeOutcome>>,
+  manifest = resolveManifest(),
+  state = fallbackState(),
+) {
+  const paths = await fixture(manifest);
+  await seedResolveKnownHosts(paths);
+  const processes = new ResolveProcesses(outcomes);
+  const dependencies = await createNodeCliDependencies({
+    ...paths,
+    clientId: "test-client",
+    managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+    processes,
+    now: () => "2026-09-29T10:00:00.000Z",
+    fallbackState: state,
+  });
+  return { dependencies, manifest: await dependencies.loadManifest(), paths, processes };
 }
 
 describe("concrete Node CLI dependencies", () => {
@@ -818,7 +910,17 @@ describe("concrete Node CLI dependencies", () => {
     });
     expect(unavailable[0]!.reason).toBe("remote-shell");
     /* Exact keys: a fabricated or dropped `detail` field is the failure this record shape hides. */
-    expect(Object.keys(unavailable[0]!)).toEqual(["at", "event", "runId", "pid", "profile", "mode", "reason"]);
+    expect(Object.keys(unavailable[0]!)).toEqual([
+      "at",
+      "event",
+      "runId",
+      "pid",
+      "profile",
+      "requested",
+      "selected",
+      "mode",
+      "reason",
+    ]);
     expect(records.at(-1)).toMatchObject({
       event: "run-finish",
       status: 75,
@@ -1222,3 +1324,732 @@ it.each(["statusProfile", "doctorProfile", "logsProfile"] as const)(
     await expect(dependencies[method]!("alternate", ".remote-runner.local.yaml")).resolves.toBeDefined();
   },
 );
+
+describe("remote fallback orchestration", () => {
+  it("status reads v2 outage state only for a remote-fallback profile", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new FakeProcesses(),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+    const statePath = join(
+      paths.home,
+      ".local",
+      "state",
+      "remote-runner",
+      "fallback",
+      primary.consumer,
+      primary.id,
+      "state.json",
+    );
+    await mkdir(dirname(statePath), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schemaVersion: 2,
+        consumer: primary.consumer,
+        primary: primary.id,
+        topology: {
+          target: primary.remote.target,
+          hostKeySha256: primary.remote.hostKeySha256,
+          fallback: fallback.id,
+          fallbackTarget: fallback.remote.target,
+        },
+        outage: { reason: "transport", since: "2026-09-29T10:00:00.000Z" },
+        refusal: null,
+        negative: { checkedAt: "2026-09-29T10:00:00.000Z", ttlMs: 60_000 },
+        lease: null,
+        lastRecoveryAt: null,
+        backoffTtlMs: 120_000,
+        queue: [],
+      }),
+    );
+
+    await expect(dependencies.statusProfile!(primary.id)).resolves.toContain(
+      "outage=active fallback=active(verify-full)",
+    );
+
+    const plainPaths = await fixture();
+    const plain = await createNodeCliDependencies({
+      ...plainPaths,
+      clientId: "test-client",
+      managedSsh: {
+        changed: false,
+        directory: plainPaths.managedSshPath,
+        knownHostsPath: plainPaths.knownHostsPath,
+      },
+      processes: new FakeProcesses(),
+    });
+    await expect(plain.statusProfile!("verify-full")).resolves.toBe(
+      "verify-full controller=running prewarm=idle session=watching workspace=ready fingerprint=current outage=clear",
+    );
+  });
+
+  it("runs the fallback profile when the primary is unreachable", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    const legs: string[] = [];
+    const observed: string[] = [];
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      createRunId: () => "0011223344556601",
+      executeLeg: async (profile) => {
+        legs.push(profile.id);
+        return profile.id === "verify-full-pop-os"
+          ? { kind: "failover", reason: "transport" }
+          : { kind: "exit", status: 0 };
+      },
+      fallbackState: fallbackState({
+        observeUnreachable: async (reason) => {
+          observed.push(reason);
+        },
+      }),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.runProfile!(primary, undefined, "auto", undefined, fallback)).resolves.toBe(0);
+
+    expect(legs).toEqual(["verify-full-pop-os", "verify-full"]);
+    expect(observed).toEqual(["transport"]);
+  });
+
+  it("double unreachable under auto ends on the fallback's local leg", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    let localRuns = 0;
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      executeLeg: async (profile, command, mode) => {
+        if (profile.id === "verify-full-pop-os") return { kind: "failover", reason: "transport" };
+        return runProfileLeg(
+          {
+            prepareRemote: async () => ({
+              ok: false,
+              reason: "transport",
+              retryable: false,
+              failureClass: "reachability",
+            }),
+            startRemote: async () => {
+              throw new Error("unreachable");
+            },
+            runLocal: async () => {
+              localRuns += 1;
+              return 0;
+            },
+            failClosed: async () => undefined,
+          },
+          profile,
+          command,
+          mode,
+        );
+      },
+      fallbackState: fallbackState(),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.runProfile!(primary, undefined, "auto", undefined, fallback)).resolves.toBe(0);
+    expect(localRuns).toBe(1);
+  });
+
+  it("double unreachable under --mode remote fails closed with 75", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    let localRuns = 0;
+    let failClosed = 0;
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      executeLeg: async (profile, command, mode) => {
+        if (profile.id === "verify-full-pop-os") return { kind: "failover", reason: "transport" };
+        return runProfileLeg(
+          {
+            prepareRemote: async () => ({
+              ok: false,
+              reason: "transport",
+              retryable: false,
+              failureClass: "reachability",
+            }),
+            startRemote: async () => {
+              throw new Error("unreachable");
+            },
+            runLocal: async () => {
+              localRuns += 1;
+              return 0;
+            },
+            failClosed: async () => {
+              failClosed += 1;
+            },
+          },
+          profile,
+          command,
+          mode,
+        );
+      },
+      fallbackState: fallbackState(),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.runProfile!(primary, undefined, "remote", undefined, fallback)).resolves.toBe(75);
+    expect({ localRuns, failClosed }).toEqual({ localRuns: 0, failClosed: 1 });
+  });
+
+  it("a fresh negative entry skips the primary without probing it", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    const legs: string[] = [];
+    const commands: Array<readonly string[]> = [];
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      createRunId: () => "0011223344556603",
+      executeLeg: async (profile, command) => {
+        legs.push(profile.id);
+        commands.push([...command]);
+        return { kind: "exit", status: 0 };
+      },
+      fallbackState: fallbackState({ selectPrimary: async () => false }),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.runProfile!(primary, undefined, "auto", undefined, fallback)).resolves.toBe(0);
+    expect(legs).toEqual(["verify-full"]);
+    expect(commands).toEqual([["./scripts/fallback"]]);
+    expect(await runRecords(dependencies, fallback.id)).toEqual([
+      expect.objectContaining({
+        event: "run-start",
+        runId: "0011223344556603",
+        requested: primary.id,
+        selected: fallback.id,
+      }),
+      expect.objectContaining({
+        event: "run-finish",
+        runId: "0011223344556603",
+        requested: primary.id,
+        selected: fallback.id,
+      }),
+    ]);
+  });
+
+  it("a fallback child start is not recovery", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    let recoveries = 0;
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      executeLeg: async (_profile, _command, _mode, hooks) => {
+        await hooks.onRemoteChildStarted();
+        return { kind: "exit", status: 0 };
+      },
+      fallbackState: fallbackState({
+        selectPrimary: async () => false,
+        observePrimaryChildStarted: async () => {
+          recoveries += 1;
+        },
+      }),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await dependencies.runProfile!(primary, undefined, "auto", undefined, fallback);
+    expect(recoveries).toBe(0);
+  });
+
+  it("a primary child start is recovery", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    let recoveries = 0;
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      executeLeg: async (_profile, _command, _mode, hooks) => {
+        await hooks.onRemoteChildStarted();
+        return { kind: "exit", status: 0 };
+      },
+      fallbackState: fallbackState({
+        observePrimaryChildStarted: async () => {
+          recoveries += 1;
+        },
+      }),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await dependencies.runProfile!(primary, undefined, "auto", undefined, fallback);
+    expect(recoveries).toBe(1);
+  });
+
+  it("a security failure on the primary does not run the fallback", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    const legs: string[] = [];
+    const refusals: unknown[] = [];
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      executeLeg: async (profile, _command, _mode, hooks) => {
+        legs.push(profile.id);
+        await hooks.recordRefusal?.("security", "host-key");
+        return { kind: "exit", status: 75 };
+      },
+      fallbackState: fallbackState({
+        observeRefused: async (...refusal) => {
+          refusals.push(refusal);
+        },
+      }),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.runProfile!(primary, undefined, "auto", undefined, fallback)).resolves.toBe(75);
+    expect(legs).toEqual(["verify-full-pop-os"]);
+    expect(refusals).toEqual([["security", "host-key"]]);
+  });
+
+  it("records requested and selected on every record", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    const commands: Array<readonly string[]> = [];
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      now: () => "2026-07-31T12:34:56.000Z",
+      createRunId: () => "0011223344556602",
+      executeLeg: async (profile, command, _mode, hooks) => {
+        commands.push([...command]);
+        if (profile.id === "verify-full-pop-os") {
+          hooks.onUnavailable("transport");
+          return { kind: "failover", reason: "transport" };
+        }
+        return { kind: "exit", status: 0 };
+      },
+      fallbackState: fallbackState(),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await dependencies.runProfile!(primary, undefined, "auto", undefined, fallback);
+
+    const primaryRecords = await runRecords(dependencies, primary.id);
+    const fallbackRecords = await runRecords(dependencies, fallback.id);
+    expect(primaryRecords.map(({ event }) => event)).toEqual(["run-start", "run-unavailable", "run-failover"]);
+    expect(fallbackRecords.map(({ event }) => event)).toEqual(["run-start", "run-finish"]);
+    expect(primaryRecords.every(({ requested, selected }) => requested === primary.id && selected === primary.id)).toBe(
+      true,
+    );
+    expect(
+      fallbackRecords.every(({ requested, selected }) => requested === primary.id && selected === fallback.id),
+    ).toBe(true);
+    expect([...primaryRecords, ...fallbackRecords].every(({ runId }) => runId === "0011223344556602")).toBe(true);
+    expect(primaryRecords.at(-1)).toMatchObject({ to: fallback.id, reason: "transport" });
+    expect(commands).toEqual([["./scripts/primary"], ["./scripts/fallback"]]);
+  });
+
+  it("carries one explicit command override through both legs", async () => {
+    const paths = await fixture(remoteFallbackManifest());
+    const commands: Array<readonly string[]> = [];
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      executeLeg: async (profile, command) => {
+        commands.push([...command]);
+        return profile.id === "verify-full-pop-os"
+          ? { kind: "failover", reason: "transport" }
+          : { kind: "exit", status: 0 };
+      },
+      fallbackState: fallbackState(),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await dependencies.runProfile!(primary, ["./explicit", "--flag"], "auto", undefined, fallback);
+    expect(commands).toEqual([
+      ["./explicit", "--flag"],
+      ["./explicit", "--flag"],
+    ]);
+  });
+
+  it("a plain profile keeps today's records plus requested equals selected", async () => {
+    const paths = await fixture();
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      executeLeg: async () => ({ kind: "exit", status: 0 }),
+    });
+    const profile = (await dependencies.loadManifest()).profiles[0]!;
+
+    await dependencies.runProfile!(profile, undefined, "auto");
+
+    const records = await runRecords(dependencies);
+    expect(records.map(({ event }) => event)).toEqual(["run-start", "run-finish"]);
+    expect(records.every(({ requested, selected }) => requested === profile.id && selected === profile.id)).toBe(true);
+  });
+
+  it("benchmarking an unreachable remote-fallback profile returns 75 without running fallback or writing v2 state", async () => {
+    const paths = await fixture(resolveManifest());
+    await seedResolveKnownHosts(paths);
+    class BenchmarkProcesses extends ResolveProcesses {
+      primaryRequests = 0;
+      fallbackRequests = 0;
+
+      override async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+        if (request.args.some((part) => part.includes("admin@primary"))) this.primaryRequests += 1;
+        if (request.args.some((part) => part.includes("admin@pop-os"))) this.fallbackRequests += 1;
+        return super.run(request);
+      }
+    }
+    const processes = new BenchmarkProcesses({ "admin@primary": "reachability" });
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      now: () => "2026-07-31T12:34:56.000Z",
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
+    });
+    const profile = (await dependencies.loadManifest()).profiles.find(({ id }) => id === "verify-full-pop-os")!;
+
+    const report = (await dependencies.benchmarkProfile!(profile)) as {
+      rows: Array<{ location: string; status: number }>;
+    };
+    const remote = report.rows.find(({ location }) => location === "remote");
+
+    expect(remote?.status).toBe(75);
+    expect(processes.primaryRequests).toBeGreaterThan(0);
+    expect(processes.fallbackRequests).toBe(0);
+    await expect(
+      readFile(
+        join(paths.home, ".local", "state", "remote-runner", "fallback", profile.consumer, profile.id, "state.json"),
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("resolve reports fallback active for an explicit local leg", async () => {
+    const manifestText = validManifest.replaceAll("SHA256:trusted", resolveHostPin);
+    const { dependencies, manifest } = await resolveHarness({ "admin@pop-os": "reachable" }, manifestText);
+    const profile = manifest.profiles[0]!;
+
+    await expect(dependencies.resolveProfile!(profile, undefined, "local")).resolves.toMatchObject({
+      outcome: "selected",
+      answer: { selected: profile.id, remoteLabel: null, fallbackActive: true, reason: "mode-local" },
+    });
+  });
+
+  it.each(["security", "remote", "local"] as const)(
+    "resolve selects a plain profile's local leg after a %s failure under auto",
+    async (failureClass) => {
+      const manifestText = validManifest.replaceAll("SHA256:trusted", resolveHostPin);
+      const { dependencies, manifest } = await resolveHarness({ "admin@pop-os": failureClass }, manifestText);
+      const profile = manifest.profiles[0]!;
+
+      await expect(dependencies.resolveProfile!(profile, undefined, "auto")).resolves.toMatchObject({
+        outcome: "selected",
+        answer: { selected: profile.id, remoteLabel: null, fallbackActive: true },
+      });
+    },
+  );
+
+  it.each(["security", "remote", "local"] as const)(
+    "resolve selects the fallback profile's local leg after a %s failure under auto",
+    async (failureClass) => {
+      const { dependencies, manifest } = await resolveHarness(
+        { "admin@primary": "reachable", "admin@pop-os": failureClass },
+        resolveManifest(),
+        fallbackState({ selectPrimary: async () => false }),
+      );
+      const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+      const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+      await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+        outcome: "selected",
+        answer: { selected: fallback.id, remoteLabel: null, fallbackActive: true },
+      });
+    },
+  );
+
+  it("resolve answers the reachable primary without Mutagen or a profile lock", async () => {
+    let reachable = 0;
+    const { dependencies, manifest, paths, processes } = await resolveHarness(
+      { "admin@primary": "reachable", "admin@pop-os": "reachable" },
+      resolveManifest(),
+      fallbackState({
+        observeReachable: async () => {
+          reachable += 1;
+        },
+      }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toEqual({
+      outcome: "selected",
+      answer: {
+        requested: primary.id,
+        selected: primary.id,
+        remoteLabel: primary.remote.label,
+        fallbackActive: false,
+        reason: null,
+        checkedAt: "2026-09-29T10:00:00.000Z",
+      },
+    });
+    expect(reachable).toBe(1);
+    expect(processes.requests.some(({ command }) => command.includes("mutagen"))).toBe(false);
+    await expect(
+      realpath(join(paths.home, ".local", "state", "remote-runner", "locks", dependencies.identity)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("resolve stops the Mutagen daemon when managed SSH transport changed", async () => {
+    const paths = await fixture(resolveManifest());
+    await seedResolveKnownHosts(paths);
+    const order: string[] = [];
+    class ChangedTransportProcesses extends ResolveProcesses {
+      override async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+        if (request.args[0] === "daemon" && request.args[1] === "stop") order.push("daemon-stop");
+        if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-home-probe")) {
+          order.push("home-probe");
+        }
+        return super.run(request);
+      }
+    }
+    const processes = new ChangedTransportProcesses({ "admin@primary": "reachable" });
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      managedSsh: { changed: true, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+      outcome: "selected",
+      answer: { selected: primary.id },
+    });
+    expect(order.slice(0, 2)).toEqual(["daemon-stop", "home-probe"]);
+  });
+
+  it("resolve answers the fallback and records an unreachable primary", async () => {
+    const unreachable: string[] = [];
+    const { dependencies, manifest } = await resolveHarness(
+      { "admin@primary": "reachability", "admin@pop-os": "reachable" },
+      resolveManifest(),
+      fallbackState({ observeUnreachable: async (reason) => void unreachable.push(reason) }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toEqual({
+      outcome: "selected",
+      answer: expect.objectContaining({
+        requested: primary.id,
+        selected: fallback.id,
+        remoteLabel: primary.remote.label,
+        fallbackActive: true,
+        reason: "transport",
+      }),
+    });
+    expect(unreachable).toEqual(["transport"]);
+  });
+
+  it("resolve uses a cached negative entry without probing the primary", async () => {
+    const { dependencies, manifest, processes } = await resolveHarness(
+      { "admin@primary": "reachable", "admin@pop-os": "reachable" },
+      resolveManifest(),
+      fallbackState({
+        selectPrimary: async () => false,
+        selectPrimaryDecision: async () => ({
+          usePrimary: false,
+          reason: "dns",
+          checkedAt: "2026-09-29T09:59:00.000Z",
+        }),
+      }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+      outcome: "selected",
+      answer: {
+        selected: fallback.id,
+        fallbackActive: true,
+        reason: "dns",
+        checkedAt: "2026-09-29T09:59:00.000Z",
+      },
+    });
+    expect(
+      processes.requests.some(
+        ({ command, args }) => command === "ssh" && args.some((part) => part === primary.remote.target),
+      ),
+    ).toBe(false);
+  });
+
+  it("resolve selects the local chain end under auto when both remotes are unreachable", async () => {
+    const { dependencies, manifest } = await resolveHarness({
+      "admin@primary": "reachability",
+      "admin@pop-os": "reachability",
+    });
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+      outcome: "selected",
+      answer: {
+        requested: primary.id,
+        selected: fallback.id,
+        remoteLabel: null,
+        fallbackActive: true,
+        reason: "transport",
+      },
+    });
+  });
+
+  it("resolve returns nothing reachable under remote mode", async () => {
+    const { dependencies, manifest } = await resolveHarness({
+      "admin@primary": "reachability",
+      "admin@pop-os": "reachability",
+    });
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "remote")).resolves.toMatchObject({
+      outcome: "unreachable",
+      answer: { requested: primary.id, selected: null, remoteLabel: null, fallbackActive: true },
+    });
+  });
+
+  it("resolve returns a security refusal and records it on the primary", async () => {
+    const paths = await fixture(resolveManifest());
+    const staleKey = Buffer.from("stale-host-key").toString("base64");
+    class StalePinProcesses extends ResolveProcesses {
+      override async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+        if (request.command === "ssh-keyscan") return result(`primary ssh-ed25519 ${staleKey}\n`);
+        return super.run(request);
+      }
+    }
+    const refusals: unknown[] = [];
+    const dependencies = await createNodeCliDependencies({
+      ...paths,
+      clientId: "test-client",
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes: new StalePinProcesses({ "admin@primary": "reachable", "admin@pop-os": "reachable" }),
+      now: () => "2026-09-29T10:00:00.000Z",
+      fallbackState: fallbackState({
+        observeRefused: async (...refusal) => {
+          refusals.push(refusal);
+        },
+      }),
+    });
+    const manifest = await dependencies.loadManifest();
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+      outcome: "security",
+      answer: { selected: null, reason: "host-key" },
+    });
+    expect(refusals).toEqual([["security", "host-key"]]);
+  });
+
+  it("resolve throws on a local primary fault", async () => {
+    const { dependencies, manifest } = await resolveHarness({
+      "admin@primary": "local",
+      "admin@pop-os": "reachable",
+    });
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).rejects.toMatchObject({
+      failureClass: "local",
+    });
+  });
+
+  it("resolve maps a remote primary refusal to unreachable", async () => {
+    const refusals: unknown[] = [];
+    const { dependencies, manifest } = await resolveHarness(
+      { "admin@primary": "remote", "admin@pop-os": "reachable" },
+      resolveManifest(),
+      fallbackState({
+        observeRefused: async (...refusal) => {
+          refusals.push(refusal);
+        },
+      }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "auto")).resolves.toMatchObject({
+      outcome: "unreachable",
+      answer: { selected: null, reason: "remote-shell" },
+    });
+    expect(refusals).toEqual([["remote", "remote-shell"]]);
+  });
+
+  it.each([
+    ["security", "security"],
+    ["remote", "unreachable"],
+  ] as const)("resolve maps a %s fault on the fallback to %s", async (failureClass, outcome) => {
+    const { dependencies, manifest } = await resolveHarness(
+      { "admin@primary": "reachable", "admin@pop-os": failureClass },
+      resolveManifest(),
+      fallbackState({ selectPrimary: async () => false }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "remote")).resolves.toMatchObject({
+      outcome,
+      answer: { selected: null },
+    });
+  });
+
+  it("resolve throws on a local fault on the fallback", async () => {
+    const { dependencies, manifest } = await resolveHarness(
+      { "admin@primary": "reachable", "admin@pop-os": "local" },
+      resolveManifest(),
+      fallbackState({ selectPrimary: async () => false }),
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os")!;
+    const fallback = manifest.profiles.find(({ id }) => id === "verify-full")!;
+
+    await expect(dependencies.resolveProfile!(primary, fallback, "remote")).rejects.toMatchObject({
+      failureClass: "local",
+    });
+  });
+
+  it.each([
+    ["security", "security"],
+    ["remote", "unreachable"],
+  ] as const)("resolve maps a %s fault on a plain profile to %s", async (failureClass, outcome) => {
+    const manifestText = validManifest.replaceAll("SHA256:trusted", resolveHostPin);
+    const { dependencies, manifest } = await resolveHarness({ "admin@pop-os": failureClass }, manifestText);
+    const profile = manifest.profiles[0]!;
+
+    await expect(dependencies.resolveProfile!(profile, undefined, "remote")).resolves.toMatchObject({
+      outcome,
+      answer: { selected: null },
+    });
+  });
+
+  it("resolve throws on a local fault on a plain profile", async () => {
+    const manifestText = validManifest.replaceAll("SHA256:trusted", resolveHostPin);
+    const { dependencies, manifest } = await resolveHarness({ "admin@pop-os": "local" }, manifestText);
+
+    await expect(dependencies.resolveProfile!(manifest.profiles[0]!, undefined, "remote")).rejects.toMatchObject({
+      failureClass: "local",
+    });
+  });
+});

@@ -1,4 +1,5 @@
 import type { Profile, RunMode } from "../config/types.js";
+import { stableReason } from "../notifications/outage.js";
 import type { PrepareResult } from "./prepare.js";
 
 export const INFRASTRUCTURE_EXIT_CODE = 75;
@@ -52,6 +53,13 @@ export interface RunProfileRuntime {
   failClosed(): Promise<void>;
 }
 
+export type LegResult =
+  { readonly kind: "exit"; readonly status: number } | { readonly kind: "failover"; readonly reason: string };
+
+export function isRemoteFallback(fallback: string): boolean {
+  return fallback !== "local" && fallback !== "fail";
+}
+
 function validExitCode(code: number): boolean {
   return Number.isSafeInteger(code) && code >= 0 && code <= 255;
 }
@@ -87,32 +95,47 @@ async function failClosed(runtime: RunProfileRuntime): Promise<number> {
   return INFRASTRUCTURE_EXIT_CODE;
 }
 
-function mayFallback(mode: RunMode, profile: Pick<Profile, "fallback">): boolean {
+export function mayFallback(mode: RunMode, profile: Pick<Profile, "fallback">): boolean {
   return mode === "auto" && profile.fallback === "local";
 }
 
-export async function runProfile(
+export async function runProfileLeg(
   runtime: RunProfileRuntime,
   profile: Pick<Profile, "mode" | "fallback">,
   command: readonly string[],
   modeOverride?: RunMode,
-): Promise<number> {
-  if (!validCommand(command)) return USAGE_EXIT_CODE;
+): Promise<LegResult> {
+  if (!validCommand(command)) return { kind: "exit", status: USAGE_EXIT_CODE };
   const mode = modeOverride ?? profile.mode;
-  if (mode === "local") return runLocal(runtime, command);
+  if (mode === "local") return { kind: "exit", status: await runLocal(runtime, command) };
 
   let prepared: PrepareResult | undefined;
+  let onlyReachabilityFailures = true;
   for (let attempt = 0; attempt < MAX_PREPARATION_ATTEMPTS; attempt += 1) {
     try {
       prepared = await runtime.prepareRemote();
     } catch {
-      return failClosed(runtime);
+      return { kind: "exit", status: await failClosed(runtime) };
     }
-    if (prepared.ok || !prepared.retryable) break;
+    if (prepared.ok) break;
+    onlyReachabilityFailures &&= prepared.failureClass === "reachability";
+    if (!prepared.retryable || prepared.failureClass === "security" || prepared.failureClass === "local") break;
   }
   if (prepared === undefined || !prepared.ok) {
+    if (
+      isRemoteFallback(profile.fallback) &&
+      prepared?.ok === false &&
+      prepared.failureClass === "reachability" &&
+      onlyReachabilityFailures
+    ) {
+      return { kind: "failover", reason: stableReason(prepared.reason) };
+    }
     const localIsPointless = prepared?.ok === false && LOCAL_RERUN_POINTLESS_REASONS.has(prepared.reason);
-    return mayFallback(mode, profile) && !localIsPointless ? runLocal(runtime, command) : failClosed(runtime);
+    return {
+      kind: "exit",
+      status:
+        mayFallback(mode, profile) && !localIsPointless ? await runLocal(runtime, command) : await failClosed(runtime),
+    };
   }
 
   let childStarted = false;
@@ -137,7 +160,7 @@ export async function runProfile(
     } catch {
       /* retain the authoritative failure */
     }
-    return INFRASTRUCTURE_EXIT_CODE;
+    return { kind: "exit", status: INFRASTRUCTURE_EXIT_CODE };
   }
 
   if (remote.kind === "not-started") {
@@ -146,14 +169,18 @@ export async function runProfile(
     } catch {
       /* The child never started and the reason is already pending, so a release that fails on top
          of it must not swallow the alert — that is the same silence on a different path. */
-      return failClosed(runtime);
+      return { kind: "exit", status: await failClosed(runtime) };
     }
-    if (childStarted) return INFRASTRUCTURE_EXIT_CODE;
-    if (remote.reason === WORKLOAD_COMMAND_REASON) return WORKLOAD_COMMAND_EXIT_CODE;
+    if (childStarted) return { kind: "exit", status: INFRASTRUCTURE_EXIT_CODE };
+    if (remote.reason === WORKLOAD_COMMAND_REASON) return { kind: "exit", status: WORKLOAD_COMMAND_EXIT_CODE };
     const unsafeOrPointless = remote.reason === "connection-lost" || LOCAL_RERUN_POINTLESS_REASONS.has(remote.reason);
-    return mayFallback(mode, profile) && !unsafeOrPointless
-      ? runLocal(runtime, command, prepared.secrets)
-      : failClosed(runtime);
+    return {
+      kind: "exit",
+      status:
+        mayFallback(mode, profile) && !unsafeOrPointless
+          ? await runLocal(runtime, command, prepared.secrets)
+          : await failClosed(runtime),
+    };
   }
 
   if (!childStarted) {
@@ -162,7 +189,7 @@ export async function runProfile(
     } catch {
       /* already failing closed */
     }
-    return INFRASTRUCTURE_EXIT_CODE;
+    return { kind: "exit", status: INFRASTRUCTURE_EXIT_CODE };
   }
   if (releaseDeferred) {
     try {
@@ -172,5 +199,18 @@ export async function runProfile(
          next acquirer's dead-owner takeover. */
     }
   }
-  return validExitCode(remote.exitCode) ? remote.exitCode : INFRASTRUCTURE_EXIT_CODE;
+  return {
+    kind: "exit",
+    status: validExitCode(remote.exitCode) ? remote.exitCode : INFRASTRUCTURE_EXIT_CODE,
+  };
+}
+
+export async function runProfile(
+  runtime: RunProfileRuntime,
+  profile: Pick<Profile, "mode" | "fallback">,
+  command: readonly string[],
+  modeOverride?: RunMode,
+): Promise<number> {
+  const result = await runProfileLeg(runtime, profile, command, modeOverride);
+  return result.kind === "exit" ? result.status : INFRASTRUCTURE_EXIT_CODE;
 }

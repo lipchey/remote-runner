@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 
 import { errorCode } from "../runtime/errno.js";
 import type { ProcessRequest, ProcessResult } from "../runtime/contracts.js";
+import type { FailureClass, PreparationReason } from "../run/prepare.js";
 
 const MAX_CONNECT_TIMEOUT_SECONDS = 300;
 /* The exit code every remote script uses for "another holder has this lock". Not 75: the bounded
@@ -157,6 +158,16 @@ interface ParsedHostKey {
   readonly blob: Uint8Array;
 }
 
+export class HostKeyScanError extends Error {
+  constructor(
+    readonly reason: PreparationReason,
+    readonly failureClass: FailureClass,
+  ) {
+    super(`host key scan failed: ${reason}`);
+    this.name = "HostKeyScanError";
+  }
+}
+
 function decodeCanonicalBase64(value: string): Uint8Array | undefined {
   if (!BASE64.test(value) || value.length % 4 !== 0) return undefined;
   const decoded = Buffer.from(value, "base64");
@@ -210,13 +221,19 @@ export async function enrollKnownHost(
     maxOutputBytes: DEFAULT_CAPTURE_BYTES,
   });
   assertBoundedResult(result, DEFAULT_CAPTURE_BYTES);
-  if (result.exitCode !== 0) throw new Error("host key scan failed");
+  if (!result.spawned) throw new HostKeyScanError("validation", "local");
 
-  const matching = parseHostKeys(result.stdout).filter(
-    ({ blob }) => sha256Fingerprint(blob) === options.trustedFingerprint,
-  );
+  const parsed = parseHostKeys(result.stdout);
+  if (parsed.length === 0) {
+    const stderr = new TextDecoder().decode(result.stderr);
+    const dns = /could not resolve hostname|name or service not known|nodename nor servname provided/iu.test(stderr);
+    throw new HostKeyScanError(dns ? "dns" : "transport", "reachability");
+  }
+  if (result.exitCode !== 0) throw new HostKeyScanError("transport", "reachability");
+
+  const matching = parsed.filter(({ blob }) => sha256Fingerprint(blob) === options.trustedFingerprint);
   if (matching.length !== 1) {
-    throw new Error(matching.length === 0 ? "trusted host key not found" : "ambiguous trusted host key");
+    throw new HostKeyScanError("host-key", "security");
   }
 
   await store.persistAtomically(options.knownHostsPath, new TextEncoder().encode(`${matching[0]?.line}\n`), 0o600);

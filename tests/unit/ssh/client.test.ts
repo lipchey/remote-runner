@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   enrollKnownHost,
+  HostKeyScanError,
   NodeKnownHostsStore,
   runSsh,
   sshArguments,
@@ -36,6 +37,7 @@ class FakeProcesses implements SshProcessRuntime {
       readonly stderr: Uint8Array;
       readonly outputTruncated: boolean;
       readonly spawned: boolean;
+      readonly spawnErrorCode?: string;
     },
   ) {}
 
@@ -193,14 +195,68 @@ describe("known_hosts enrollment", () => {
 
   it.each([
     [
-      "mismatch",
+      "keyscan not spawned",
+      () => ({
+        result: {
+          exitCode: 127,
+          stdout: bytes(""),
+          stderr: bytes(""),
+          outputTruncated: false,
+          spawned: false,
+          spawnErrorCode: "ENOENT",
+        },
+        trusted: fingerprint(bytes("trusted")),
+      }),
+      "validation",
+      "local",
+    ],
+    [
+      "DNS failure",
+      () => ({
+        result: {
+          exitCode: 1,
+          stdout: bytes(""),
+          stderr: bytes("getaddrinfo pop-os: nodename nor servname provided"),
+          outputTruncated: false,
+          spawned: true,
+        },
+        trusted: fingerprint(bytes("trusted")),
+      }),
+      "dns",
+      "reachability",
+    ],
+    [
+      "empty transport failure",
+      () => ({
+        result: {
+          exitCode: 1,
+          stdout: bytes(""),
+          stderr: bytes(""),
+          outputTruncated: false,
+          spawned: true,
+        },
+        trusted: fingerprint(bytes("trusted")),
+      }),
+      "transport",
+      "reachability",
+    ],
+    [
+      "pin mismatch",
       () => {
         const blob = bytes("actual");
         return {
-          output: `host ssh-ed25519 ${Buffer.from(blob).toString("base64")}\n`,
+          result: {
+            exitCode: 0,
+            stdout: bytes(`host ssh-ed25519 ${Buffer.from(blob).toString("base64")}\n`),
+            stderr: bytes(""),
+            outputTruncated: false,
+            spawned: true,
+          },
           trusted: fingerprint(bytes("different")),
         };
       },
+      "host-key",
+      "security",
     ],
     [
       "ambiguity",
@@ -208,32 +264,33 @@ describe("known_hosts enrollment", () => {
         const blob = bytes("same-fingerprint");
         const encoded = Buffer.from(blob).toString("base64");
         return {
-          output: `host ssh-ed25519 ${encoded}\nhost-alias ssh-ed25519 ${encoded}\n`,
+          result: {
+            exitCode: 0,
+            stdout: bytes(`host ssh-ed25519 ${encoded}\nhost-alias ssh-ed25519 ${encoded}\n`),
+            stderr: bytes(""),
+            outputTruncated: false,
+            spawned: true,
+          },
           trusted: fingerprint(blob),
         };
       },
+      "host-key",
+      "security",
     ],
-    ["no valid key", () => ({ output: "# only a comment\nmalformed\n", trusted: fingerprint(bytes("x")) })],
-  ] as const)("fails closed on %s without a trust write", async (_label, fixture) => {
-    const { output, trusted } = fixture();
-    const processes = new FakeProcesses({
-      exitCode: 0,
-      stdout: bytes(output),
-      stderr: bytes(""),
-      outputTruncated: false,
-      spawned: true,
-    });
+  ] as const)("classifies %s without a trust write", async (_label, fixture, reason, failureClass) => {
+    const { result, trusted } = fixture();
+    const processes = new FakeProcesses(result);
     const store = new FakeStore();
 
-    await expect(
-      enrollKnownHost(processes, store, {
-        target: "host",
-        trustedFingerprint: trusted,
-        knownHostsPath: "/runner/known_hosts",
-        connectTimeoutSeconds: 4,
-      }),
-    ).rejects.toThrow();
+    const caught = await enrollKnownHost(processes, store, {
+      target: "host",
+      trustedFingerprint: trusted,
+      knownHostsPath: "/runner/known_hosts",
+      connectTimeoutSeconds: 4,
+    }).catch((error: unknown) => error);
 
+    expect(caught).toBeInstanceOf(HostKeyScanError);
+    expect(caught).toMatchObject({ reason, failureClass });
     expect(store.writes).toEqual([]);
   });
 

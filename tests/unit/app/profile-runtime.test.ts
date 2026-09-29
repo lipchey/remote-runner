@@ -4,8 +4,13 @@ import { createProfileRuntime, type ProfileExecutionServices } from "../../../sr
 import { DependencyCommandError } from "../../../src/bootstrap/dependencies.js";
 import { DiagnosableError } from "../../../src/runtime/diagnostic.js";
 import { RunTelemetry } from "../../../src/runtime/telemetry.js";
-import { PreparationError, RetryablePreparationError } from "../../../src/run/prepare.js";
-import { INFRASTRUCTURE_EXIT_CODE, WORKLOAD_COMMAND_REASON, runProfile } from "../../../src/run/run-profile.js";
+import { PreparationError, RetryablePreparationError, type FailureClass } from "../../../src/run/prepare.js";
+import {
+  INFRASTRUCTURE_EXIT_CODE,
+  WORKLOAD_COMMAND_REASON,
+  runProfile,
+  runProfileLeg,
+} from "../../../src/run/run-profile.js";
 
 class FakeServices implements ProfileExecutionServices {
   readonly calls: string[] = [];
@@ -73,8 +78,8 @@ class FakeServices implements ProfileExecutionServices {
   async recordFallback(reason: string) {
     this.calls.push(`fallback:${reason}`);
   }
-  async recordOutage(reason: string) {
-    this.calls.push(`outage:${reason}`);
+  async recordOutage(reason: string, failureClass?: FailureClass) {
+    this.calls.push(`outage:${reason}${failureClass === undefined ? "" : `:${failureClass}`}`);
   }
   async recordRemoteChildStarted() {
     this.calls.push("recovery");
@@ -90,6 +95,38 @@ class FakeServices implements ProfileExecutionServices {
 }
 
 const profile = { mode: "auto" as const, fallback: "local" as const };
+
+describe("remote fallback failure context", () => {
+  it("hands the preparation's failure class to the fail-closed alert", async () => {
+    const services = new FakeServices();
+    services.probeFailures = [new PreparationError("host-key", false, { failureClass: "security" })];
+
+    expect(
+      await runProfile(createProfileRuntime(services), { mode: "auto", fallback: "verify-full" }, ["./verify"]),
+    ).toBe(INFRASTRUCTURE_EXIT_CODE);
+    expect(services.calls).toContain("outage:host-key:security");
+  });
+
+  it("records nothing when the leg fails over", async () => {
+    const services = new FakeServices();
+    services.probeFailures = [new PreparationError("transport", false, { failureClass: "reachability" })];
+
+    expect(
+      await runProfileLeg(createProfileRuntime(services), { mode: "auto", fallback: "verify-full" }, ["./verify"]),
+    ).toEqual({ kind: "failover", reason: "transport" });
+    expect(services.calls.some((call) => call.startsWith("outage:") || call.startsWith("fallback:"))).toBe(false);
+  });
+
+  it("passes remote as the class of a not-started outage", async () => {
+    const services = new FakeServices();
+    services.notStartedReason = "connection-lost";
+
+    expect(await runProfile(createProfileRuntime(services), { mode: "auto", fallback: "fail" }, ["./verify"])).toBe(
+      INFRASTRUCTURE_EXIT_CODE,
+    );
+    expect(services.calls).toContain("outage:connection-lost:remote");
+  });
+});
 
 describe("profile runtime composition", () => {
   it("forwards the prepared secrets to the local leg, and nothing when preparation never got there", async () => {
@@ -197,7 +234,7 @@ describe("profile runtime composition", () => {
       "remote",
       "unavailable:connection-lost",
       "release",
-      "outage:connection-lost",
+      "outage:connection-lost:remote",
     ]);
   });
 
@@ -209,7 +246,7 @@ describe("profile runtime composition", () => {
 
     expect(code).toBe(INFRASTRUCTURE_EXIT_CODE);
     expect(services.calls).toContain("unavailable:connection-lost");
-    expect(services.calls).toContain("outage:connection-lost");
+    expect(services.calls).toContain("outage:connection-lost:remote");
     expect(services.calls).not.toContain("local");
   });
 
@@ -337,7 +374,7 @@ describe("profile runtime composition", () => {
       "probe",
       "release",
       "unavailable:consumer-setup",
-      "outage:consumer-setup",
+      "outage:consumer-setup:remote",
     ]);
     expect(services.calls).not.toContain("local");
   });
@@ -358,7 +395,7 @@ describe("profile runtime composition", () => {
       "probe",
       "release",
       "unavailable:transport",
-      "outage:transport",
+      "outage:transport:remote",
     ]);
     expect(services.calls).not.toContain("local");
   });
@@ -370,7 +407,7 @@ describe("profile runtime composition", () => {
     const code = await runProfile(createProfileRuntime(services), { mode: "auto", fallback: "fail" }, ["./verify"]);
 
     expect(code).toBe(INFRASTRUCTURE_EXIT_CODE);
-    expect(services.calls.filter((call) => call.startsWith("outage:"))).toEqual(["outage:child-start"]);
+    expect(services.calls.filter((call) => call.startsWith("outage:"))).toEqual(["outage:child-start:remote"]);
     expect(services.calls).not.toContain("local");
   });
 
@@ -383,7 +420,7 @@ describe("profile runtime composition", () => {
 
     await runProfile(createProfileRuntime(services), { mode: "auto", fallback: "fail" }, ["./verify"]);
 
-    expect(services.calls.filter((call) => call.startsWith("outage:"))).toEqual(["outage:unknown"]);
+    expect(services.calls.filter((call) => call.startsWith("outage:"))).toEqual(["outage:unknown:remote"]);
   });
 
   /* A failure the second attempt survives means the run reached the remote, so there is no outage to
