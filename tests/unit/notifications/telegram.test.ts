@@ -5,6 +5,7 @@ import {
   sendTelegramNotification,
   type TelegramRuntime,
 } from "../../../src/notifications/telegram.js";
+import type { FallbackEvent, NotificationEvent } from "../../../src/notifications/outage.js";
 
 const bytes = (value: string): Uint8Array => new TextEncoder().encode(value);
 
@@ -83,6 +84,75 @@ describe("Telegram transport", () => {
     expect(body).not.toContain("local fallback");
     expect(body).not.toContain(config.botToken);
     expect(body).not.toContain("secret-canary");
+  });
+
+  it.each([
+    ["outage", "Remote unavailable"],
+    ["recovery", "Remote recovered — child started"],
+  ] as const)("renders the explicit v1 %s heading", async (kind, heading) => {
+    const runtime = new FakeRuntime();
+    const config = await loadTelegramConfig(runtime, "/config");
+    const event: NotificationEvent = {
+      kind,
+      consumer: "ariadne",
+      profile: "verify-full",
+      remoteLabel: "pop-os",
+      reason: "transport",
+      timestamp: "2026-07-31T16:00:00.000Z",
+    };
+
+    await sendTelegramNotification(runtime, config, event);
+
+    const body = new TextDecoder().decode((runtime.requests[0] as { body: Uint8Array }).body);
+    expect(body).toContain(heading);
+  });
+
+  it.each([
+    [
+      {
+        kind: "primary-down",
+        class: "reachability",
+        reason: "transport",
+      },
+      "Primary remote unreachable — running on verify-full",
+      "class=reachability",
+    ],
+    [
+      {
+        kind: "primary-refused",
+        class: "security",
+        reason: "host-key",
+      },
+      "Remote run refused — security",
+      "class=security",
+    ],
+    [
+      {
+        kind: "primary-recovered",
+        cleared: "both",
+      },
+      "Primary remote recovered — child started",
+      "cleared=both",
+    ],
+  ] as const)("renders the explicit v2 $0.kind fields", async (specific, heading, detail) => {
+    const runtime = new FakeRuntime();
+    const config = await loadTelegramConfig(runtime, "/config");
+    const event = {
+      ...specific,
+      consumer: "ariadne",
+      requested: "verify-full-pop-os",
+      fallback: "verify-full",
+      remoteLabel: "pop-os",
+      timestamp: "2026-07-31T16:00:00.000Z",
+    } as FallbackEvent;
+
+    await sendTelegramNotification(runtime, config, event);
+
+    const body = new TextDecoder().decode((runtime.requests[0] as { body: Uint8Array }).body);
+    expect(body).toContain(heading);
+    expect(body).toContain("requested=verify-full-pop-os");
+    expect(body).toContain("fallback=verify-full");
+    expect(body).toContain(detail);
   });
 
   it("fails with a redacted error on non-success without echoing response or token", async () => {

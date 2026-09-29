@@ -1,4 +1,5 @@
-import { isNotificationReason, type NotificationEvent } from "./outage.js";
+import { isNotificationReason, type FallbackEvent, type NotificationEvent } from "./outage.js";
+import type { FailureClass } from "../run/prepare.js";
 
 const MAX_CONFIG_BYTES = 16 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
@@ -82,7 +83,44 @@ export async function loadTelegramConfig(runtime: TelegramRuntime, path: string)
   return parseConfig(file.contents);
 }
 
-function eventMessage(event: NotificationEvent): string {
+function fallbackEventMessage(event: FallbackEvent): string {
+  for (const value of [event.consumer, event.requested, event.fallback, event.remoteLabel]) {
+    if (!EVENT_FIELD.test(value)) throw new Error("notification event contains an invalid field");
+  }
+  const timestamp = new Date(event.timestamp);
+  if (!Number.isFinite(timestamp.valueOf()) || timestamp.toISOString() !== event.timestamp) {
+    throw new Error("notification timestamp must be canonical ISO-8601");
+  }
+  const common = [
+    `consumer=${event.consumer}`,
+    `requested=${event.requested}`,
+    `fallback=${event.fallback}`,
+    `remote=${event.remoteLabel}`,
+  ];
+  if (event.kind === "primary-recovered") {
+    if (event.cleared !== "outage" && event.cleared !== "refusal" && event.cleared !== "both") {
+      throw new Error("notification event contains an invalid recovery");
+    }
+    return [
+      "Primary remote recovered — child started",
+      ...common,
+      `cleared=${event.cleared}`,
+      `time=${event.timestamp}`,
+    ].join("\n");
+  }
+  const failureClasses = new Set<FailureClass>(["reachability", "local", "security", "remote"]);
+  if (!failureClasses.has(event.class) || !isNotificationReason(event.reason)) {
+    throw new Error("notification event contains an invalid refusal");
+  }
+  const heading =
+    event.kind === "primary-down"
+      ? `Primary remote unreachable — running on ${event.fallback}`
+      : `Remote run refused — ${event.class}`;
+  return [heading, ...common, `class=${event.class}`, `reason=${event.reason}`, `time=${event.timestamp}`].join("\n");
+}
+
+function eventMessage(event: NotificationEvent | FallbackEvent): string {
+  if ("requested" in event) return fallbackEventMessage(event);
   for (const value of [event.consumer, event.profile, event.remoteLabel]) {
     if (!EVENT_FIELD.test(value)) throw new Error("notification event contains an invalid field");
   }
@@ -107,7 +145,7 @@ function eventMessage(event: NotificationEvent): string {
 export async function sendTelegramNotification(
   runtime: TelegramRuntime,
   config: TelegramConfig,
-  event: NotificationEvent,
+  event: NotificationEvent | FallbackEvent,
 ): Promise<void> {
   const body = encoder.encode(JSON.stringify({ chat_id: config.chatId, text: eventMessage(event) }));
   let response: { readonly status: number; readonly body: Uint8Array };
