@@ -160,7 +160,7 @@ describe("remote profile fallback", () => {
     expect(isRemoteFallback("fail")).toBe(false);
   });
 
-  it("fails over when preparation stays unreachable", async () => {
+  it("fails over after two reachability failures", async () => {
     const runtime = new FakeRuntime();
     runtime.preparations = [failed("transport", true, "reachability"), failed("transport", true, "reachability")];
 
@@ -169,6 +169,21 @@ describe("remote profile fallback", () => {
       reason: "transport",
     });
     expect(runtime.calls).toEqual(["prepare", "prepare"]);
+  });
+
+  it.each([
+    ["security", "host-key", ["prepare", "fail-closed"]],
+    ["local", "validation", ["prepare", "fail-closed"]],
+    ["remote", "workspace", ["prepare", "prepare", "fail-closed"]],
+  ] as const)("fails closed after retryable %s then reachability", async (failureClass, reason, calls) => {
+    const runtime = new FakeRuntime();
+    runtime.preparations = [failed(reason, true, failureClass), failed("transport", true, "reachability")];
+
+    expect(await runProfileLeg(runtime, remoteFallbackProfile, ["./verify"])).toEqual({
+      kind: "exit",
+      status: INFRASTRUCTURE_EXIT_CODE,
+    });
+    expect(runtime.calls).toEqual(calls);
   });
 
   it("fails over under --mode remote too", async () => {

@@ -110,16 +110,24 @@ export async function runProfileLeg(
   if (mode === "local") return { kind: "exit", status: await runLocal(runtime, command) };
 
   let prepared: PrepareResult | undefined;
+  let onlyReachabilityFailures = true;
   for (let attempt = 0; attempt < MAX_PREPARATION_ATTEMPTS; attempt += 1) {
     try {
       prepared = await runtime.prepareRemote();
     } catch {
       return { kind: "exit", status: await failClosed(runtime) };
     }
-    if (prepared.ok || !prepared.retryable) break;
+    if (prepared.ok) break;
+    onlyReachabilityFailures &&= prepared.failureClass === "reachability";
+    if (!prepared.retryable || prepared.failureClass === "security" || prepared.failureClass === "local") break;
   }
   if (prepared === undefined || !prepared.ok) {
-    if (isRemoteFallback(profile.fallback) && prepared?.ok === false && prepared.failureClass === "reachability") {
+    if (
+      isRemoteFallback(profile.fallback) &&
+      prepared?.ok === false &&
+      prepared.failureClass === "reachability" &&
+      onlyReachabilityFailures
+    ) {
       return { kind: "failover", reason: stableReason(prepared.reason) };
     }
     const localIsPointless = prepared?.ok === false && LOCAL_RERUN_POINTLESS_REASONS.has(prepared.reason);
