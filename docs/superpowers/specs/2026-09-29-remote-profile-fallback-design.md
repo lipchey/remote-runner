@@ -1,6 +1,6 @@
 # Remote Profile Fallback Design
 
-**Status:** proposed.
+**Status:** implemented.
 
 ## 1. Problem
 
@@ -8,9 +8,9 @@ A profile can fall back only to a local run (`fallback: local`) or to nothing (`
 (`src/config/load-manifest.ts:278`, `src/config/types.ts:12`). The owner wants a primary remote with
 a second remote behind it: Ariadne adds `verify-full-pop-os` (host `pop-os`, `fallback: verify-full`)
 while `verify-full` (host `ariadne-runner`, `fallback: local`) keeps its id, target and its live
-Mutagen sessions `remote-runner-ariadne-verify-full-<identity>`. One Telegram message per transition
-(down, recovery), a pre-dispatch query so Ariadne can pick its test tier, and all failover logic in
-remote-runner.
+Mutagen sessions `remote-runner-ariadne-verify-full-<identity>`. Each transition is durably enqueued
+once and delivered at least once, a pre-dispatch query lets Ariadne pick its test tier, and all
+failover logic stays in remote-runner.
 
 Today's facts the design builds on:
 
@@ -52,6 +52,8 @@ Today's facts the design builds on:
 
 `types.ts` gets `fallback: "local" | "fail" | string` plus a helper
 `remoteFallbackOf(manifest, profile): Profile | undefined` exported from `load-manifest.ts`.
+The manifest also validates `consumer` with Mutagen's session-component rule because it is part of
+the v2 state namespace and session name.
 
 **Reserved env (contract 6).** `RESERVED_CHILD_ENVIRONMENT = ["REMOTE_RUNNER_SELECTED_PROFILE",
 "REMOTE_RUNNER_REMOTE_LABEL"]` is exported from `load-manifest.ts`. `environment()`
@@ -150,8 +152,10 @@ remote hop by construction: F unreachable → F's own `fallback: local` under `a
 (`src/run/run-profile.ts:90-92`), fail-closed 75 under `--mode remote`. `--mode remote` therefore
 permits the remote hop and forbids the local one.
 
-**Command.** An explicit `-- <command>` carries over to F. Without one, each leg runs its own
-profile's `workload.command` ("fully as that profile", §12 D1).
+**Request context and command.** One `RunRequest { requested, commandOverride?, runId }` is created
+before selection and passed unchanged to every leg. Each leg uses
+`commandOverride ?? leg.workload.command`, so an explicit `-- <command>` carries over to F and each
+leg otherwise runs its own profile command. Both legs log the same `runId`.
 
 **Controller repair** (`src/cli.ts:424-436`) keeps continuing on failure when the chain can end
 locally: `auto` and (`fallback: local`, or a remote fallback whose own fallback is `local`).
@@ -175,8 +179,8 @@ Two changes:
 **Run log.** Every record gains `requested` and `selected`. A leg writes into its own profile root
 (`src/app/default-dependencies.ts:580-588`), so a failover run leaves `run-start … run-unavailable …
 run-failover {to: F, reason}` in P's log and `run-start … run-finish` in F's log under the same
-`runId`. `run-failover` is a new event; corpus summaries only count `run-finish`
-(`src/diagnostics/corpus.ts:179`, `:190`), so it adds no double count.
+`runId`. `run-failover` is a new event and `summary.records` counts it; workload outcome totals still
+use `run-finish`, so it adds no double count.
 
 ## 6. Outage state v2 (contract 7)
 
@@ -192,11 +196,18 @@ walk treats every directory under `profiles/<consumer>/<profile>/` as an identit
   "schemaVersion": 2,
   "consumer": "ariadne",
   "primary": "verify-full-pop-os",
+  "topology": {
+    "target": "admin@pop-os",
+    "hostKeySha256": "SHA256:…",
+    "fallback": "verify-full",
+    "fallbackTarget": "admin@ariadne-runner"
+  },
   "outage": { "reason": "transport", "since": "2026-09-29T10:00:00.000Z" },
   "refusal": null,
   "negative": { "checkedAt": "2026-09-29T10:00:00.000Z", "ttlMs": 60000 },
   "lease": null,
   "lastRecoveryAt": null,
+  "backoffTtlMs": 120000,
   "queue": []
 }
 ```
@@ -206,25 +217,28 @@ walk treats every directory under `profiles/<consumer>/<profile>/` as an identit
   or `remote` reason.
 - `negative`: `{checkedAt, ttlMs}` | `null` — negative reachability cache.
 - `lease`: `{takenAt, ttlMs}` | `null` — one run's right to re-probe an expired negative entry.
+- `topology`: P's target, host-key pin, fallback id, and fallback target; a mismatch resets outage,
+  refusal, negative cache, and lease while retaining the notification queue.
+- `backoffTtlMs`: persisted next-outage TTL, capped at 10 minutes.
 - `queue`: ≤64 `FallbackEvent`s, the same bound as v1 (`src/notifications/outage.ts:36`).
 
-`FallbackEvent = { kind: "failover" | "recovery" | "refused", consumer, requested, fallback,
-remoteLabel, class, reason, timestamp }`; `fallback` is F's id, `remoteLabel` is P's.
+The event kinds are `primary-down`, `primary-recovered`, and `primary-refused`; a recovery carries
+`cleared: "outage" | "refusal" | "both"`. `fallback` is F's id and `remoteLabel` is P's.
 `validateEvent`/`FIELD` rules (`src/notifications/outage.ts:37`, `:88-97`) apply field-wise;
 `telegram.ts` `eventMessage` (`src/notifications/telegram.ts:85-105`) gains one branch per kind:
 `Primary remote unreachable — running on <fallback>`, `Primary remote recovered — child started`,
-`Remote run refused — <class>`.
+and `Remote run refused — <class>`.
 
 **Transitions** (pure functions in `src/notifications/outage.ts`, beside v1, reusing `deliver`,
 `stableReason`, `isOutageReason`):
 
 | Function                       | Effect                                                                                         | Message                                        |
 | ------------------------------ | ---------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `selectPrimary(now)`           | fresh `negative` → skip; expired and no live lease → take lease, use P; live lease → skip       | none                                           |
-| `observeUnreachable(reason)`   | set `negative` (TTL rule below), clear `lease`; if `outage` null → set it                       | `failover`, once per outage                    |
+| `selectPrimary(now)`           | a refusal always probes P; otherwise fresh `negative` → skip; expired and no live lease → take lease, use P; live lease during an outage → skip | none |
+| `observeUnreachable(reason)`   | set `negative` (TTL rule below), clear `lease`; if `outage` null → set it                       | `primary-down`, once per outage                |
 | `observeReachable()`           | clear `negative` and `lease` (probe of P succeeded); `outage` stays                             | none                                           |
-| `observeRefused(class, reason)`| `class !== "remote"` or `isOutageReason(reason)`; if `refusal` differs in (class, reason) → set it | `refused`, once per (class, reason) episode, **regardless of `outage`** |
-| `observePrimaryChildStarted()` | if `outage` or `refusal` → clear both, clear `negative`, set `lastRecoveryAt`                    | `recovery`, once                               |
+| `observeRefused(class, reason)`| clear `negative` and `lease`; `class !== "remote"` or `isOutageReason(reason)`; if `refusal` differs in (class, reason) → set it | `primary-refused`, once per (class, reason) episode, **regardless of `outage`** |
+| `observePrimaryChildStarted()` | if `outage` or `refusal` → clear both, clear `negative`, set `lastRecoveryAt`                    | `primary-recovered`, once                      |
 
 A `security` refusal is never suppressed by an active transport outage: the two fields are
 independent.
@@ -234,18 +248,22 @@ write (atomic rename, as today, `src/node/notifications.ts:130-135`) → deliver
 `acquireProfileLock` (`src/runtime/lock.ts:303-396`) with `lockDirectory = () => <dir>/lock`, the
 node `LockFileSystem` adapter moved out of `NodeProfileServices.acquireLock`
 (`src/app/pilot-services.ts:601-624`) into `src/node/lock-files.ts`, wait budget 30 s, lease 120 s.
+The fallback directory is created recursively with mode 0700 before the first lock acquisition.
 Delivery under the lock sends at most 4 queued events (each capped by the 5 s Telegram timeout,
 `src/notifications/telegram.ts:5`); the remainder stays queued for the next holder. On
 `LockTimeoutError`, `selectPrimary` falls back to a lock-free read of the atomically written file
 without taking a lease, and a transition is skipped with the stderr line `remote-runner: fallback
-state busy` — skipping can lose nothing that the next observer will not observe again, and it can
-never duplicate a message.
+state busy`. A skipped unreachable transition is re-observed by the next primary probe; a skipped
+recovery leaves `outage` set and is re-observed by the next primary child start.
+
+The delivery guarantee is exactly-once durable enqueue per transition plus at-least-once delivery.
+A crash after Telegram accepts `send` but before the queue write can repeat one message.
 
 **Negative-cache TTL and flap limit.** `ttlMs` starts at 60 s, doubles on each consecutive
-`observeUnreachable` while `outage` is set, and is capped at 10 min. A new outage within 15 min of
-`lastRecoveryAt` starts from the previous doubled TTL instead of 60 s, so a flapping primary backs
-off exponentially instead of emitting a pair per minute. Every transition still sends exactly one
-message; the rate limit bounds transitions, not messages. The lease TTL is 60 s.
+`observeUnreachable` while `outage` is set, and is capped at 10 min. The next value is persisted as
+`backoffTtlMs`; a new outage within 15 min of `lastRecoveryAt` starts from it, while a later outage
+resets to 60 s. A flapping primary therefore backs off exponentially instead of opening a pair of
+transitions per minute. The lease TTL is 60 s.
 
 **Clock rule.** Timestamps are wall-clock ISO strings, because separate processes share no
 monotonic clock. An entry is fresh only when `checkedAt <= now < checkedAt + min(ttlMs, 10 min)`
@@ -294,10 +312,11 @@ no `pauseSync`, so no Mutagen session is created:
 2. P has a remote fallback: `selectPrimary`; if P is not skipped, check P. Reachable →
    `observeReachable`, answer P. `reachability` → `observeUnreachable` (sends the failover message
    if this is the transition), continue with F. `security`/`local`/`remote` → `observeRefused`,
-   answer the refusal.
+   then answer or throw according to the class.
 3. Check F (or P, for a profile without a remote fallback). Reachable → answer it. Unreachable →
    its own `fallback: local` under `auto` → `{selected: <it>, remoteLabel: null, fallbackActive:
-   true}`, exit 0; otherwise nothing is reachable.
+   true}`, exit 0; otherwise nothing is reachable. P, F, and a plain profile classify failures the
+   same way: `security` → exit 4, `local` → 70, and `remote` or no reachable hop → 3.
 
 Output: `{"requested","selected","remoteLabel","fallbackActive","reason","checkedAt"}` on stdout for
 exit 0, 3 and 4; `selected`/`remoteLabel` are `null` when nothing is selected, `reason` is `null`
@@ -309,7 +328,7 @@ fact was established (probe time or the cache entry's `checkedAt`).
 | 0    | a selection exists (remote or local end of the chain)                               | success                             |
 | 2    | usage, manifest or unknown profile                                                  | same                                |
 | 3    | nothing runnable: every hop unreachable, or a `remote`-class refusal; `run` would exit 75 before starting | unused                   |
-| 4    | security refusal (`host-key`, `authentication`, Mutagen ownership); alert raised     | unused                              |
+| 4    | security refusal (`host-key`, `authentication`); alert raised                        | unused                              |
 | 70   | runtime error, including a `local`-class fault (ssh/ssh-keyscan missing, EMFILE)    | runtime unavailable / threw         |
 
 `1`, `64`, `75` and `127` are never returned by `resolve`. `resolve` is not a workload, so its codes
@@ -332,9 +351,10 @@ selected at execution time is the one prewarmed — F while P is down, and never
 (`src/config/load-manifest.ts:278`), so a manifest that names `fallback: verify-full` fails to load
 for **every** profile in it — `run verify-full` would exit 2 as well.
 
-1. **Drain.** Stop dispatching remote-fallback profiles; wait for `status` to show no
-   `prewarm=queued|running` for any profile of the consumer, and no workload in flight
-   (`remote-runner logs <profile>` shows a `run-finish` for every `run-start`).
+1. **Drain.** Stop dispatching remote-fallback profiles; run `remote-runner status <profile>` and
+   `remote-runner logs <profile>` for both P and F. Wait for no `prewarm=queued|running`, then join by
+   `runId` and require every `run-start` to have a terminal `run-finish`, `run-error`, or
+   `run-failover`.
 2. **Consumer reverts first.** Ariadne removes `verify-full-pop-os` (or sets its `fallback` to
    `local`/`fail`) and commits, so no manifest names a profile id as `fallback`.
 3. **Reinstall** the accepted old revision: `git checkout <accepted-sha> && pnpm install && pnpm verify
@@ -354,6 +374,8 @@ README gains `resolve` under "Consumer commands", the `fallback` grammar, the re
 a rollback pointer. The operator guide gains "Remote fallback" (semantics, v2 state, classes, the two
 markers) and "Rollback from remote fallback" (§10). No reason is added to `NOTIFICATION_REASONS`,
 so the reason-index test (`tests/unit/operations-guide.test.ts:21-34`) needs no new row.
+The forward upgrade order is runner 0.2.0 first, then the consumer manifest: 0.1.0 rejects a manifest
+that names a profile id in `fallback` as a whole.
 
 ## 12. Decisions and open questions
 
@@ -369,11 +391,12 @@ so the reason-index test (`tests/unit/operations-guide.test.ts:21-34`) needs no 
   start costs one 75 instead of a failover.
 - **D4 — mid-preparation loss.** After a successful probe, a transport drop during workspace or
   sync is untyped (`remote`), so the run fails closed (75, alert) rather than falling over. Typing
-  every remote step would be a much larger change; the negative cache sends the next run to F anyway.
+  every remote step would be a much larger change. No negative entry is written; the next run probes
+  P and falls over only if that probe classifies the host as unreachable.
 - **D5 — first-use reason change** on `fallback: local` profiles (§3.1).
 - **D6 — security repeats.** "Always delivered" is implemented as: never suppressed by a transport
   outage, one message per (class, reason) episode, the episode ending at the next primary child
-  start. Delivering every occurrence would page ~20 times per stale pin. **Open:** confirm.
+  start. Delivering every occurrence would page ~20 times per stale pin.
 - **D7 — v1 reset.** Pending v1 events of a profile switched to a remote fallback are retired, not
   delivered; an outage announced under v1 then gets no recovery message. Ariadne's primary is new,
   so none exist today.
@@ -383,12 +406,15 @@ so the reason-index test (`tests/unit/operations-guide.test.ts:21-34`) needs no 
 - **D9 — prewarm selects at execution time** (§9), not at enqueue.
 - **D10 — `resolve` also answers plain profiles and mode `local`**; it needs no v2 state for them.
 - **D11 — markers only on the workload child**, not on setup/ensure commands.
-- **D12 — lock timeout degrades to a lock-free read** (§6); the transition is skipped, never guessed.
+- **D12 — lock timeout degrades to a lock-free read** (§6); the transition is skipped, never guessed,
+  and the next relevant observation retries it.
 - **D13 — Mutagen mode/ignore/duplicate mismatches are `security` too**, not only the endpoint
   mismatch: each is a session under the owned name this run did not create.
 - **D14 — `local`-class faults exit 70 from `resolve`**, sharing "runtime unavailable" instead of
   taking a third new code.
+- **D15 — refusal escape hatch.** A `security`, `local`, or `remote` refusal blocks P; an operator who
+  needs continuity runs F by name until P is fixed.
 
 **Judged unsound as literally worded:** contract 7's "flap rate-limit" read as message suppression
-would contradict "exactly one down and one recovery message per transition". This design rate-limits
-transitions (TTL back-off), not messages.
+would contradict exactly-once durable enqueue per transition. This design rate-limits transitions
+(TTL back-off), not messages; delivery remains at least once.
