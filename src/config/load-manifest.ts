@@ -7,9 +7,12 @@ import { SSH_TARGET } from "../ssh/client.js";
 import type { ManifestV1, Profile } from "./types.js";
 
 const PROFILE_ID = /^[a-z][a-z0-9-]*$/;
+const COMPONENT = /^[a-z][a-z0-9-]{0,62}$/u;
 const UPPERCASE_NAME = /^[A-Z][A-Z0-9_]*$/;
 const GENERATED_ROOT = "~/.cache/remote-runner/workspaces";
 const BASE_REF = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)+$/u;
+
+export const RESERVED_CHILD_ENVIRONMENT = ["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL"] as const;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -151,6 +154,9 @@ function environment(value: unknown): Record<string, string> {
   const source = record(value, "workload childEnvironment");
   const result: Record<string, string> = {};
   for (const [name, entry] of Object.entries(source)) {
+    if (RESERVED_CHILD_ENVIRONMENT.includes(name as (typeof RESERVED_CHILD_ENVIRONMENT)[number])) {
+      throw new Error(`reserved child environment name: ${name}`);
+    }
     if (!UPPERCASE_NAME.test(name)) {
       throw new Error(`invalid child environment name: ${name}`);
     }
@@ -168,6 +174,9 @@ function environment(value: unknown): Record<string, string> {
 function secretNames(value: unknown): string[] {
   const names = stringArray(value, "secrets allow");
   for (const name of names) {
+    if (RESERVED_CHILD_ENVIRONMENT.includes(name as (typeof RESERVED_CHILD_ENVIRONMENT)[number])) {
+      throw new Error(`reserved child environment name: ${name}`);
+    }
     if (!UPPERCASE_NAME.test(name)) {
       throw new Error(`invalid secret name: ${name}`);
     }
@@ -271,11 +280,20 @@ function parseProfile(value: unknown): Profile {
     };
   });
 
+  const consumer = nonEmptyString(source.consumer, "profile consumer");
+  if (!COMPONENT.test(consumer)) {
+    throw new Error("profile consumer must be a safe session component");
+  }
+  const fallback = nonEmptyString(source.fallback, "profile fallback");
+  if (!PROFILE_ID.test(fallback)) {
+    throw new Error(`invalid profile fallback: ${fallback}`);
+  }
+
   return {
     id,
-    consumer: nonEmptyString(source.consumer, "profile consumer"),
+    consumer,
     mode: oneOf(source.mode, ["auto", "local", "remote"], "profile mode"),
-    fallback: oneOf(source.fallback, ["local", "fail"], "profile fallback"),
+    fallback,
     remote: {
       label: nonEmptyString(remote.label, "remote label"),
       target,
@@ -342,6 +360,9 @@ export function loadManifestText(text: string): ManifestV1 {
   const profileIds = new Set<string>();
   const profiles = source.profiles.map((entry) => {
     const profile = parseProfile(entry);
+    if (profile.id === "local" || profile.id === "fail") {
+      throw new Error(`reserved profile id: ${profile.id}`);
+    }
     if (profileIds.has(profile.id)) {
       throw new Error(`duplicate profile id: ${profile.id}`);
     }
@@ -349,5 +370,27 @@ export function loadManifestText(text: string): ManifestV1 {
     return profile;
   });
 
+  for (const profile of profiles) {
+    if (profile.fallback === "local" || profile.fallback === "fail") continue;
+    if (profile.fallback === profile.id) {
+      throw new Error(`profile ${profile.id} falls back to itself`);
+    }
+    const fallback = profiles.find(({ id }) => id === profile.fallback);
+    if (fallback === undefined) {
+      throw new Error(`unknown fallback profile: ${profile.fallback}`);
+    }
+    if (fallback.fallback !== "local" && fallback.fallback !== "fail") {
+      throw new Error(`fallback ${fallback.id} must not name a remote fallback`);
+    }
+    if (fallback.consumer !== profile.consumer) {
+      throw new Error(`fallback ${fallback.id} belongs to another consumer`);
+    }
+  }
+
   return { schemaVersion: 1, profiles };
+}
+
+export function remoteFallbackOf(manifest: ManifestV1, profile: Profile): Profile | undefined {
+  if (profile.fallback === "local" || profile.fallback === "fail") return undefined;
+  return manifest.profiles.find(({ id }) => id === profile.fallback);
 }

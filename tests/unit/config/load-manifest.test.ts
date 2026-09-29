@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { loadManifestText } from "../../../src/config/load-manifest.js";
+import { loadManifestText, remoteFallbackOf } from "../../../src/config/load-manifest.js";
 import { validArtifactManifest, validManifest } from "./manifest-fixture.js";
+
+const profileBlock = validManifest.slice(validManifest.indexOf("  - id:"));
+
+function appendedProfile(...replacements: ReadonlyArray<readonly [string, string]>): string {
+  return replacements.reduce((profile, [before, after]) => profile.replace(before, after), profileBlock);
+}
 
 describe("loadManifestText", () => {
   it("accepts the v1 example and normalizes declared repository paths", () => {
@@ -11,6 +17,87 @@ describe("loadManifestText", () => {
 
     expect(manifest.profiles[0]?.id).toBe("verify-full");
     expect(manifest.profiles[0]?.bootstrap.setup).toEqual(["scripts/ds-bootstrap.sh"]);
+  });
+
+  it("accepts a fallback naming another profile of the same consumer", () => {
+    const manifest = loadManifestText(
+      `${validManifest}${appendedProfile(
+        ["id: verify-full", "id: verify-full-pop-os"],
+        ["fallback: local", "fallback: verify-full"],
+      )}`,
+    );
+    const primary = manifest.profiles.find(({ id }) => id === "verify-full-pop-os");
+
+    expect(primary).toBeDefined();
+    expect(remoteFallbackOf(manifest, primary!)).toMatchObject({ id: "verify-full" });
+  });
+
+  it("rejects a profile falling back to itself", () => {
+    expect(() => loadManifestText(validManifest.replace("fallback: local", "fallback: verify-full"))).toThrow(
+      /falls back to itself/u,
+    );
+  });
+
+  it("rejects an unknown fallback profile", () => {
+    expect(() => loadManifestText(validManifest.replace("fallback: local", "fallback: missing"))).toThrow(
+      /unknown fallback profile/u,
+    );
+  });
+
+  it("rejects a fallback target that names a remote fallback", () => {
+    const middle = appendedProfile(["id: verify-full", "id: verify-mid"], ["fallback: local", "fallback: verify-full"]);
+    const primary = appendedProfile(
+      ["id: verify-full", "id: verify-primary"],
+      ["fallback: local", "fallback: verify-mid"],
+    );
+
+    expect(() => loadManifestText(`${validManifest}${middle}${primary}`)).toThrow(/must not name a remote fallback/u);
+  });
+
+  it("rejects a fallback target of another consumer", () => {
+    const primary = appendedProfile(
+      ["id: verify-full", "id: verify-primary"],
+      ["consumer: ariadne", "consumer: another"],
+      ["fallback: local", "fallback: verify-full"],
+    );
+
+    expect(() => loadManifestText(`${validManifest}${primary}`)).toThrow(/belongs to another consumer/u);
+  });
+
+  it.each(["local", "fail"])("reserves the profile id %s", (id) => {
+    expect(() => loadManifestText(validManifest.replace("id: verify-full", `id: ${id}`))).toThrow(
+      /reserved profile id/u,
+    );
+  });
+
+  it.each(["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL"])(
+    "rejects the runner's reserved marker %s as a childEnvironment key",
+    (name) => {
+      expect(() => loadManifestText(validManifest.replace("REMOTE_RUNNER_CHILD", name))).toThrow(
+        /reserved child environment/u,
+      );
+    },
+  );
+
+  it.each(["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL"])(
+    "rejects the runner's reserved marker %s as a secret name",
+    (name) => {
+      expect(() => loadManifestText(validManifest.replace("NEON_DEV_DATABASE_URL", name))).toThrow(
+        /reserved child environment/u,
+      );
+    },
+  );
+
+  it("keeps REMOTE_RUNNER_CHILD legal as a childEnvironment key", () => {
+    expect(loadManifestText(validManifest).profiles[0]?.workload.childEnvironment).toEqual({
+      REMOTE_RUNNER_CHILD: "1",
+    });
+  });
+
+  it("rejects an unsafe consumer namespace", () => {
+    expect(() => loadManifestText(validManifest.replace("consumer: ariadne", `consumer: ${"a".repeat(64)}`))).toThrow(
+      /safe session component/u,
+    );
   });
 
   it("accepts an optional remote-tracking base ref for history-sensitive gates", () => {
@@ -200,7 +287,7 @@ describe("loadManifestText", () => {
     ["schema version", "schemaVersion: 1", "schemaVersion: 2", /schemaVersion.*1/],
     ["profile id", "id: verify-full", "id: Verify_full", /profile id/],
     ["mode", "mode: auto", "mode: sometimes", /profile mode/],
-    ["fallback", "fallback: local", "fallback: remote", /profile fallback/],
+    ["fallback", "fallback: local", "fallback: invalid/name", /invalid profile fallback/],
     ["trusted fingerprint", 'hostKeySha256: "SHA256:trusted"', 'hostKeySha256: "MD5:bad"', /SHA256/],
     ["generated root", "~/.cache/remote-runner/workspaces", "relative/workspaces", /generated root/],
     [
