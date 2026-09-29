@@ -64,6 +64,18 @@ describe("loadManifestText", () => {
     expect(() => loadManifestText(`${validManifest}${primary}`)).toThrow(/belongs to another consumer/u);
   });
 
+  it.each([
+    ["a fallback label containing a space", validManifest.replace("label: pop-os", "label: pop os"), "verify-primary"],
+    ["a 129-character primary id", validManifest, "p".repeat(129)],
+  ])("rejects invalid v2 event fields for %s", (_description, fallbackManifest, primaryId) => {
+    const primary = appendedProfile(
+      ["id: verify-full", `id: ${primaryId}`],
+      ["fallback: local", "fallback: verify-full"],
+    );
+
+    expect(() => loadManifestText(`${fallbackManifest}${primary}`)).toThrow(/invalid fallback event field/u);
+  });
+
   it.each(["local", "fail"])("reserves the profile id %s", (id) => {
     expect(() => loadManifestText(validManifest.replace("id: verify-full", `id: ${id}`))).toThrow(
       /reserved profile id/u,

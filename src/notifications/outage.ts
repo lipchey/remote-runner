@@ -454,10 +454,11 @@ function fresh(entry: { readonly ttlMs: number }, at: string, nowMs: number): bo
   return startedAt <= nowMs && nowMs < startedAt + Math.min(entry.ttlMs, NEGATIVE_MAX_MS);
 }
 
-function enqueue(state: FallbackState, event: FallbackEvent): FallbackState {
-  if (state.queue.length >= MAX_QUEUE) throw new Error("notification queue is full");
+function enqueue(runtime: FallbackRuntime, state: FallbackState, event: FallbackEvent): FallbackState {
   if (!validateFallbackEvent(event)) throw new Error("fallback event is invalid");
-  return { ...state, queue: [...state.queue, event] };
+  const queue = state.queue.length >= MAX_QUEUE ? state.queue.slice(1) : state.queue;
+  if (queue !== state.queue) runtime.warn("remote-runner: notification queue full; oldest event dropped");
+  return { ...state, queue: [...queue, event] };
 }
 
 function fallbackEvent(
@@ -543,12 +544,14 @@ export async function observeUnreachable(
       state.outage === null ? (withinFlapWindow ? state.backoffTtlMs : NEGATIVE_BASE_MS) : state.backoffTtlMs;
     if (state.outage === null) {
       state = enqueue(
+        runtime,
         { ...state, outage: { reason: stable, since: now } },
         fallbackEvent(runtime, context, { kind: "primary-down", class: "reachability", reason: stable }),
       );
     }
     state = {
       ...state,
+      refusal: state.refusal?.class === "remote" ? null : state.refusal,
       negative: { checkedAt: now, ttlMs },
       lease: null,
       backoffTtlMs: Math.min(ttlMs * 2, NEGATIVE_MAX_MS),
@@ -589,6 +592,7 @@ export async function observeRefused(
     if (changed) {
       const since = timestamp(runtime);
       state = enqueue(
+        runtime,
         { ...state, refusal: { class: failureClass, reason: stable, since } },
         fallbackEvent(runtime, context, {
           kind: "primary-refused",
@@ -615,6 +619,7 @@ export async function observePrimaryChildStarted(
         state.outage !== null && state.refusal !== null ? "both" : state.outage !== null ? "outage" : "refusal";
       const recoveredAt = timestamp(runtime);
       state = enqueue(
+        runtime,
         {
           ...state,
           outage: null,

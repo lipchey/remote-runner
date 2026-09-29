@@ -208,6 +208,29 @@ describe("fallback state", () => {
     await expect(selectPrimary(runtime, context)).resolves.toBe(true);
   });
 
+  it("an unreachable observation clears a remote refusal and activates the negative cache", async () => {
+    const runtime = new FakeRuntime();
+    await observeRefused(runtime, context, "remote", "workspace");
+
+    await observeUnreachable(runtime, context, "transport");
+
+    expect(runtime.state).toMatchObject({ refusal: null, negative: { ttlMs: 60_000 } });
+    await expect(selectPrimary(runtime, context)).resolves.toBe(false);
+  });
+
+  it.each([
+    ["security", "host-key"],
+    ["local", "validation"],
+  ] as const)("an unreachable observation preserves a %s refusal", async (failureClass, reason) => {
+    const runtime = new FakeRuntime();
+    await observeRefused(runtime, context, failureClass, reason);
+
+    await observeUnreachable(runtime, context, "transport");
+
+    expect(runtime.state).toMatchObject({ refusal: { class: failureClass, reason } });
+    await expect(selectPrimary(runtime, context)).resolves.toBe(true);
+  });
+
   it("a concurrent selector skips only while the outage probe lease is live", async () => {
     const runtime = new FakeRuntime();
     await observeUnreachable(runtime, context, "transport");
@@ -294,6 +317,23 @@ describe("fallback state", () => {
 
     expect(runtime.sent).toHaveLength(4);
     expect((runtime.state as FallbackState).queue).toEqual([event(4)]);
+  });
+
+  it("drops the oldest v2 event and applies the transition when the queue is full", async () => {
+    const runtime = new FakeRuntime();
+    runtime.state = state({ queue: Array.from({ length: 64 }, (_entry, index) => event(index)) });
+    runtime.clock = 64;
+
+    await observeUnreachable(runtime, context, "transport");
+
+    expect(runtime.warnings).toHaveLength(1);
+    expect(runtime.writes[0]).toMatchObject({
+      outage: { reason: "transport" },
+      negative: { ttlMs: 60_000 },
+    });
+    expect(runtime.writes[0]?.queue).toHaveLength(64);
+    expect(runtime.writes[0]?.queue[0]).toEqual(event(1));
+    expect(runtime.writes[0]?.queue.at(-1)).toEqual(event(64));
   });
 
   it("durably enqueues before delivery and may redeliver after a dequeue-write crash", async () => {
