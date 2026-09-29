@@ -25,7 +25,7 @@ import type { Profile } from "../../../src/config/types.js";
 import type { NodeProcessRuntime, StreamingProcessRequest } from "../../../src/node/process.js";
 import { pathIdentity, worktreeIdentity } from "../../../src/runtime/identity.js";
 import { RunTelemetry } from "../../../src/runtime/telemetry.js";
-import { prepareRemote } from "../../../src/run/prepare.js";
+import { prepareRemote, type FailureClass } from "../../../src/run/prepare.js";
 import { REMOTE_BUSY_EXIT_CODE, type BoundedProcessRequest } from "../../../src/ssh/client.js";
 import { validManifest } from "../config/manifest-fixture.js";
 
@@ -916,6 +916,28 @@ describe("pilot service boundaries", () => {
     /* Collected, not overwritten: a single last-value variable stays green when the refused reason
        is emitted first and the accepted one lands on top of it. */
     expect(recorded).toEqual(["transport"]);
+  });
+
+  it("forwards typed refusals instead of writing the v1 outage channel", async () => {
+    const refusals: Array<readonly [FailureClass, string]> = [];
+    const fallbacks: string[] = [];
+    const services = new NodeProfileServices(profile, {
+      clientId: "test-client",
+      home: "/tmp/remote-runner-test-home",
+      sourceRoot: process.cwd(),
+      launcherSource: new Uint8Array(),
+      recordFallback: async (reason) => {
+        fallbacks.push(reason);
+      },
+      recordRefusal: async (failureClass, reason) => {
+        refusals.push([failureClass, reason]);
+      },
+    });
+
+    await services.recordOutage("host-key", "security");
+
+    expect(refusals).toEqual([["security", "host-key"]]);
+    expect(fallbacks).toEqual([]);
   });
 
   it("builds fixed child argv without putting secret values into it", () => {

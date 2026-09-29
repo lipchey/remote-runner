@@ -34,7 +34,7 @@ import { RemoteToolchainRuntime } from "../node/remote-toolchain.js";
 import { acquireProfileLock, LockTimeoutError } from "../runtime/lock.js";
 import { clientNamespace, resolveClientIdentity, worktreeIdentity } from "../runtime/identity.js";
 import type { RunPhase, RunTelemetry } from "../runtime/telemetry.js";
-import { PreparationError } from "../run/prepare.js";
+import { PreparationError, type FailureClass } from "../run/prepare.js";
 import { assertSafeRepositoryPath } from "../runtime/paths.js";
 import { INFRASTRUCTURE_EXIT_CODE, WORKLOAD_COMMAND_REASON } from "../run/run-profile.js";
 import type { RemoteExecutionResult } from "../run/run-profile.js";
@@ -432,6 +432,7 @@ export interface NodeProfileServicesOptions {
   readonly stdout?: (chunk: Uint8Array) => void;
   readonly stderr?: (chunk: Uint8Array) => void;
   readonly recordFallback?: (reason: string) => Promise<void>;
+  readonly recordRefusal?: (failureClass: FailureClass, reason: string) => Promise<void>;
   readonly recordRemoteChildStarted?: () => Promise<void>;
   readonly onLocalExecution?: () => void;
   readonly onUnavailable?: (reason: string, detail?: string) => void;
@@ -1172,11 +1173,15 @@ export class NodeProfileServices implements ProfileExecutionServices {
      swallowed it and the notification state still has an outage open under the PREVIOUS reason — so
      this call dedupes into silence, and the next healthy run sends a recovery naming that stale
      reason. Narrow (the state write itself has to fail) and noticed, not overlooked. */
-  async recordOutage(reason: string): Promise<void> {
+  async recordOutage(reason: string, failureClass?: FailureClass): Promise<void> {
     /* The operator still sees the stderr line; only the outage channel is spared reasons that say
        nothing about the remote being reachable. */
     const stable = stableReason(reason);
-    if (isOutageReason(stable)) await this.options.recordFallback?.(stable);
+    if (this.options.recordRefusal !== undefined) {
+      await this.options.recordRefusal(failureClass ?? "remote", stable);
+    } else if (isOutageReason(stable)) {
+      await this.options.recordFallback?.(stable);
+    }
   }
 
   async recordRemoteChildStarted(): Promise<void> {
