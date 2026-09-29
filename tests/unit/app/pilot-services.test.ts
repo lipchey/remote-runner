@@ -277,6 +277,33 @@ describe("pilot service boundaries", () => {
     expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("manifest|1|local");
   });
 
+  it("sets local child profile markers after inherited environment values", async () => {
+    const chunks: Uint8Array[] = [];
+    const inherited = process.env.REMOTE_RUNNER_REMOTE_LABEL;
+    process.env.REMOTE_RUNNER_REMOTE_LABEL = "inherited";
+    try {
+      const services = new NodeProfileServices(withSecretProvider(profile), {
+        clientId: "test-client",
+        home: "/tmp/remote-runner-test-home",
+        sourceRoot: process.cwd(),
+        launcherSource: new Uint8Array(),
+        stdout: (chunk) => chunks.push(chunk),
+        stderr: () => undefined,
+      });
+
+      await services.runLocal([
+        process.execPath,
+        "-e",
+        "process.stdout.write(`${process.env.REMOTE_RUNNER_SELECTED_PROFILE}|${process.env.REMOTE_RUNNER_REMOTE_LABEL}`)",
+      ]);
+
+      expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe("verify-full|");
+    } finally {
+      if (inherited === undefined) delete process.env.REMOTE_RUNNER_REMOTE_LABEL;
+      else process.env.REMOTE_RUNNER_REMOTE_LABEL = inherited;
+    }
+  });
+
   it("carries the allowlisted secrets into the local child, as the remote launcher does", async () => {
     const chunks: Uint8Array[] = [];
     const services = new NodeProfileServices(withSecretProvider(profile), {
@@ -907,6 +934,12 @@ describe("pilot service boundaries", () => {
     expect(serialized).toContain("NEON_DEV_DATABASE_URL");
     expect(serialized).toContain("REMOTE_RUNNER_CHILD");
     expect(args).toContain("REMOTE_RUNNER_PROVIDER=remote");
+    expect(args).toContain("REMOTE_RUNNER_SELECTED_PROFILE=verify-full");
+    expect(args).toContain("REMOTE_RUNNER_REMOTE_LABEL=pop-os");
+    expect(args.indexOf("REMOTE_RUNNER_SELECTED_PROFILE=verify-full")).toBeGreaterThan(
+      args.indexOf("REMOTE_RUNNER_PROVIDER=remote"),
+    );
+    expect(args.indexOf("REMOTE_RUNNER_REMOTE_LABEL=pop-os")).toBeGreaterThan(args.indexOf("REMOTE_RUNNER_CHILD=1"));
     expect(args).toContain("PATH=/remote/node/bin:/remote/uv:/usr/bin:/bin");
     expect(args).toContain("/remote/profile/.locks/0123456789abcdef01234567");
     expect(args[2]).toContain("flock -x 9");

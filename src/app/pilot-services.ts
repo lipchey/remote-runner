@@ -149,7 +149,7 @@ export function remoteChildArguments(
   workspace: string,
   workloadLock: string,
   pathEnvironment: string,
-  profile: Pick<Profile, "workload" | "secrets">,
+  profile: Pick<Profile, "id" | "remote" | "workload" | "secrets">,
   command: readonly string[],
 ): readonly string[] {
   for (const [label, path] of [
@@ -185,6 +185,8 @@ export function remoteChildArguments(
     ...childEnvironment.map(([name, value]) => `${name}=${value}`),
     "REMOTE_RUNNER_CHILD=1",
     "REMOTE_RUNNER_PROVIDER=remote",
+    `REMOTE_RUNNER_SELECTED_PROFILE=${profile.id}`,
+    `REMOTE_RUNNER_REMOTE_LABEL=${profile.remote.label}`,
     node,
     launcher,
     JSON.stringify(profile.secrets.allow),
@@ -1114,8 +1116,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
        remote child, reused so the substituted run carries what the substituted-for one would have,
        and so a provider with side effects is not invoked twice; only a run that never got that far
        collects here. Values that cannot be collected fail the run closed rather than running a
-       workload the remote would not have run. Spread last, matching the remote launcher, which
-       merges them over an environment that already carries the markers. */
+       workload the remote would not have run. */
       const secrets =
         prepared ??
         (await this.collectSecrets().catch((caught: unknown) => {
@@ -1135,6 +1136,8 @@ export class NodeProfileServices implements ProfileExecutionServices {
           REMOTE_RUNNER_CHILD: "1",
           REMOTE_RUNNER_PROVIDER: "local",
           ...secrets,
+          REMOTE_RUNNER_SELECTED_PROFILE: this.profile.id,
+          REMOTE_RUNNER_REMOTE_LABEL: "",
         },
         marker: new TextEncoder().encode("\0REMOTE_RUNNER_UNUSED_MARKER\0"),
         onMarker: async () => undefined,
