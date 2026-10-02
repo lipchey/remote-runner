@@ -81,7 +81,7 @@ export async function runMain(
         io.stdout(
           `stale: installed ${formatInstallVersion(installed)}, checkout builds ${formatInstallVersion(checkout)}`,
         );
-        io.stdout("run: pnpm install && pnpm verify && node dist/src/main.js install");
+        io.stdout("run: pnpm install --filter remote-runner && pnpm build && node dist/src/main.js install");
         return 1;
       } catch (error) {
         io.stderr(`remote-runner install --check failed: ${boundedCause(error)}`);

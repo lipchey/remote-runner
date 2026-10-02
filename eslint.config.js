@@ -18,7 +18,12 @@ export default tseslint.config(
     // recommendedTypeChecked's require-await/unsafe-* rules mostly fired on this
     // repo's intentional async-interface-stub pattern, not real bugs; only the
     // type-aware rules that catch actual async mistakes are added back explicitly.
-    files: ["src/**/*.ts", "tests/**/*.ts"],
+    files: [
+      "src/**/*.ts",
+      "tests/**/*.ts",
+      "packages/runner-router/src/**/*.ts",
+      "packages/runner-router/tests/**/*.ts",
+    ],
     extends: [...tseslint.configs.recommended],
     languageOptions: {
       parserOptions: {

@@ -1,0 +1,7 @@
+[Unit]
+Description=Report GitHub runner health
+
+[Service]
+Type=oneshot
+TimeoutStartSec=8s
+ExecStart=%h/.local/bin/runner-router-heartbeat.sh

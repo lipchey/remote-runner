@@ -138,7 +138,7 @@ describe("executable entrypoint", () => {
     ).toBe(1);
     expect(stale).toEqual([
       `stale: installed remote-runner 0.1.0 (app ${"c".repeat(24)}), checkout builds remote-runner 0.1.0 (app ${"d".repeat(24)})`,
-      "run: pnpm install && pnpm verify && node dist/src/main.js install",
+      "run: pnpm install --filter remote-runner && pnpm build && node dist/src/main.js install",
     ]);
 
     const current: string[] = [];
