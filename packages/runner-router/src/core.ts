@@ -98,6 +98,7 @@ export class RouterCore {
 
   private unknown(ctl: Control, result: Exclude<Result<unknown>, { kind: "ok" }>, prior: Control): void {
     const now = this.ports.now();
+    console.warn(`Reconcile ${result.kind}: ${result.reason}`);
     ctl.healthySince = null;
     ctl.unknownSince = prior.unknownSince ?? now;
     ctl.lastKnownEvalAt = prior.lastKnownEvalAt;
@@ -190,8 +191,9 @@ export class RouterCore {
             }
           }
         }
-      } catch {
-        this.unknown(ctl, { kind: "unknown", reason: "Reconcile failed" }, prior);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        this.unknown(ctl, { kind: "unknown", reason: `Reconcile failed: ${detail}` }, prior);
         pcHealthy = false;
       }
       ctl.token = this.ports.github.token;
@@ -221,8 +223,11 @@ export class RouterCore {
         "Heartbeat recovered",
       );
       const outbox = (await this.ports.storage.get<Outbox>("outbox")) ?? { messages: [], nextId: 1, dropped: 0 };
-      for (const text of messages)
-        outbox.messages.push({ id: outbox.nextId++, text: `[${new Date(now).toISOString()}] ${text}` });
+      for (const text of messages) {
+        const stamped = `[${new Date(now).toISOString()}] ${text}`;
+        console.log(stamped);
+        outbox.messages.push({ id: outbox.nextId++, text: stamped });
+      }
       const excess = Math.max(0, outbox.messages.length - 64);
       outbox.messages.splice(0, excess);
       outbox.dropped += excess;
