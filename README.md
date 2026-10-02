@@ -87,21 +87,24 @@ It reads only the allowlisted vault keys `GITHUB_APP_RUNNER_ROUTER_ID`,
 `GITHUB_APP_RUNNER_ROUTER_INSTALLATION_ID`, `GITHUB_APP_RUNNER_ROUTER_PRIVATE_KEY_B64`,
 `CLOUDFLARE_REMOTE_RUNNER_ACCOUNT_ID`, `CLOUDFLARE_REMOTE_RUNNER_TOKEN`,
 `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID`. It extracts each key with
-`sops -d --extract '["KEY"]'`; if the dotenv store does not support extraction, it
-decrypts in-process and retains only the allowlist, so no child receives other vault values.
+`sops -d --input-type dotenv --extract '["KEY"]'`. The sops child receives only `PATH`,
+`HOME`, and `SOPS_AGE_KEY_FILE`, which defaults to `~/.config/sops/age/keys.txt`.
 It generates `HEARTBEAT_SECRET` from 32 random bytes encoded as hex, pipes one JSON object
-to `wrangler secret bulk` on stdin, writes the heartbeat secret to a 0600 file on the Mac
-for PC installation, and prints names only. The GitHub App private key stays in Worker
+to `wrangler secret bulk` on stdin after writing a 0600 candidate file on the Mac,
+renames it onto the heartbeat secret file after upload succeeds, and prints names only.
+Failed uploads remove the candidate and preserve any existing secret. The GitHub App private key stays in Worker
 secrets. The heartbeat secret is stored on the Worker and PC, outside the vault; rotation
 regenerates both copies.
 
 Map the two `CLOUDFLARE_REMOTE_RUNNER_*` vault keys to `CLOUDFLARE_API_TOKEN` and
 `CLOUDFLARE_ACCOUNT_ID`, as for secret upload. Deploy from `packages/runner-router`
-with only those two variables in Wrangler's environment:
+with those two variables plus `HOME` and `PATH` in Wrangler's environment:
 
 ```sh
 cd packages/runner-router
 env -i \
+  HOME="$HOME" \
+  PATH="$PATH" \
   CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
   CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
   "$(command -v node)" node_modules/wrangler/bin/wrangler.js deploy
@@ -113,10 +116,13 @@ Smoke-check that an unauthenticated `POST /heartbeat` returns 401 and that `wran
 shows a cron pass with a known roster.
 
 For the PC installation, copy the `pc/` service and timer files to
-`~/.config/systemd/user/` and `pc/heartbeat.sh` to `~/.local/bin/`. Write
+`~/.config/systemd/user/` and install `pc/heartbeat.sh` as
+`~/.local/bin/runner-router-heartbeat.sh` with mode 0755. Create
+`~/.config/runner-router/` with mode 0700 and write
 `~/.config/runner-router/heartbeat.env` with mode 0600, containing `ROUTER_URL`, the
 generated `HEARTBEAT_SECRET`, and the static map
 `RUNNERS="gh-runner-1:popos-1 gh-runner-2:popos-2 gh-runner-3:popos-3"`, then run
+`systemctl --user daemon-reload` and
 `systemctl --user enable --now runner-router-heartbeat.timer`.
 
 The initial shadow deployment controls only laptop `ci-active`. Compatibility cutover
