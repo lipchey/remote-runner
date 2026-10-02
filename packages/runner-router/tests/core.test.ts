@@ -125,13 +125,13 @@ it("item 11: cold start enables fallback when known, never mutates when unknown,
   const restarted = new RouterCore(config, test.ports);
   await restarted.reconcile();
   await settle();
-  expect(test.telegram.messages.filter((text) => text.includes("No accepted heartbeat"))).toHaveLength(0);
+  expect(test.telegram.messages.filter((text) => text.includes("немає heartbeat від ПК"))).toHaveLength(0);
   test.setTime(start + 300_000);
   await restarted.reconcile();
   await settle();
   await restarted.reconcile();
   await settle();
-  expect(test.telegram.messages.filter((text) => text.includes("No accepted heartbeat"))).toHaveLength(1);
+  expect(test.telegram.messages.filter((text) => text.includes("немає heartbeat від ПК"))).toHaveLength(1);
 });
 it("item 12: a re-registered laptop is found by name and its new id is repaired", async () => {
   const test = setup();
@@ -252,7 +252,7 @@ it("robustness: partial removal and a 404 retry converge using re-read applied s
     "ci-active",
     "popos",
   ]);
-  expect(test.telegram.messages.filter((text) => text.includes("Fallback OFF"))).toHaveLength(1);
+  expect(test.telegram.messages.filter((text) => text.includes("фоллбек ВИМКНЕНО"))).toHaveLength(1);
 });
 it("robustness: a lost POST response is re-read and queues exactly one applied transition", async () => {
   const test = setup({ cold: true });
@@ -263,7 +263,7 @@ it("robustness: a lost POST response is re-read and queues exactly one applied t
   await test.core.reconcile();
   await settle();
   expect((await ctl(test.storage)).applied).toBe("on");
-  expect(test.telegram.messages.filter((text) => text.includes("Fallback ON"))).toHaveLength(1);
+  expect(test.telegram.messages.filter((text) => text.includes("фоллбек УВІМКНЕНО"))).toHaveLength(1);
 });
 it("robustness: a shared 15-second deadline cancels hung pagination deterministically", async () => {
   vi.useFakeTimers();
@@ -381,11 +381,11 @@ it("alerts emit once per episode with recovery, rejected-report context and Work
   await settle();
   await test.core.reconcile();
   await settle();
-  expect(test.telegram.messages.filter((text) => text.includes("Laptop offline or absent"))).toHaveLength(1);
+  expect(test.telegram.messages.filter((text) => text.includes("недоступний (offline"))).toHaveLength(1);
   test.github.roster[1]!.status = "online";
   await test.core.reconcile();
   await settle();
-  expect(test.telegram.messages.some((text) => text.includes("Laptop recovered"))).toBe(true);
+  expect(test.telegram.messages.some((text) => text.includes("знову online"))).toBe(true);
   test.github.listResult = { kind: "unknown", reason: "failed" };
   await test.core.reconcile();
   await settle();
@@ -394,7 +394,7 @@ it("alerts emit once per episode with recovery, rejected-report context and Work
   await settle();
   await test.core.reconcile();
   await settle();
-  expect(test.telegram.messages.filter((text) => text.includes("GitHub unknown for"))).toHaveLength(1);
+  expect(test.telegram.messages.filter((text) => text.includes("не може прочитати GitHub"))).toHaveLength(1);
   await test.core.rejectHeartbeat({ kind: "rejected", status: 400, reason: "bad counter" });
   test.setTime(start + 300_000);
   await test.core.reconcile();
@@ -404,9 +404,10 @@ it("alerts emit once per episode with recovery, rejected-report context and Work
   await test.core.heartbeat(heartbeat(start + 300_000).report);
   await test.core.reconcile();
   await settle();
-  expect(test.telegram.messages.some((text) => text.includes("GitHub recovered"))).toBe(true);
-  expect(test.telegram.messages.some((text) => text.includes("Heartbeat recovered"))).toBe(true);
-  expect(test.telegram.messages.every((text) => /^\[\d{4}-\d\d-\d\dT/.test(text))).toBe(true);
+  expect(test.telegram.messages.some((text) => text.includes("знову читає GitHub"))).toBe(true);
+  expect(test.telegram.messages.some((text) => text.includes("heartbeat від ПК знову приходить"))).toBe(true);
+  expect(test.telegram.messages.some((text) => text.includes("Остання помилка: failed"))).toBe(true);
+  expect(test.telegram.messages.every((text) => /\n🕒 \d\d:\d\d:\d\d \(Київ\)$/.test(text))).toBe(true);
 });
 it("outbox drops and counts oldest entries at 64, flushes at most five and stops on first failure", async () => {
   const test = setup({ cold: true });
@@ -481,12 +482,12 @@ it("consecutive mutation failures retain the unknown episode until a fully known
     expect((await ctl(test.storage)).unknownSince).toBe(start + 1000);
     expect((await ctl(test.storage)).lastKnownEvalAt).toBe(start);
   }
-  expect(test.telegram.messages.filter((text) => text.includes("GitHub unknown for"))).toHaveLength(1);
+  expect(test.telegram.messages.filter((text) => text.includes("не може прочитати GitHub"))).toHaveLength(1);
   test.github.addResult = undefined;
   await test.core.reconcile();
   await settle();
   expect((await ctl(test.storage)).unknownSince).toBeNull();
-  expect(test.telegram.messages.some((text) => text.includes("GitHub recovered"))).toBe(true);
+  expect(test.telegram.messages.some((text) => text.includes("знову читає GitHub"))).toBe(true);
 });
 it("a failed atomic commit retains an earlier durable retry deadline", async () => {
   const test = setup();
@@ -546,7 +547,7 @@ it("outbox acknowledgement preserves messages appended by a concurrent reconcile
   ack.resolve();
   await settle();
   expect((await storage.get<Outbox>("outbox"))!.messages.map((message) => message.text)).toEqual([
-    expect.stringContaining("Fallback OFF"),
+    expect.stringContaining("фоллбек ВИМКНЕНО"),
   ]);
 });
 it("adapter failures for all item 6 cases reach an unknown core verdict without any label HTTP mutation", async () => {

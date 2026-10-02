@@ -1,7 +1,19 @@
 import type { Config } from "./config.js";
-import { decide, type Control, type Runner } from "./decide.js";
+import { decide, healthReport, type Control, type Runner } from "./decide.js";
 import type { Deadline, GitHubPort, Result } from "./github.js";
 import { acceptHeartbeat, type Heartbeat, type LastRejected, type Report, type Rejection } from "./heartbeat.js";
+
+const kyivTime = new Intl.DateTimeFormat("uk-UA", {
+  timeZone: "Europe/Kyiv",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
+const kyiv = (at: number) => `${kyivTime.format(new Date(at))} (Київ)`;
+const minutes = (milliseconds: number) => Math.round(milliseconds / 60_000);
+/* Telegram rejects text over 4096 characters, and a rejected head entry blocks the outbox. */
+const TELEGRAM_TEXT_BUDGET = 4000;
 
 export interface Storage {
   get<T>(key: string): Promise<T | undefined>;
@@ -42,6 +54,7 @@ export function initialControl(now: number): Control {
 export class RouterCore {
   private mutex: Promise<void> = Promise.resolve();
   private flushing: Promise<void> = Promise.resolve();
+  private unknownReason: string | undefined;
   get flushed(): Promise<void> {
     return this.flushing;
   }
@@ -102,6 +115,7 @@ export class RouterCore {
   private unknown(ctl: Control, result: Exclude<Result<unknown>, { kind: "ok" }>, prior: Control): void {
     const now = this.ports.now();
     console.warn(`Reconcile ${result.kind}: ${result.reason}`);
+    this.unknownReason = result.reason;
     ctl.healthySince = null;
     ctl.unknownSince = prior.unknownSince ?? now;
     ctl.lastKnownEvalAt = prior.lastKnownEvalAt;
@@ -119,6 +133,8 @@ export class RouterCore {
     const signal = this.ports.deadline.timeout(15_000);
     let ctl = initialControl(passStart);
     let pcHealthy = false;
+    let rosterSnapshot: Runner[] | undefined;
+    this.unknownReason = undefined;
     try {
       ctl = await this.control();
       const prior = { ...ctl };
@@ -146,6 +162,7 @@ export class RouterCore {
         pcHealthy = decision.pcHealthy;
         if (roster.kind !== "ok") this.unknown(ctl, roster, prior);
         else {
+          rosterSnapshot = roster.value;
           ctl.retryAt = null;
           ctl.cooldownUntil = null;
           const laptop = roster.value.find((runner) => runner.name === this.config.laptopRunner);
@@ -205,31 +222,56 @@ export class RouterCore {
       const previous = await this.ports.storage.get<Control>("ctl");
       const now = this.ports.now();
       const messages: string[] = [];
-      if (ctl.applied !== previous?.applied && ctl.applied !== null)
-        messages.push(`Fallback ${ctl.applied.toUpperCase()}`);
+      const laptop = this.config.laptopRunner;
+      const status = healthReport(hb, rosterSnapshot, this.config, now)
+        .map((line) => `- ${line}`)
+        .join("\n");
+      const healthyLongEnough = pcHealthy && ctl.healthySince !== null && now - ctl.healthySince >= 120_000;
+      if (ctl.applied === "on" && previous?.applied !== "on")
+        messages.push(
+          `🟠 Ariadne CI: фоллбек УВІМКНЕНО — ноут ${laptop} бере джоби (${this.config.laptopAdmissionLabels.join(", ")}).\n${
+            !pcHealthy
+              ? "Немає жодного здорового раннера ПК:"
+              : previous?.applied
+                ? "Лейбл ноута виявлено під час перевірки, стан ПК:"
+                : "Перший прохід після запуску Worker-а, стан ПК:"
+          }\n${status}`,
+        );
+      if (ctl.applied === "off" && previous?.applied !== "off")
+        messages.push(
+          `🟢 Ariadne CI: фоллбек ВИМКНЕНО — ноут ${laptop} більше не бере нових джоб (поточна доробиться).\n${
+            healthyLongEnough ? "ПК здоровий ≥120 с:" : "Лейбли ноута зняті, стан ПК:"
+          }\n${status}`,
+        );
       const episode = (key: keyof Control["alerts"], active: boolean | undefined, alert: string, recovery: string) => {
         if (active === undefined || active === ctl.alerts[key]) return;
         ctl.alerts[key] = active;
         messages.push(active ? alert : recovery);
       };
-      episode("laptopMissing", laptopMissing, "Laptop offline or absent", "Laptop recovered");
+      episode(
+        "laptopMissing",
+        laptopMissing,
+        `⚠️ Ariadne CI: ноут ${laptop} недоступний (offline або не зареєстрований) — фоллбеку нікуди перемикатись.`,
+        `✅ Ariadne CI: ноут ${laptop} знову online.`,
+      );
       episode(
         "unknown",
         ctl.unknownSince === null ? false : now - ctl.unknownSince >= 180_000 ? true : undefined,
-        "GitHub unknown for at least 3 minutes",
-        "GitHub recovered",
+        `⚠️ Ariadne CI: роутер ${minutes(now - (ctl.unknownSince ?? now))} хв не може прочитати GitHub — лейбли ноута заморожені (${ctl.applied?.toUpperCase() ?? "стан невідомий"}).\nОстання помилка: ${this.unknownReason ?? "невідома"}`,
+        `✅ Ariadne CI: роутер знову читає GitHub${prior.unknownSince !== null ? ` (після ${minutes(now - prior.unknownSince)} хв)` : ""}.`,
       );
       episode(
         "noHeartbeat",
         now - (hb?.acceptedAt ?? ctl.createdAt) >= 300_000,
-        `No accepted heartbeat for 5 minutes${lastRejected ? `; last rejected at ${new Date(lastRejected.at).toISOString()}: ${lastRejected.reason}` : ""}`,
-        "Heartbeat recovered",
+        `🔴 Ariadne CI: 5+ хв немає heartbeat від ПК (останній: ${hb ? kyiv(hb.acceptedAt) : "жодного"}) — роутер вважає ПК мертвим.${
+          lastRejected ? `\nОстаннє відхилення ${kyiv(lastRejected.at)}: ${lastRejected.reason}` : ""
+        }`,
+        "✅ Ariadne CI: heartbeat від ПК знову приходить.",
       );
       const outbox = (await this.ports.storage.get<Outbox>("outbox")) ?? { messages: [], nextId: 1, dropped: 0 };
       for (const text of messages) {
-        const stamped = `[${new Date(now).toISOString()}] ${text}`;
-        console.log(stamped);
-        outbox.messages.push({ id: outbox.nextId++, text: stamped });
+        console.log(`[${new Date(now).toISOString()}] ${text}`);
+        outbox.messages.push({ id: outbox.nextId++, text: `${text.slice(0, TELEGRAM_TEXT_BUDGET)}\n🕒 ${kyiv(now)}` });
       }
       const excess = Math.max(0, outbox.messages.length - 64);
       outbox.messages.splice(0, excess);

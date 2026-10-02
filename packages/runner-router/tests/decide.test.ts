@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { decide, type Runner } from "../src/decide.js";
+import { decide, healthReport, type Runner } from "../src/decide.js";
 import { acceptHeartbeat } from "../src/heartbeat.js";
 import { config, start, control, heartbeat, runners } from "./fixtures.js";
 
@@ -76,4 +76,17 @@ it("PC health requires ci-active, an active listener and the GitHub probe", () =
   ]) {
     expect(decide({ ...heartbeat(), report }, control(), runners(), config, start).pcHealthy).toBe(false);
   }
+});
+
+it("health report names the lease age and each PC runner's failing check", () => {
+  const hb = heartbeat();
+  hb.report.runners.push({ name: "popos-2", unit: "failed", listener: false });
+  const roster = runners();
+  roster[0]!.busy = true;
+  roster.push({ id: 2, name: "popos-2", status: "offline", busy: false, labels: [] });
+  const lines = healthReport(hb, roster, config, start + 35_000);
+  expect(lines).toContain("heartbeat: 35 с тому — оренда минула");
+  expect(lines).toContain("popos-1: без власних проблем (зайнятий)");
+  expect(healthReport(hb, roster, config, start + 5_000)).toContain("popos-1: здоровий (зайнятий)");
+  expect(lines).toContain("popos-2: юніт failed, listener не працює, GitHub: offline, без лейбла ci-active");
 });

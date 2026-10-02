@@ -32,6 +32,42 @@ export interface Decision {
   unknownSince: number | null;
   pcHealthy: boolean;
 }
+export function healthReport(
+  hb: Heartbeat | undefined,
+  roster: readonly Runner[] | undefined,
+  config: Config,
+  now: number,
+): string[] {
+  const lines: string[] = [];
+  const pcUnreachable = !hb || now >= hb.acceptedAt + 30_000 || !hb.report.githubProbe;
+  if (!hb) lines.push("heartbeat: жодного прийнятого");
+  else {
+    const age = Math.round((now - hb.acceptedAt) / 1000);
+    lines.push(`heartbeat: ${age} с тому${now >= hb.acceptedAt + 30_000 ? " — оренда минула" : ""}`);
+    if (!hb.report.githubProbe) lines.push("ПК не дістає GitHub (проба впала)");
+  }
+  for (const name of config.pcRunners) {
+    const report = hb?.report.runners.find((runner) => runner.name === name);
+    const registration = roster?.find((runner) => runner.name === name);
+    const problems: string[] = [];
+    if (!report) problems.push("немає в heartbeat");
+    else {
+      if (report.unit !== "active") problems.push(`юніт ${report.unit}`);
+      if (!report.listener) problems.push("listener не працює");
+    }
+    if (!roster) problems.push("ростер GitHub невідомий");
+    else if (!registration) problems.push("не зареєстрований у GitHub");
+    else {
+      if (registration.status !== "online") problems.push("GitHub: offline");
+      if (!registration.labels.includes("ci-active")) problems.push("без лейбла ci-active");
+    }
+    lines.push(
+      `${name}: ${problems.length ? problems.join(", ") : pcUnreachable ? "без власних проблем" : "здоровий"}${registration?.busy ? " (зайнятий)" : ""}`,
+    );
+  }
+  return lines;
+}
+
 export function decide(
   hb: Heartbeat | undefined,
   ctl: Control,
