@@ -8,8 +8,8 @@ closed `.remote-runner.yaml` manifest and a thin call to the installed executabl
 ## Install once
 
 ```sh
-pnpm install
-pnpm verify
+pnpm install --filter remote-runner
+pnpm build
 node dist/src/main.js install
 remote-runner --version
 git config core.hooksPath .githooks
@@ -48,6 +48,7 @@ hook already in that clone stops firing once it is set.
 ## Development
 
 ```sh
+pnpm install
 pnpm format
 pnpm format:check
 pnpm verify
@@ -66,6 +67,67 @@ local blame output, configure this clone once:
 ```sh
 git config blame.ignoreRevsFile .git-blame-ignore-revs
 ```
+
+## Runner router Worker
+
+The private `@remote-runner/runner-router` package controls laptop admission for
+`lipchey/ariadne`. A full `pnpm install` is the development path and installs the Worker
+toolchain; `pnpm install --filter remote-runner` installs only the CLI. Root `pnpm verify`
+also checks the Worker package. Expect a one-time install-drift warning after the root
+package and lockfile change; rebuild and reinstall the CLI with the "Install once" commands.
+
+Deployment and PC installation are separate owner-approved operations. Run the secret
+installer on the Mac from merged `main`:
+
+```sh
+node packages/runner-router/scripts/put-secrets.mjs
+```
+
+It reads only the allowlisted vault keys `GITHUB_APP_RUNNER_ROUTER_ID`,
+`GITHUB_APP_RUNNER_ROUTER_INSTALLATION_ID`, `GITHUB_APP_RUNNER_ROUTER_PRIVATE_KEY_B64`,
+`CLOUDFLARE_REMOTE_RUNNER_ACCOUNT_ID`, `CLOUDFLARE_REMOTE_RUNNER_TOKEN`,
+`TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID`. It extracts each key with
+`sops -d --extract '["KEY"]'`; if the dotenv store does not support extraction, it
+decrypts in-process and retains only the allowlist, so no child receives other vault values.
+It generates `HEARTBEAT_SECRET` from 32 random bytes encoded as hex, pipes one JSON object
+to `wrangler secret bulk` on stdin, writes the heartbeat secret to a 0600 file on the Mac
+for PC installation, and prints names only. The GitHub App private key stays in Worker
+secrets. The heartbeat secret is stored on the Worker and PC, outside the vault; rotation
+regenerates both copies.
+
+Map the two `CLOUDFLARE_REMOTE_RUNNER_*` vault keys to `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID`, as for secret upload. Deploy from `packages/runner-router`
+with only those two variables in Wrangler's environment:
+
+```sh
+cd packages/runner-router
+env -i \
+  CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+  CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
+  "$(command -v node)" node_modules/wrangler/bin/wrangler.js deploy
+```
+
+The package's `deploy` script also runs `wrangler deploy`. The first deploy may require
+registration of the account's workers.dev subdomain.
+Smoke-check that an unauthenticated `POST /heartbeat` returns 401 and that `wrangler tail`
+shows a cron pass with a known roster.
+
+For the PC installation, copy the `pc/` service and timer files to
+`~/.config/systemd/user/` and `pc/heartbeat.sh` to `~/.local/bin/`. Write
+`~/.config/runner-router/heartbeat.env` with mode 0600, containing `ROUTER_URL`, the
+generated `HEARTBEAT_SECRET`, and the static map
+`RUNNERS="gh-runner-1:popos-1 gh-runner-2:popos-2 gh-runner-3:popos-3"`, then run
+`systemctl --user enable --now runner-router-heartbeat.timer`.
+
+The initial shadow deployment controls only laptop `ci-active`. Compatibility cutover
+sets `LAPTOP_ADMISSION_LABELS=ci-active,popos`; return it to `ci-active` when the
+compatibility window ends.
+
+### Rollback / stop
+
+Disable the PC timer (`systemctl --user disable --now runner-router-heartbeat.timer`),
+`wrangler delete` (removes cron, alarms stop with the class), then remove `ci-active` from
+the laptop via REST. PC `ci-active` labels may stay (unrequested until cutover).
 
 ## Consumer commands
 
