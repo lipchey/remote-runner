@@ -125,15 +125,21 @@ generated `HEARTBEAT_SECRET`, and the static map
 `systemctl --user daemon-reload` and
 `systemctl --user enable --now runner-router-heartbeat.timer`.
 
-The initial shadow deployment controls only laptop `ci-active`. Compatibility cutover
-sets `LAPTOP_ADMISSION_LABELS=ci-active,popos`; return it to `ci-active` when the
-compatibility window ends.
+The shadow deployment controlled only laptop `ci-active`. The label cutover sets
+`LAPTOP_ADMISSION_LABELS=ci-active,popos`, because runs created before it (and their
+re-runs) still ask for `popos`. When the compatibility window ends, first remove `popos`
+from the laptop and read it back while the Worker reports OFF with a healthy PC, then
+return the variable to `ci-active` and redeploy: the Worker refuses to touch a label
+outside its configured set, so a laptop `popos` left behind would stay forever.
 
 ### Rollback / stop
 
 Disable the PC timer (`systemctl --user disable --now runner-router-heartbeat.timer`),
-`wrangler delete` (removes cron, alarms stop with the class), then remove `ci-active` from
-the laptop via REST. PC `ci-active` labels may stay (unrequested until cutover).
+`wrangler delete` (removes cron, alarms stop with the class), then remove every configured
+admission label (`ci-active` and, during the compatibility window, `popos`) from the laptop
+via REST and read the laptop's labels back. Fallback is then manual (ariadne
+`.claude/runbooks/ci-operations.md`). PC `ci-active` labels stay: since the cutover every
+self-hosted job asks for them.
 
 ## Consumer commands
 

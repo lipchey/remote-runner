@@ -18,4 +18,4 @@ crons = ["* * * * *"]
 REPO = "lipchey/ariadne"
 PC_RUNNERS = "popos-1,popos-2,popos-3"
 LAPTOP_RUNNER = "ariadne-runner-1"
-LAPTOP_ADMISSION_LABELS = "ci-active"
+LAPTOP_ADMISSION_LABELS = "ci-active,popos"
