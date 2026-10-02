@@ -199,3 +199,10 @@ it("each fetch combines the shared deadline with a five-second timeout and never
     vi.useRealTimers();
   }
 });
+
+it("uses a redirect mode workerd accepts", async () => {
+  const fake = new FakeFetch();
+  fake.responses.push(response({ total_count: 1, runners: [wireRunner()] }));
+  await cached(fake).list(new AbortController().signal);
+  expect(fake.calls[0]!.init.redirect).toBe("manual");
+});

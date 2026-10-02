@@ -7,7 +7,10 @@ import { Telegram } from "./telegram.js";
 export class RouterObject {
   private readonly core: RouterCore;
   private readonly config: Config;
-  constructor(ctx: DurableObjectState, env: Env) {
+  constructor(
+    private readonly ctx: DurableObjectState,
+    env: Env,
+  ) {
     this.config = parseConfig(env);
     const storage: Storage = {
       get: (key) => ctx.storage.get(key),
@@ -85,5 +88,6 @@ export class RouterObject {
   }
   async alarm(): Promise<void> {
     await this.core.reconcile();
+    this.ctx.waitUntil(this.core.flushed);
   }
 }

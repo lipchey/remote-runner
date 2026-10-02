@@ -20,7 +20,9 @@ export function environment(router: DurableObjectNamespace = {} as DurableObject
   };
 }
 function shell(storage = new FakeStorage()) {
-  return { object: new RouterObject({ storage } as unknown as DurableObjectState, environment()), storage };
+  const waited: Promise<unknown>[] = [];
+  const state = { storage, waitUntil: (work: Promise<unknown>) => waited.push(work) };
+  return { object: new RouterObject(state as unknown as DurableObjectState, environment()), storage, waited };
 }
 function request(body: string, authorization = "Bearer secret") {
   return new Request("https://router/heartbeat", { method: "POST", body, headers: { Authorization: authorization } });
@@ -172,6 +174,7 @@ it("alarm resolves after its mutation while Telegram never resolves", async () =
     expect(test.storage.values.get("ctl")).toMatchObject({ applied: "on" });
     expect(sending).toBe(true);
     expect(resolved).toBe(true);
+    expect(test.waited).toHaveLength(1);
   } finally {
     clearTimeout(timer);
     globalThis.fetch = original;

@@ -42,6 +42,9 @@ export function initialControl(now: number): Control {
 export class RouterCore {
   private mutex: Promise<void> = Promise.resolve();
   private flushing: Promise<void> = Promise.resolve();
+  get flushed(): Promise<void> {
+    return this.flushing;
+  }
   constructor(
     private readonly config: Config,
     private readonly ports: Ports,

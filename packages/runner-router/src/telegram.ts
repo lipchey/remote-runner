@@ -17,8 +17,11 @@ export class Telegram implements TelegramPort {
         signal: this.deadline.timeout(5000),
       });
       const body: unknown = await response.json();
-      return response.ok && typeof body === "object" && body !== null && "ok" in body && body.ok === true;
-    } catch {
+      const ok = response.ok && typeof body === "object" && body !== null && "ok" in body && body.ok === true;
+      if (!ok) console.warn(`Telegram send failed: HTTP ${response.status}`);
+      return ok;
+    } catch (error) {
+      console.warn(`Telegram send failed: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
   }

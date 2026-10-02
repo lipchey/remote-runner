@@ -118,7 +118,8 @@ export class GitHub implements GitHubPort {
     try {
       const response = await this.fetch(url, {
         method,
-        redirect: "error",
+        /* workerd rejects "error"; a 3xx still fails as non-OK. */
+        redirect: "manual",
         headers: {
           Authorization: `Bearer ${authorization}`,
           Accept: "application/vnd.github+json",
@@ -130,8 +131,8 @@ export class GitHub implements GitHubPort {
         signal: AbortSignal.any([signal, this.deadline.timeout(5000)]),
       });
       return { kind: "ok", value: response };
-    } catch {
-      return unknown("GitHub fetch failed or timed out");
+    } catch (error) {
+      return unknown(`GitHub fetch failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
