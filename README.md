@@ -127,10 +127,10 @@ generated `HEARTBEAT_SECRET`, and the static map
 
 The shadow deployment controlled only laptop `ci-active`. The label cutover sets
 `LAPTOP_ADMISSION_LABELS=ci-active,popos`, because runs created before it (and their
-re-runs) still ask for `popos`. When the compatibility window ends, first remove `popos`
-from the laptop and read it back while the Worker reports OFF with a healthy PC, then
-return the variable to `ci-active` and redeploy: the Worker refuses to touch a label
-outside its configured set, so a laptop `popos` left behind would stay forever.
+re-runs) still ask for `popos`. When the compatibility window ends, first return the
+variable to `ci-active` and redeploy, then remove `popos` from the laptop via REST and
+read it back. The other order fails: the old Worker re-adds `popos` on any ON, and the
+narrowed one refuses to touch a label outside its configured set, so it would stay forever.
 
 ### Rollback / stop
 
