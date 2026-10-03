@@ -38,6 +38,10 @@ export interface Ports {
   deadline: Deadline;
 }
 
+function lastPcHealthy(ctl: Control): boolean {
+  return ctl.pcHealthy ?? ctl.healthySince !== null;
+}
+
 export function initialControl(now: number): Control {
   return {
     createdAt: now,
@@ -185,7 +189,7 @@ export class RouterCore {
                   unknownSince: checked.unknownSince,
                 });
                 pcHealthy = checked.pcHealthy;
-                if (checked.desired !== "off") break;
+                if (checked.desired !== "off" || !checked.offAuthorized) break;
                 const result = await this.call(signal, () => this.ports.github.remove(laptop, label, signal));
                 if (result.kind !== "ok") {
                   failure = result;
@@ -276,11 +280,12 @@ export class RouterCore {
       const excess = Math.max(0, outbox.messages.length - 64);
       outbox.messages.splice(0, excess);
       outbox.dropped += excess;
+      ctl.pcHealthy = pcHealthy;
       await this.ports.storage.put({ ctl, outbox });
     } catch (error) {
       ctl = (await this.ports.storage.get<Control>("ctl")) ?? ctl;
       ctl.retryAt = Math.min(ctl.retryAt ?? Infinity, this.ports.now() + 10_000);
-      pcHealthy = ctl.healthySince !== null;
+      pcHealthy = lastPcHealthy(ctl);
       throw error;
     } finally {
       await this.planAlarm(passStart, ctl, pcHealthy);
@@ -314,7 +319,7 @@ export class RouterCore {
     } finally {
       const ctl = await this.control();
       const hb = await this.ports.storage.get<Heartbeat>("hb");
-      await this.planAlarm(passStart, ctl, ctl.healthySince !== null && !!hb);
+      await this.planAlarm(passStart, ctl, lastPcHealthy(ctl) && !!hb);
     }
   }
 

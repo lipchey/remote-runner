@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { decide, healthReport, type Runner } from "../src/decide.js";
+import { decide, healthReport, PROBE_FAILURES_FOR_OUTAGE, type Runner } from "../src/decide.js";
 import { acceptHeartbeat } from "../src/heartbeat.js";
 import { config, start, control, heartbeat, runners } from "./fixtures.js";
 
@@ -70,12 +70,63 @@ it("PC health requires ci-active, an active listener and the GitHub probe", () =
     expect(decide(heartbeat(), control(), roster, config, start).pcHealthy).toBe(false);
   }
   for (const report of [
-    { ...heartbeat().report, githubProbe: false },
     { ...heartbeat().report, runners: [{ name: "popos-1", unit: "failed", listener: true }] },
     { ...heartbeat().report, runners: [{ name: "popos-1", unit: "active", listener: false }] },
   ]) {
     expect(decide({ ...heartbeat(), report }, control(), runners(), config, start).pcHealthy).toBe(false);
   }
+  const unreachable = {
+    ...heartbeat(),
+    report: { ...heartbeat().report, githubProbe: false },
+    probeFailures: PROBE_FAILURES_FOR_OUTAGE,
+  };
+  expect(decide(unreachable, control(), runners(), config, start).pcHealthy).toBe(false);
+});
+
+it("a failed GitHub probe enables fallback only on the third consecutive report", () => {
+  const off = { ...control(), applied: "off" as const, healthySince: start - 200_000 };
+  let hb = heartbeat(start);
+  for (const [step, failures] of [
+    [1, 1],
+    [2, 2],
+  ] as const) {
+    const next = acceptHeartbeat(
+      { ...heartbeat(start + step * 10_000).report, githubProbe: false },
+      hb,
+      start + step * 10_000,
+    );
+    if (next.kind !== "ok") throw new Error("unexpected rejection");
+    hb = next.hb;
+    expect(hb.probeFailures).toBe(failures);
+    expect(decide(hb, off, runners(), config, start + step * 10_000)).toMatchObject({
+      desired: "off",
+      pcHealthy: true,
+      healthySince: null,
+    });
+    expect(healthReport(hb, runners(), config, start + step * 10_000)).toContain(
+      `проба ПК → GitHub впала ${failures}× поспіль — ще не фоллбек`,
+    );
+  }
+  const third = acceptHeartbeat({ ...heartbeat(start + 30_000).report, githubProbe: false }, hb, start + 30_000);
+  if (third.kind !== "ok") throw new Error("unexpected rejection");
+  expect(decide(third.hb, off, runners(), config, start + 30_000)).toMatchObject({ desired: "on", pcHealthy: false });
+  expect(healthReport(third.hb, runners(), config, start + 30_000)).toContain(
+    "ПК не дістає GitHub (проба впала 3 рази поспіль)",
+  );
+});
+
+it("a failed probe restarts the OFF countdown even while it is debounced", () => {
+  const on = { ...control(), lastKnownEvalAt: start + 119_000 };
+  const failed = acceptHeartbeat(
+    { ...heartbeat(start + 120_000).report, githubProbe: false },
+    heartbeat(start + 110_000),
+    start + 120_000,
+  );
+  if (failed.kind !== "ok") throw new Error("unexpected rejection");
+  expect(decide(failed.hb, on, runners(), config, start + 120_000)).toMatchObject({
+    desired: "on",
+    healthySince: null,
+  });
 });
 
 it("health report names the lease age and each PC runner's failing check", () => {

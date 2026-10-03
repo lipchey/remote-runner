@@ -67,6 +67,20 @@ describe("heartbeat", () => {
     });
   });
 
+  it("counts consecutive failed GitHub probes, resetting on success and on a lapsed lease", () => {
+    const now = 1_000_000;
+    const failing = (at: number) => ({ ...report(at), githubProbe: false });
+    const legacy: Heartbeat = { report: failing(now), counter: now, acceptedAt: now, reportHealthySince: null };
+    const second = acceptHeartbeat(failing(now + 10_000), legacy, now + 10_000);
+    expect(second).toMatchObject({ hb: { probeFailures: 1 } });
+    if (second.kind !== "ok") throw new Error("acceptance failed");
+    const third = acceptHeartbeat(failing(now + 20_000), second.hb, now + 20_000);
+    expect(third).toMatchObject({ hb: { probeFailures: 2 } });
+    if (third.kind !== "ok") throw new Error("acceptance failed");
+    expect(acceptHeartbeat(report(now + 30_000), third.hb, now + 30_000)).toMatchObject({ hb: { probeFailures: 0 } });
+    expect(acceptHeartbeat(failing(now + 50_000), third.hb, now + 50_000)).toMatchObject({ hb: { probeFailures: 1 } });
+  });
+
   it("robustness: constant-time bearer comparison uses UTF-8 bytes and rejects length mismatches", () => {
     expect(bearerMatches("Bearer secret", "secret")).toBe(true);
     expect(bearerMatches("Bearer sécret", "sécret")).toBe(true);

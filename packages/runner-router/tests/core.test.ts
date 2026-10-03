@@ -56,6 +56,35 @@ it("item 2: a late alarm uses current now and enables fallback", async () => {
   expect((await ctl(test.storage)).applied).toBe("on");
   expect((await ctl(test.storage)).healthySince).toBeNull();
 });
+it("a debounced probe failure keeps the lease-expiry alarm", async () => {
+  const test = setup();
+  test.github.roster = runners([]);
+  test.storage.values.set("ctl", { ...control(), applied: "off", healthySince: start - 120_001 });
+  test.storage.values.set("hb", {
+    ...heartbeat(start, null),
+    report: { ...heartbeat(start).report, githubProbe: false },
+    probeFailures: 1,
+  });
+  test.setTime(start + 1_000);
+  await test.core.reconcile();
+  await settle();
+  expect(test.github.calls.some((call) => call.startsWith("add"))).toBe(false);
+  expect(test.storage.alarm).toBe(start + 30_000);
+});
+it("labels are never removed without 120 s of continuous health, even when stored applied is stale OFF", async () => {
+  const test = setup();
+  test.github.roster = runners(["ci-active"]);
+  test.storage.values.set("ctl", { ...control(), applied: "off", healthySince: null });
+  test.storage.values.set("hb", {
+    ...heartbeat(start, null),
+    report: { ...heartbeat(start).report, githubProbe: false },
+    probeFailures: 1,
+  });
+  test.setTime(start + 1_000);
+  await test.core.reconcile();
+  expect(test.github.calls.some((call) => call.startsWith("remove"))).toBe(false);
+  expect((await ctl(test.storage)).applied).toBe("on");
+});
 it("item 3: lease expiry enables fallback even with a healthy roster", async () => {
   const test = setup();
   test.github.roster = runners([]);

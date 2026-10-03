@@ -23,6 +23,9 @@ export interface Control {
   cooldownUntil: number | null;
   alerts: { laptopMissing: boolean; unknown: boolean; noHeartbeat: boolean };
   token: InstallationToken | null;
+  /* The last committed decision, for alarm planning outside a pass: a debounced probe failure leaves
+     the PC healthy with `healthySince` null. Absent on controls stored before it existed. */
+  pcHealthy?: boolean;
 }
 export interface Decision {
   kind: "known" | "unknown";
@@ -31,7 +34,18 @@ export interface Decision {
   lastKnownEvalAt: number | null;
   unknownSince: number | null;
   pcHealthy: boolean;
+  /* `desired: "off"` can merely echo a stale stored `applied`; only this authorises removing labels. */
+  offAuthorized: boolean;
 }
+/* A single 3 s probe can fail on a PC saturated by CI while GitHub still sees every runner online;
+   a real selective cut fails every report, and three at the 10 s cadence stay inside the 45 s
+   death-to-label target. */
+export const PROBE_FAILURES_FOR_OUTAGE = 3;
+
+function githubUnreachable(hb: Heartbeat): boolean {
+  return !hb.report.githubProbe && (hb.probeFailures ?? 0) >= PROBE_FAILURES_FOR_OUTAGE;
+}
+
 export function healthReport(
   hb: Heartbeat | undefined,
   roster: readonly Runner[] | undefined,
@@ -39,12 +53,17 @@ export function healthReport(
   now: number,
 ): string[] {
   const lines: string[] = [];
-  const pcUnreachable = !hb || now >= hb.acceptedAt + 30_000 || !hb.report.githubProbe;
+  const pcUnreachable = !hb || now >= hb.acceptedAt + 30_000 || githubUnreachable(hb);
   if (!hb) lines.push("heartbeat: жодного прийнятого");
   else {
     const age = Math.round((now - hb.acceptedAt) / 1000);
     lines.push(`heartbeat: ${age} с тому${now >= hb.acceptedAt + 30_000 ? " — оренда минула" : ""}`);
-    if (!hb.report.githubProbe) lines.push("ПК не дістає GitHub (проба впала)");
+    if (!hb.report.githubProbe)
+      lines.push(
+        githubUnreachable(hb)
+          ? `ПК не дістає GitHub (проба впала ${hb.probeFailures} рази поспіль)`
+          : `проба ПК → GitHub впала ${hb.probeFailures ?? 1}× поспіль — ще не фоллбек`,
+      );
   }
   for (const name of config.pcRunners) {
     const report = hb?.report.runners.find((runner) => runner.name === name);
@@ -83,11 +102,11 @@ export function decide(
       lastKnownEvalAt: ctl.lastKnownEvalAt,
       unknownSince: ctl.unknownSince ?? now,
       pcHealthy: false,
+      offAuthorized: false,
     };
-  const pcHealthy =
+  const runnerHealthy =
     !!hb &&
     now < hb.acceptedAt + 30_000 &&
-    hb.report.githubProbe &&
     hb.report.runners.some(
       (report) =>
         config.pcRunners.includes(report.name) &&
@@ -97,14 +116,20 @@ export function decide(
           (runner) => runner.name === report.name && runner.status === "online" && runner.labels.includes("ci-active"),
         ),
     );
-  let healthySince = pcHealthy ? Math.max(ctl.healthySince ?? now, hb!.reportHealthySince ?? now) : null;
-  if (pcHealthy && ctl.lastKnownEvalAt !== null && now - ctl.lastKnownEvalAt > 90_000) healthySince = now;
+  const pcHealthy = runnerHealthy && !githubUnreachable(hb!);
+  /* The probe is debounced only for turning fallback ON; any failed probe still restarts the 120 s
+     of health that OFF requires, so the debounce never hastens a return to the PC. */
+  const strictlyHealthy = runnerHealthy && hb!.report.githubProbe;
+  let healthySince = strictlyHealthy ? Math.max(ctl.healthySince ?? now, hb!.reportHealthySince ?? now) : null;
+  if (strictlyHealthy && ctl.lastKnownEvalAt !== null && now - ctl.lastKnownEvalAt > 90_000) healthySince = now;
+  const offAuthorized = pcHealthy && healthySince !== null && now - healthySince >= 120_000;
   return {
     kind: "known",
     pcHealthy,
     healthySince,
     lastKnownEvalAt: now,
     unknownSince: null,
-    desired: !pcHealthy ? "on" : now - healthySince! >= 120_000 ? "off" : (ctl.applied ?? "on"),
+    offAuthorized,
+    desired: !pcHealthy ? "on" : offAuthorized ? "off" : (ctl.applied ?? "on"),
   };
 }

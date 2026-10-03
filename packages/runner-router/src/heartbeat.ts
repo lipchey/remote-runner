@@ -13,6 +13,8 @@ export interface Heartbeat {
   counter: number;
   acceptedAt: number;
   reportHealthySince: number | null;
+  /* Optional: heartbeats stored before this field existed lack it. */
+  probeFailures?: number;
 }
 
 export interface Rejection {
@@ -82,7 +84,8 @@ export function acceptHeartbeat(
   if (Math.abs(report.sentAt - now) > 10_000)
     return { kind: "rejected", status: 400, reason: "sentAt outside 10 s window" };
   const healthy = report.githubProbe && report.runners.some((runner) => runner.unit === "active" && runner.listener);
-  const continuous = hb && now < hb.acceptedAt + 30_000 && hb.reportHealthySince !== null;
+  const leased = hb !== undefined && now < hb.acceptedAt + 30_000;
+  const continuous = leased && hb.reportHealthySince !== null;
   return {
     kind: "ok",
     hb: {
@@ -90,6 +93,7 @@ export function acceptHeartbeat(
       counter: report.counter,
       acceptedAt: now,
       reportHealthySince: healthy ? (continuous ? hb.reportHealthySince : now) : null,
+      probeFailures: report.githubProbe ? 0 : (leased ? (hb.probeFailures ?? 0) : 0) + 1,
     },
   };
 }
