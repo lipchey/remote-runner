@@ -2,6 +2,7 @@ import { parseConfig, type Config, type Env } from "./config.js";
 import { RouterCore, type Storage } from "./core.js";
 import { GitHub, realDeadline } from "./github.js";
 import { bearerMatches, parseHeartbeat, type Report, type Rejection } from "./heartbeat.js";
+import { configSecrets, writeLog } from "./log.js";
 import { Telegram } from "./telegram.js";
 
 export class RouterObject {
@@ -40,8 +41,10 @@ export class RouterObject {
       await this.core.requestReconcile("cron");
       return new Response(null, { status: 202 });
     }
-    if (!bearerMatches(request.headers.get("Authorization"), this.config.heartbeatSecret))
+    if (!bearerMatches(request.headers.get("Authorization"), this.config.heartbeatSecret)) {
+      writeLog("heartbeat_rejected", { status: 401, reason: "bearer mismatch" }, configSecrets(this.config));
       return new Response("Unauthorized", { status: 401 });
+    }
     let rejection: Rejection | undefined;
     let report: Report | undefined;
     const reader = request.body?.getReader();

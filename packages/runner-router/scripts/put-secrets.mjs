@@ -4,6 +4,7 @@ import { closeSync, fchmodSync, mkdirSync, openSync, renameSync, rmSync, writeFi
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_VAULT, extract } from "./vault.mjs";
 
 const secretKeys = {
   GITHUB_APP_RUNNER_ROUTER_ID: "GITHUB_APP_ID",
@@ -20,7 +21,7 @@ const secretNames = [...Object.values(secretKeys), "HEARTBEAT_SECRET"];
 const envNames = ["PATH", "HOME", ...Object.values(envKeys)];
 
 try {
-  let vault = "/Users/admin/Projects/ariadne/.env.sops.yaml";
+  let vault = DEFAULT_VAULT;
   let secretFile = join(homedir(), ".config/runner-router/heartbeat-secret");
   let dryRun = false;
   const args = process.argv.slice(2);
@@ -38,25 +39,13 @@ try {
     console.log(`Secrets: ${secretNames.join(", ")}`);
     console.log(`Environment: ${envNames.join(", ")}`);
   } else {
-    const extract = (key) => {
-      const result = spawnSync("sops", ["-d", "--input-type", "dotenv", "--extract", JSON.stringify([key]), vault], {
-        encoding: "utf8",
-        env: {
-          PATH: process.env.PATH,
-          HOME: process.env.HOME,
-          SOPS_AGE_KEY_FILE: process.env.SOPS_AGE_KEY_FILE ?? join(homedir(), ".config/sops/age/keys.txt"),
-        },
-      });
-      if (result.status !== 0 || !result.stdout) throw new Error(`Sops extraction failed: ${key}`);
-      return result.stdout;
-    };
-    const secrets = Object.fromEntries(Object.entries(secretKeys).map(([key, name]) => [name, extract(key)]));
+    const secrets = Object.fromEntries(Object.entries(secretKeys).map(([key, name]) => [name, extract(key, vault)]));
     secrets.GITHUB_APP_PRIVATE_KEY = Buffer.from(secrets.GITHUB_APP_PRIVATE_KEY, "base64").toString("utf8");
     if (!secrets.GITHUB_APP_PRIVATE_KEY.startsWith("-----BEGIN")) {
       throw new Error("Decoded private key must start with -----BEGIN");
     }
     const env = { PATH: process.env.PATH, HOME: process.env.HOME };
-    for (const [key, name] of Object.entries(envKeys)) env[name] = extract(key);
+    for (const [key, name] of Object.entries(envKeys)) env[name] = extract(key, vault);
     secrets.HEARTBEAT_SECRET = randomBytes(32).toString("hex");
     mkdirSync(dirname(secretFile), { recursive: true, mode: 0o700 });
     const candidate = `${secretFile}.new`;

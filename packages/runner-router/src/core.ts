@@ -1,7 +1,8 @@
 import type { Config } from "./config.js";
-import { decide, healthReport, type Control, type Runner } from "./decide.js";
+import { decide, healthReport, type Control, type Decision, type Runner } from "./decide.js";
 import type { Deadline, GitHubPort, Result } from "./github.js";
 import { acceptHeartbeat, type Heartbeat, type LastRejected, type Report, type Rejection } from "./heartbeat.js";
+import { configSecrets, writeLog } from "./log.js";
 
 const kyivTime = new Intl.DateTimeFormat("uk-UA", {
   timeZone: "Europe/Kyiv",
@@ -55,6 +56,25 @@ export function initialControl(now: number): Control {
     token: null,
   };
 }
+function decisionTrace(decision: Decision, hb: Heartbeat | undefined, at: number) {
+  return {
+    at,
+    hbCounter: hb?.counter ?? null,
+    hbAcceptedAt: hb?.acceptedAt ?? null,
+    kind: decision.kind,
+    desired: decision.desired,
+    pcHealthy: decision.pcHealthy,
+    offAuthorized: decision.offAuthorized,
+    healthySince: decision.healthySince,
+    lastKnownEvalAt: decision.lastKnownEvalAt,
+  };
+}
+
+type Trace = Record<string, unknown> & {
+  decisions: ReturnType<typeof decisionTrace>[];
+  mutations: { op: string; labels: string[]; result: string; reason?: string }[];
+};
+
 export class RouterCore {
   private mutex: Promise<void> = Promise.resolve();
   private flushing: Promise<void> = Promise.resolve();
@@ -66,6 +86,10 @@ export class RouterCore {
     private readonly config: Config,
     private readonly ports: Ports,
   ) {}
+
+  private log(event: string, fields: Record<string, unknown>, tokens: Iterable<string> = []): void {
+    writeLog(event, fields, [...configSecrets(this.config), ...tokens, this.ports.github.token?.value ?? ""]);
+  }
 
   private async control(): Promise<Control> {
     const stored = await this.ports.storage.get<Control>("ctl");
@@ -99,26 +123,35 @@ export class RouterCore {
   }
 
   async rejectHeartbeat(rejection: Rejection): Promise<void> {
-    await this.control();
+    const ctl = await this.control();
     const lastRejected: LastRejected = { at: this.ports.now(), reason: rejection.reason };
-    console.warn(`Heartbeat rejected: ${lastRejected.reason}`);
+    this.log("heartbeat_rejected", { status: rejection.status, reason: lastRejected.reason }, [ctl.token?.value ?? ""]);
     await this.ports.storage.put("lastRejected", lastRejected);
   }
 
   async reconcile(): Promise<void> {
-    const pass = this.mutex.then(() => this.pass());
+    const trace: Trace = { decisions: [], mutations: [] };
+    const tokens = new Set<string>();
+    const pass = this.mutex.then(() => this.pass(trace, tokens));
     this.mutex = pass.then(
       () => {},
       () => {},
     );
-    const passStart = await pass;
-    const flush = this.flushing.then(() => this.flush(passStart));
-    this.flushing = flush.catch(() => {});
+    let passStart: number;
+    try {
+      passStart = await pass;
+    } catch (error) {
+      this.log("reconcile_error", { ...trace, error: error instanceof Error ? error.message : String(error) }, tokens);
+      throw error;
+    }
+    const flush = this.flushing.then(() => this.flush(passStart, tokens));
+    this.flushing = flush.catch((error) => {
+      this.log("flush_error", { error: error instanceof Error ? error.message : String(error) }, tokens);
+    });
   }
 
   private unknown(ctl: Control, result: Exclude<Result<unknown>, { kind: "ok" }>, prior: Control): void {
     const now = this.ports.now();
-    console.warn(`Reconcile ${result.kind}: ${result.reason}`);
     this.unknownReason = result.reason;
     ctl.healthySince = null;
     ctl.unknownSince = prior.unknownSince ?? now;
@@ -132,8 +165,11 @@ export class RouterCore {
     return operation();
   }
 
-  private async pass(): Promise<number> {
+  private async pass(trace: Trace, tokens: Set<string>): Promise<number> {
     const passStart = this.ports.now();
+    trace.at = passStart;
+    const rememberToken = () => tokens.add(this.ports.github.token?.value ?? "");
+    rememberToken();
     const signal = this.ports.deadline.timeout(15_000);
     let ctl = initialControl(passStart);
     let pcHealthy = false;
@@ -142,6 +178,8 @@ export class RouterCore {
     try {
       ctl = await this.control();
       const prior = { ...ctl };
+      tokens.add(ctl.token?.value ?? "");
+      trace.previousApplied = prior.applied;
       this.ports.github.token = ctl.token;
       let laptopMissing: boolean | undefined;
       try {
@@ -150,14 +188,11 @@ export class RouterCore {
           ctl.cooldownUntil !== null && now < ctl.cooldownUntil
             ? { kind: "cooldown", until: ctl.cooldownUntil, reason: "GitHub cooldown" }
             : await this.call(signal, () => this.ports.github.list(signal));
+        rememberToken();
         const hb = await this.ports.storage.get<Heartbeat>("hb");
-        const decision = decide(
-          hb,
-          ctl,
-          roster.kind === "ok" ? roster.value : undefined,
-          this.config,
-          this.ports.now(),
-        );
+        const decidedAt = this.ports.now();
+        const decision = decide(hb, ctl, roster.kind === "ok" ? roster.value : undefined, this.config, decidedAt);
+        trace.decisions.push(decisionTrace(decision, hb, decidedAt));
         Object.assign(ctl, {
           healthySince: decision.healthySince,
           lastKnownEvalAt: decision.lastKnownEvalAt,
@@ -170,6 +205,9 @@ export class RouterCore {
           ctl.retryAt = null;
           ctl.cooldownUntil = null;
           const laptop = roster.value.find((runner) => runner.name === this.config.laptopRunner);
+          trace.laptop = laptop
+            ? { id: laptop.id, status: laptop.status, busy: laptop.busy, labels: [...laptop.labels] }
+            : null;
           laptopMissing = !laptop || laptop.status === "offline";
           if (laptop) {
             let failure: Exclude<Result<unknown>, { kind: "ok" }> | undefined;
@@ -177,12 +215,21 @@ export class RouterCore {
               const missing = this.config.laptopAdmissionLabels.filter((label) => !laptop.labels.includes(label));
               if (missing.length) {
                 const result = await this.call(signal, () => this.ports.github.add(laptop, missing, signal));
+                rememberToken();
+                trace.mutations.push({
+                  op: "add",
+                  labels: missing,
+                  result: result.kind,
+                  ...(result.kind !== "ok" ? { reason: result.reason } : {}),
+                });
                 if (result.kind !== "ok") failure = result;
               }
             } else {
               for (const label of this.config.laptopAdmissionLabels.filter((label) => laptop.labels.includes(label))) {
                 const fresh = await this.ports.storage.get<Heartbeat>("hb");
-                const checked = decide(fresh, ctl, roster.value, this.config, this.ports.now());
+                const checkedAt = this.ports.now();
+                const checked = decide(fresh, ctl, roster.value, this.config, checkedAt);
+                trace.decisions.push(decisionTrace(checked, fresh, checkedAt));
                 Object.assign(ctl, {
                   healthySince: checked.healthySince,
                   lastKnownEvalAt: checked.lastKnownEvalAt,
@@ -191,6 +238,13 @@ export class RouterCore {
                 pcHealthy = checked.pcHealthy;
                 if (checked.desired !== "off" || !checked.offAuthorized) break;
                 const result = await this.call(signal, () => this.ports.github.remove(laptop, label, signal));
+                rememberToken();
+                trace.mutations.push({
+                  op: "remove",
+                  labels: [label],
+                  result: result.kind,
+                  ...(result.kind !== "ok" ? { reason: result.reason } : {}),
+                });
                 if (result.kind !== "ok") {
                   failure = result;
                   break;
@@ -201,6 +255,11 @@ export class RouterCore {
               failure?.kind === "cooldown"
                 ? failure
                 : await this.call(signal, () => this.ports.github.get(laptop, signal));
+            rememberToken();
+            trace.readback =
+              actual.kind === "ok"
+                ? { kind: actual.kind, status: actual.value.status, labels: [...actual.value.labels] }
+                : { kind: actual.kind, reason: actual.reason };
             if (actual.kind === "ok" && actual.value.name === this.config.laptopRunner) {
               ctl.applied = this.config.laptopAdmissionLabels.some((label) => actual.value.labels.includes(label))
                 ? "on"
@@ -216,6 +275,7 @@ export class RouterCore {
           }
         }
       } catch (error) {
+        rememberToken();
         const detail = error instanceof Error ? error.message : String(error);
         this.unknown(ctl, { kind: "unknown", reason: `Reconcile failed: ${detail}` }, prior);
         pcHealthy = false;
@@ -273,14 +333,59 @@ export class RouterCore {
         "✅ Ariadne CI: heartbeat від ПК знову приходить.",
       );
       const outbox = (await this.ports.storage.get<Outbox>("outbox")) ?? { messages: [], nextId: 1, dropped: 0 };
+      const queued: Outbox["messages"] = [];
       for (const text of messages) {
-        console.log(`[${new Date(now).toISOString()}] ${text}`);
-        outbox.messages.push({ id: outbox.nextId++, text: `${text.slice(0, TELEGRAM_TEXT_BUDGET)}\n🕒 ${kyiv(now)}` });
+        const message = { id: outbox.nextId++, text: `${text.slice(0, TELEGRAM_TEXT_BUDGET)}\n🕒 ${kyiv(now)}` };
+        outbox.messages.push(message);
+        /* Untruncated, so a secret cut at the Telegram budget still matches the scrub. */
+        queued.push({ id: message.id, text });
       }
       const excess = Math.max(0, outbox.messages.length - 64);
       outbox.messages.splice(0, excess);
       outbox.dropped += excess;
       ctl.pcHealthy = pcHealthy;
+      const lastDecision = trace.decisions.at(-1);
+      Object.assign(trace, {
+        at: now,
+        kind: this.unknownReason !== undefined ? "unknown" : (lastDecision?.kind ?? "unknown"),
+        desired: lastDecision?.desired ?? null,
+        applied: ctl.applied,
+        previousApplied: previous?.applied ?? null,
+        pcHealthy,
+        offAuthorized: lastDecision?.offAuthorized ?? false,
+        healthySince: ctl.healthySince,
+        healthyForS: ctl.healthySince === null ? null : (now - ctl.healthySince) / 1000,
+        unknownSince: ctl.unknownSince,
+        cooldownUntil: ctl.cooldownUntil,
+        retryAt: ctl.retryAt,
+        heartbeat: hb
+          ? {
+              ageS: (now - hb.acceptedAt) / 1000,
+              counter: hb.counter,
+              githubProbe: hb.report.githubProbe,
+              probeFailures: hb.probeFailures ?? 0,
+              reportHealthySince: hb.reportHealthySince,
+            }
+          : null,
+        pcRunners: this.config.pcRunners.map((name) => {
+          const report = hb?.report.runners.find((runner) => runner.name === name);
+          const runner = rosterSnapshot?.find((runner) => runner.name === name);
+          return {
+            name,
+            unit: report?.unit ?? null,
+            listener: report?.listener ?? null,
+            status: runner?.status ?? null,
+            busy: runner?.busy ?? null,
+            labels: runner ? [...runner.labels] : [],
+          };
+        }),
+        laptop: trace.laptop ?? null,
+        readback: trace.readback ?? null,
+        unknownReason: this.unknownReason ?? null,
+        alerts: { ...ctl.alerts },
+        queued,
+        outbox: { pending: outbox.messages.length, dropped: outbox.dropped },
+      });
       await this.ports.storage.put({ ctl, outbox });
     } catch (error) {
       ctl = (await this.ports.storage.get<Control>("ctl")) ?? ctl;
@@ -290,21 +395,26 @@ export class RouterCore {
     } finally {
       await this.planAlarm(passStart, ctl, pcHealthy);
     }
+    trace.durationMs = this.ports.now() - passStart;
+    this.log("reconcile", trace, tokens);
     return passStart;
   }
 
-  private async flush(passStart: number): Promise<void> {
+  private async flush(passStart: number, tokens: Set<string>): Promise<void> {
     try {
       for (let sent = 0; sent < 5; sent++) {
         const outbox = await this.ports.storage.get<Outbox>("outbox");
         const message = outbox?.messages[0];
         if (!message) return;
         let ok = false;
+        let error: string | undefined;
         try {
           ok = await this.ports.telegram.send(message.text);
-        } catch {
+        } catch (failure) {
+          error = failure instanceof Error ? failure.message : String(failure);
           ok = false;
         }
+        this.log("telegram", { id: message.id, ok, ...(error !== undefined ? { error } : {}) }, tokens);
         if (!ok) return;
         /* A reconcile can append messages while Telegram is pending. */
         const ack = this.mutex.then(async () => {

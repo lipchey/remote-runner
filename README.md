@@ -112,8 +112,9 @@ env -i \
 
 The package's `deploy` script also runs `wrangler deploy`. The first deploy may require
 registration of the account's workers.dev subdomain.
-Smoke-check that an unauthenticated `POST /heartbeat` returns 401 and that `wrangler tail`
-shows a cron pass with a known roster.
+Smoke-check that an unauthenticated `POST /heartbeat` returns 401 and that
+`node packages/runner-router/scripts/logs.mjs --since 15m --event reconcile` (from the
+repo root) shows a cron pass with a known roster.
 
 For the PC installation, copy the `pc/` service and timer files to
 `~/.config/systemd/user/` and install `pc/heartbeat.sh` as
@@ -131,6 +132,74 @@ re-runs) still ask for `popos`. When the compatibility window ends, first return
 variable to `ci-active` and redeploy, then remove `popos` from the laptop via REST and
 read it back. The other order fails: the old Worker re-adds `popos` on any ON, and the
 narrowed one refuses to touch a label outside its configured set, so it would stay forever.
+
+### Workers Logs
+
+The Worker enables persisted logs with `[observability] enabled = true` and
+`head_sampling_rate = 1`, also the default sampling rate. Each successful reconcile
+emits one structured record with the heartbeat, PC roster, laptop roster snapshot,
+readback, decisions, mutations, and queued alerts. `applied` is the last confirmed
+observation of the laptop admission labels; a failed or skipped readback can leave it
+unchanged. `laptop` is the roster snapshot and `readback` is the separate post-mutation
+observation. Telegram attempts log IDs and outcomes without repeating message text.
+
+[Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/)
+includes 200,000 log events/day with 3 days retention on Free. Paid includes 20 million
+log events/month, then $0.60 per additional million, with 7 days retention. The maximum
+log size is 256 KB; larger logs are truncated and marked `$cloudflare.truncated`.
+Heartbeat, cron, alarm invocation logs and reconcile records together are estimated at
+~40–50k events/day. From 2026-12-01, Workers Logs uses Cloudflare Observability pricing;
+see [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/).
+
+The reader needs the account permission **Workers Observability Write** on
+`CLOUDFLARE_REMOTE_RUNNER_TOKEN`. It extracts only that token and
+`CLOUDFLARE_REMOTE_RUNNER_ACCOUNT_ID` through the same confined sops helper as secret
+upload. It posts to the account's
+[telemetry query API](https://developers.cloudflare.com/api/resources/workers/subresources/observability/subresources/telemetry/methods/query/)
+with a fixed timeframe and a `runner-router` service filter, following event ID cursors.
+Event extraction accepts structured source objects and JSON metadata messages; confirm
+which layout the account returns after deployment.
+
+Run from the repo root:
+
+```sh
+node packages/runner-router/scripts/logs.mjs
+node packages/runner-router/scripts/logs.mjs --since 15m --event reconcile
+node packages/runner-router/scripts/logs.mjs --since 2h --json
+```
+
+`--since` defaults to `1h` and accepts positive whole durations ending in `m`, `h`, or
+`d`. `--event` filters structured event names. Normal output uses Kyiv time; `--json`
+prints the raw selected telemetry events. Invalid arguments fail before vault access.
+If access is rejected, check the account permission before retrying. Deploy logging
+changes with `wrangler deploy`; secret upload rotates the heartbeat secret and is
+unnecessary for an observability change. Before deploying, record the current version
+from `wrangler deployments list`. To restore that version while keeping secrets, cron,
+and the Durable Object, run `wrangler rollback <version-id>`.
+
+#### Incident: laptop took a job while the PC was alive
+
+Find the job's start time in GitHub Actions, including its timezone, then query a window
+covering that time with `--event reconcile` (use `--json` for the full records). Find the
+last reconcile at or before the job started and check `applied`, the last confirmed
+observation, against `laptop.labels` and `readback.labels`. Any configured admission
+label still present can admit a laptop job. A missing or failed readback leaves the
+last observation stale; compare runner registrations using `laptop.id`.
+
+Read `decisions` in order to identify which evaluation requested `desired: on` or
+prevented a removal, using `hbCounter`, `hbAcceptedAt`, and `at` to match each heartbeat.
+If `pcHealthy` was false, check heartbeat age for lease expiry at 30 s,
+`githubProbe` and `probeFailures` for three consecutive failures, and each PC runner's
+`unit`, `listener`, GitHub `status`, and `ci-active` label. A running PC alone does not
+establish a healthy runner.
+
+If the final `kind` is `unknown`, inspect `unknownReason`, `unknownSince`,
+`cooldownUntil`, `retryAt`, and failed `mutations`: uncertainty or cooldown freezes
+admission changes. A healthy PC can still leave fallback on while `offAuthorized` is
+false and `healthyForS` is below 120 s. Compare `healthySince` and each decision's
+`lastKnownEvalAt` to understand continuity, then follow later records through the
+removals and readback. Use `queued`, `alerts`, and `outbox` to correlate operator
+notifications with the same pass.
 
 ### Rollback / stop
 

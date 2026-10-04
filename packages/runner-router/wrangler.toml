@@ -3,6 +3,10 @@ main = "src/index.ts"
 compatibility_date = "2026-10-01"
 workers_dev = true
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [[durable_objects.bindings]]
 name = "ROUTER"
 class_name = "RouterObject"

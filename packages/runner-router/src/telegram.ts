@@ -1,6 +1,7 @@
 import type { Config } from "./config.js";
 import type { TelegramPort } from "./core.js";
 import { realDeadline, type Deadline, type Fetch } from "./github.js";
+import { configSecrets, writeLog } from "./log.js";
 
 export class Telegram implements TelegramPort {
   constructor(
@@ -18,10 +19,14 @@ export class Telegram implements TelegramPort {
       });
       const body: unknown = await response.json();
       const ok = response.ok && typeof body === "object" && body !== null && "ok" in body && body.ok === true;
-      if (!ok) console.warn(`Telegram send failed: HTTP ${response.status}`);
+      if (!ok) writeLog("telegram_error", { status: response.status }, configSecrets(this.config));
       return ok;
     } catch (error) {
-      console.warn(`Telegram send failed: ${error instanceof Error ? error.message : String(error)}`);
+      writeLog(
+        "telegram_error",
+        { error: error instanceof Error ? error.message : String(error) },
+        configSecrets(this.config),
+      );
       return false;
     }
   }
