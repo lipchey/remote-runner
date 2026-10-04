@@ -137,8 +137,10 @@ narrowed one refuses to touch a label outside its configured set, so it would st
 
 The Worker enables persisted logs with `[observability] enabled = true` and
 `head_sampling_rate = 1`, also the default sampling rate. Each successful reconcile
-emits one structured record with the heartbeat, PC roster, laptop roster snapshot,
-readback, decisions, mutations, and queued alerts. `applied` is the last confirmed
+emits one structured `reconcile` record with the heartbeat, PC roster, laptop roster
+snapshot, readback, decisions, mutations, and queued alerts; a failed pass emits
+`reconcile_error` with the partial trace. Workers Logs stores fields that are `null`
+or empty arrays as absent, so a missing `unknownReason` or `mutations` means none. `applied` is the last confirmed
 observation of the laptop admission labels; a failed or skipped readback can leave it
 unchanged. `laptop` is the roster snapshot and `readback` is the separate post-mutation
 observation. Telegram attempts log IDs and outcomes without repeating message text.
@@ -147,8 +149,8 @@ observation. Telegram attempts log IDs and outcomes without repeating message te
 includes 200,000 log events/day with 3 days retention on Free. Paid includes 20 million
 log events/month, then $0.60 per additional million, with 7 days retention. The maximum
 log size is 256 KB; larger logs are truncated and marked `$cloudflare.truncated`.
-Heartbeat, cron, alarm invocation logs and reconcile records together are estimated at
-~40–50k events/day. From 2026-12-01, Workers Logs uses Cloudflare Observability pricing;
+Measured after deployment: ~41k events/day (invocation logs for heartbeat fetches,
+alarms and cron, plus one reconcile record per heartbeat), about a fifth of the Free limit. From 2026-12-01, Workers Logs uses Cloudflare Observability pricing;
 see [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/).
 
 The reader needs the account permission **Workers Observability Write** on
@@ -157,8 +159,8 @@ The reader needs the account permission **Workers Observability Write** on
 upload. It posts to the account's
 [telemetry query API](https://developers.cloudflare.com/api/resources/workers/subresources/observability/subresources/telemetry/methods/query/)
 with a fixed timeframe and a `runner-router` service filter, following event ID cursors.
-Event extraction accepts structured source objects and JSON metadata messages; confirm
-which layout the account returns after deployment.
+Each logged record arrives as the event's `source` object, with the event time in the
+top-level `timestamp`.
 
 Run from the repo root:
 
@@ -169,8 +171,9 @@ node packages/runner-router/scripts/logs.mjs --since 2h --json
 ```
 
 `--since` defaults to `1h` and accepts positive whole durations ending in `m`, `h`, or
-`d`. `--event` filters structured event names. Normal output uses Kyiv time; `--json`
-prints the raw selected telemetry events. Invalid arguments fail before vault access.
+`d`. `--event` filters structured event names. Normal output is oldest first in Kyiv time
+and hides plain invocation logs except those carrying an error; `--json` prints every
+selected raw telemetry event. Invalid arguments fail before vault access.
 If access is rejected, check the account permission before retrying. Deploy logging
 changes with `wrangler deploy`; secret upload rotates the heartbeat secret and is
 unnecessary for an observability change. Before deploying, record the current version

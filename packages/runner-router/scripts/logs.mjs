@@ -98,7 +98,7 @@ const kyivTime = new Intl.DateTimeFormat("uk-UA", {
 
 export function renderEvent(event) {
   const record = eventRecord(event);
-  const at = new Date(record?.at ?? event.$metadata?.timestamp);
+  const at = new Date(record?.at ?? event.timestamp ?? event.$metadata?.timestamp);
   const time = Number.isNaN(at.getTime()) ? "time unknown" : `${kyivTime.format(at)} (Київ)`;
   const fields = [time, record?.event ?? "invocation"];
   if (record?.kind !== undefined) fields.push(record.kind);
@@ -106,9 +106,14 @@ export function renderEvent(event) {
     fields.push(`${record.desired ?? "?"}→${record.applied ?? "?"}`);
   if (record?.pcHealthy !== undefined) fields.push(`pcHealthy=${record.pcHealthy}`);
   if (record?.heartbeat) fields.push(`hb=${record.heartbeat.ageS}s`);
+  const laptopLabels = record?.readback?.labels ?? record?.laptop?.labels;
+  if (laptopLabels) fields.push(`laptop=[${laptopLabels.join(",")}]`);
   for (const mutation of record?.mutations ?? [])
     fields.push(`${mutation.op}(${mutation.labels.join(",")}):${mutation.result}`);
   if (record?.unknownReason) fields.push(record.unknownReason);
+  for (const key of ["status", "reason", "id", "ok", "error"])
+    if (record && record.event !== "reconcile" && record[key] !== undefined) fields.push(String(record[key]));
+  if (!record && event.$metadata?.error) fields.push(String(event.$metadata.error));
   return fields.join(" ").replace(/\s+/g, " ");
 }
 
@@ -120,7 +125,11 @@ export async function main(args, readSecret = extract) {
   const selected =
     options.event === null ? events : events.filter((event) => eventRecord(event)?.event === options.event);
   if (options.json) console.log(JSON.stringify(selected, null, 2));
-  else for (const event of selected) console.log(renderEvent(event));
+  else
+    for (const event of selected
+      .filter((event) => eventRecord(event) || event.$metadata?.error)
+      .sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0)))
+      console.log(renderEvent(event));
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

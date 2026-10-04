@@ -170,4 +170,46 @@ describe("Workers Logs reader", () => {
     expect(line).not.toContain("\n");
     expect(renderEvent({ $metadata: { timestamp: from } })).toContain("invocation");
   });
+
+  it("renders the live event layout: top-level timestamp and laptop labels", () => {
+    const rejected = {
+      timestamp: from,
+      source: { event: "heartbeat_rejected", status: 401, reason: "bearer mismatch" },
+    };
+    expect(renderEvent(rejected)).toBe("04.10.26, 12:00:00 (Київ) heartbeat_rejected 401 bearer mismatch");
+    const reconcile = {
+      timestamp: from,
+      source: {
+        event: "reconcile",
+        kind: "known",
+        desired: "off",
+        applied: "off",
+        pcHealthy: true,
+        laptop: { labels: ["self-hosted"] },
+        readback: null,
+      },
+    };
+    expect(renderEvent(reconcile)).toContain("laptop=[self-hosted]");
+  });
+
+  it("prints plain output oldest first and drops invocation noise but not invocation errors", async () => {
+    const page = [
+      { $metadata: { id: "c" }, timestamp: from + 2000, source: { event: "telegram", id: 1, ok: true } },
+      { $metadata: { id: "b" }, timestamp: from + 1000, source: { level: "info", message: "alarm" } },
+      { $metadata: { id: "a", error: "boom" }, timestamp: from, source: { level: "error", message: "boom" } },
+    ];
+    const pages = [page, []];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ result: { events: { events: pages.shift() } } }))),
+    );
+    vi.spyOn(Date, "now").mockReturnValue(to);
+    const output = vi.spyOn(console, "log").mockImplementation(() => {});
+    await main([], () => "value");
+    const lines = output.mock.calls.map(([line]) => line as string);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("invocation");
+    expect(lines[0]).toContain("boom");
+    expect(lines[1]).toContain("telegram");
+  });
 });
