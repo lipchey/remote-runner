@@ -35,8 +35,18 @@ function spawnExitCode(error) {
   return WORKLOAD_SPAWN_ERRORS.has(error?.code) ? WORKLOAD_SPAWN_EXIT_CODE : 70;
 }
 
-/* Capture the parent before reading stdin; live reparenting detects disconnects without PID-reuse ambiguity.
-   Ceiling: descendants in their own process group or session, including verify checks and setsid, remain unreachable. */
+/* sshd is this launcher's direct parent and exits the moment the client goes away (a killed
+   local run, a laptop asleep past the ssh keepalives, a dropped link), leaving the launcher
+   orphaned. The workload never notices: it runs to the end against a channel nobody reads,
+   and every native tool that writes to the now-broken stdout is killed by SIGPIPE — so an
+   abandoned run burns the host for its full length and then reports itself RED instead of
+   simply being gone. `process.ppid` follows reparenting (it reads 1 once the parent exits), so
+   watching the RELATIONSHIP is both live and exact — probing whether the recorded pid is still
+   occupied would instead be fooled by pid reuse. Recorded at module load: a disconnect during
+   the frame read would otherwise be recorded as the orphaning that already happened, and never
+   fire. The kill takes the workload's whole process group, so its background jobs die with it
+   instead of reparenting to init; a descendant that moved into its own group or session (the
+   verify runner puts every check in one) is still out of reach and runs to its own end. */
 const LAUNCH_PARENT = process.ppid;
 const ORPHAN_POLL_MS = 1000;
 
@@ -44,7 +54,9 @@ function killWorkloadGroup(child, signal) {
   try {
     process.kill(-child.pid, signal);
   } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
+    /* EPERM means only another user's processes are left; throwing here would replace the
+       workload's own exit code with the launcher's crash. */
+    if (error?.code !== "ESRCH" && error?.code !== "EPERM") throw error;
   }
 }
 
