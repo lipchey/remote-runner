@@ -128,24 +128,60 @@ describe("fixed remote launcher", () => {
     expect(result.stderr).not.toContain("secret-canary");
   });
 
-  it("kills the workload once its own parent is gone", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "remote-launcher-orphan-"));
-    const started = join(directory, "workload.pid");
-    const workload = [
-      process.execPath,
-      "-e",
-      "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000)",
-      started,
-    ];
-    /* The launcher must be orphaned to be observed, so it is started detached by a throwaway
-       parent whose exit IS the orphaning event — the same shape sshd leaves behind when the
-       client disconnects. The parent waits for the workload's own pid file first, so a launcher
-       that died before spawning (a failed marker write) cannot pass this test by omission. */
-    const parent = spawn(
-      process.execPath,
-      [
-        "-e",
-        `const { spawn } = require("node:child_process");
+  it.each([
+    ["exits normally", "process.exit(0)", 0, null],
+    ["exits unsuccessfully", "process.exit(23)", 23, null],
+    ["dies by signal", "process.kill(process.pid, 'SIGTERM')", null, "SIGTERM"],
+  ])("kills the workload's background child when it %s", async (_label, exit, code, signal) => {
+    const directory = await mkdtemp(join(tmpdir(), "remote-launcher-background-"));
+    const started = join(directory, "background.pid");
+    let backgroundPid: number | undefined;
+    try {
+      const result = await runLauncher(
+        encodeSecretFrame({}, []).stdin,
+        [],
+        [
+          process.execPath,
+          "-e",
+          `const child = require("node:child_process").spawn("sleep", ["60"], { stdio: "ignore" });
+         child.once("spawn", () => {
+           require("node:fs").writeFileSync(process.argv[1], String(child.pid));
+           ${exit};
+         });`,
+          started,
+        ],
+      );
+      backgroundPid = readPid(started);
+      expect(backgroundPid).toBeGreaterThan(0);
+      expect(result).toMatchObject({ code, signal, marker: "RR_CHILD_STARTED\n" });
+      await waitUntil(() => !alive(backgroundPid!), "the background child to be killed", 2000);
+      expect(() => process.kill(backgroundPid!, 0)).toThrowError(expect.objectContaining({ code: "ESRCH" }));
+    } finally {
+      if (backgroundPid && alive(backgroundPid)) process.kill(backgroundPid, "SIGKILL");
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["workload", "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000)"],
+    [
+      "background child",
+      `const child = require("node:child_process").spawn("sleep", ["60"], { stdio: "ignore" });
+       child.once("spawn", () => require("node:fs").writeFileSync(process.argv[1], String(child.pid)));
+       setTimeout(() => {}, 60000);`,
+    ],
+  ])(
+    "kills the %s once its own parent is gone",
+    async (_label, script) => {
+      const directory = await mkdtemp(join(tmpdir(), "remote-launcher-orphan-"));
+      const started = join(directory, "workload.pid");
+      const workload = [process.execPath, "-e", script, started];
+      /* Wait for workload startup before orphaning so failed launcher startup cannot pass. */
+      const parent = spawn(
+        process.execPath,
+        [
+          "-e",
+          `const { spawn } = require("node:child_process");
          const { existsSync, openSync } = require("node:fs");
          /* "ignore" opens /dev/null only for fds 0-2; the marker fd must be a real descriptor. */
          const child = spawn(process.execPath, JSON.parse(process.argv[1]), {
@@ -159,33 +195,33 @@ describe("fixed remote launcher", () => {
            clearInterval(wait);
            process.exit(0);
          }, 25);
-         /* A launcher that never starts the workload would leave this parent spinning inside a
-            test worker that has already failed, so bound the wait here too. */
+         /* Bound startup so a failed launcher cannot leave this parent running. */
          setTimeout(() => process.exit(1), 10000);`,
-        JSON.stringify([launcher, "[]", "--", ...workload]),
-        Buffer.from(encodeSecretFrame({}, []).stdin).toString("base64"),
-        started,
-      ],
-      { stdio: "ignore" },
-    );
-    /* The parent exits on its own the instant the workload appears, which can be before the wait
-       below returns — subscribe now or the event is lost and this test hangs instead of failing. */
-    const orphaned = once(parent, "exit");
-    let workloadPid: number | undefined;
-    try {
-      /* The pid file is observable between its open and its write, and pid 0 would make the
-         liveness probe signal this test's own process group — wait for the digits, not the file. */
-      await waitUntil(() => readPid(started) > 0, "the workload to start");
-      workloadPid = readPid(started);
-      expect(alive(workloadPid)).toBe(true);
-      await orphaned;
-      await waitUntil(() => !alive(workloadPid!), "the orphaned workload to be killed");
-    } finally {
-      if (workloadPid !== undefined && alive(workloadPid)) process.kill(workloadPid, "SIGKILL");
-      parent.kill("SIGKILL");
-      await rm(directory, { recursive: true, force: true });
-    }
-  }, 15_000);
+          JSON.stringify([launcher, "[]", "--", ...workload]),
+          Buffer.from(encodeSecretFrame({}, []).stdin).toString("base64"),
+          started,
+        ],
+        { stdio: "ignore" },
+      );
+      /* Subscribe before observing the pid file because the parent can exit immediately. */
+      const orphaned = once(parent, "exit");
+      let workloadPid: number | undefined;
+      try {
+        /* Wait for a positive pid because the file appears before its contents and pid 0 targets our group. */
+        await waitUntil(() => readPid(started) > 0, "the workload to start");
+        workloadPid = readPid(started);
+        expect(alive(workloadPid)).toBe(true);
+        await orphaned;
+        await waitUntil(() => !alive(workloadPid!), "the orphaned workload to be killed");
+        expect(() => process.kill(workloadPid!, 0)).toThrowError(expect.objectContaining({ code: "ESRCH" }));
+      } finally {
+        if (workloadPid !== undefined && alive(workloadPid)) process.kill(workloadPid, "SIGKILL");
+        parent.kill("SIGKILL");
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
 
   it("keeps the outage code for a spawn failure that does not prove the command unusable", async () => {
     const directory = await mkdtemp(join(tmpdir(), "remote-launcher-loop-"));
