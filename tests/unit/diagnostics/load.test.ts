@@ -273,6 +273,7 @@ describe("host load", () => {
       const header = summary.split("\n").find((line) => line.startsWith("SOURCE"))!;
       const row = summary.split("\n").find((line) => line.startsWith("ci "))!;
       expect(row.indexOf("2.000")).toBe(header.indexOf("MEAN CORES"));
+      expect(header.indexOf("LABELS")).toBeGreaterThan(header.indexOf("MAX STALL %"));
       expect(summary).toContain("-0.700");
       expect(summary).toContain("CPU some/full");
       expect(summary).toContain("IO some/full");
@@ -280,7 +281,13 @@ describe("host load", () => {
       expect(summary).toContain("Gaps:");
       expect(summary).toContain("Clock discontinuities:");
       expect(summary).not.toContain("boot:42");
-      expect(formatHostLoad(answer, true)).toContain("boot:42");
+      const detail = formatHostLoad(answer, true);
+      expect(detail).toContain("boot:42");
+      const detailHeader = detail
+        .split("\n")
+        .filter((line) => line.startsWith("SOURCE"))
+        .pop()!;
+      expect(detailHeader.indexOf("CGROUP")).toBeGreaterThan(detailHeader.indexOf("STALL %"));
     });
   });
 });

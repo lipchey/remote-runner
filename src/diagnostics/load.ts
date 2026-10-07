@@ -299,14 +299,14 @@ export function formatHostLoad(report: HostLoadReport, detail: boolean): string 
       ? []
       : [`Job ${report.job.ref}, runner ${JSON.stringify(report.job.runner_name)} (* marked)`]),
     table([
-      ["SOURCE", "LABELS", "MEAN CORES", "SHARE", "PEAK CORES", "MAX STALL %"],
+      ["SOURCE", "MEAN CORES", "SHARE", "PEAK CORES", "MAX STALL %", "LABELS"],
       ...report.groups.map((row) => [
         `${row.marked ? "* " : ""}${row.source}`,
-        JSON.stringify(row.labels),
         fixed(row.mean_cores),
         `${fixed(row.share * 100)}%`,
         fixed(row.peak_cores),
         fixed(row.max_stall_pct),
+        JSON.stringify(row.labels),
       ]),
     ]),
     `Host busy: ${fixed(report.host.busy_cores_mean)} cores, ${fixed(report.host.busy_pct)}% of ${report.host.ncpu} CPUs`,
@@ -319,14 +319,14 @@ export function formatHostLoad(report: HostLoadReport, detail: boolean): string 
   if (detail)
     lines.push(
       table([
-        ["CGROUP", "SOURCE", "LABELS", "MEAN CORES", "PEAK CORES", "STALL %"],
+        ["SOURCE", "MEAN CORES", "PEAK CORES", "STALL %", "CGROUP", "LABELS"],
         ...report.cgroups.map((row) => [
-          `${row.marked ? "* " : ""}${JSON.stringify(row.path)} (${JSON.stringify(row.key)})`,
-          row.source,
-          JSON.stringify(row.labels),
+          `${row.marked ? "* " : ""}${row.source}`,
           fixed(row.mean_cores),
           fixed(row.peak_cores),
           fixed(row.stall_pct),
+          `${JSON.stringify(row.path)} (${JSON.stringify(row.key)})`,
+          JSON.stringify(row.labels),
         ]),
       ]),
     );
