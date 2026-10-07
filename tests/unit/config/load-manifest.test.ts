@@ -82,7 +82,7 @@ describe("loadManifestText", () => {
     );
   });
 
-  it.each(["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL"])(
+  it.each(["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL", "REMOTE_RUNNER_RUN_ID"])(
     "rejects the runner's reserved marker %s as a childEnvironment key",
     (name) => {
       expect(() => loadManifestText(validManifest.replace("REMOTE_RUNNER_CHILD", name))).toThrow(
@@ -91,7 +91,7 @@ describe("loadManifestText", () => {
     },
   );
 
-  it.each(["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL"])(
+  it.each(["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL", "REMOTE_RUNNER_RUN_ID"])(
     "rejects the runner's reserved marker %s as a secret name",
     (name) => {
       expect(() => loadManifestText(validManifest.replace("NEON_DEV_DATABASE_URL", name))).toThrow(

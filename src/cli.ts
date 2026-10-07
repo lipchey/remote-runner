@@ -5,6 +5,13 @@ import { loadManifestText, remoteFallbackOf } from "./config/load-manifest.js";
 import type { Profile, RunMode } from "./config/types.js";
 import { corpusJson, formatCorpus, type CorpusOptions, type CorpusReport } from "./diagnostics/corpus.js";
 import type { DoctorProfileReport } from "./diagnostics/doctor.js";
+import {
+  formatHostLoad,
+  GITHUB_JOB_REFERENCE,
+  parseLoadWindow,
+  type HostLoadReport,
+  type LoadQuery,
+} from "./diagnostics/load.js";
 
 export interface CliIo {
   stdout(line: string): void;
@@ -40,6 +47,7 @@ export interface CliDependencies {
   enqueuePrewarm?(profile: Profile, manifestPath: string): Promise<"published" | "coalesced">;
   statusProfile?(profile?: string, manifestPath?: string): Promise<string>;
   doctorProfile?(profile?: string, manifestPath?: string): Promise<readonly DoctorProfileReport[]>;
+  loadProfile?(profile: string, query: LoadQuery, manifestPath?: string): Promise<HostLoadReport>;
   logsProfile?(profile?: string, manifestPath?: string): Promise<readonly string[]>;
   readLogCorpus?(options: CorpusOptions): Promise<CorpusReport>;
   benchmarkProfile?(profile: Profile): Promise<unknown>;
@@ -57,6 +65,7 @@ const HELP = [
   "remote-runner validate [profile] [--manifest <path>]",
   "remote-runner status [profile] [--manifest <path>]",
   "remote-runner doctor [profile] [--manifest <path>]",
+  "remote-runner load <profile> (--from <iso> --to <iso> | --github-job <owner>/<repo>/<jobId>) [--json] [--detail] [--manifest <path>]",
   "remote-runner logs [profile] [--manifest <path>]",
   "remote-runner logs --all [--json] [--since <date>] [--cold-threshold-ms <n>]",
   "remote-runner benchmark <profile>",
@@ -90,6 +99,10 @@ export async function runCli(
 
   if (argv[0] === "status" || argv[0] === "doctor") {
     return runReadOnlyDiagnostic(argv[0], argv.slice(1), io, dependencies);
+  }
+
+  if (argv[0] === "load") {
+    return runLoadCommand(argv.slice(1), io, dependencies);
   }
 
   if (argv[0] === "logs") {
@@ -396,6 +409,55 @@ async function runReadOnlyDiagnostic(
   }
   io.stderr(`remote-runner ${command} runtime is not configured`);
   return 70;
+}
+
+async function runLoadCommand(argv: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
+  const profile = argv[0];
+  const usage =
+    "load requires <profile> (--from <iso> --to <iso> | --github-job <owner>/<repo>/<jobId>) [--json] [--detail] [--manifest <path>]";
+  const values = new Map<string, string>();
+  const seen = new Set<string>();
+  let query: LoadQuery;
+  try {
+    if (profile === undefined || profile.startsWith("-") || profile.length === 0) throw new Error(usage);
+    for (let index = 1; index < argv.length; index += 1) {
+      const argument = argv[index]!;
+      if (seen.has(argument)) throw new Error(`duplicate load argument: ${argument}`);
+      seen.add(argument);
+      if (argument === "--json" || argument === "--detail") continue;
+      if (!["--from", "--to", "--github-job", "--manifest"].includes(argument)) throw new Error(usage);
+      const value = argv[++index];
+      if (value === undefined || value.length === 0 || value.startsWith("-"))
+        throw new Error(`load requires a value after ${argument}`);
+      values.set(argument, value);
+    }
+    const githubJob = values.get("--github-job");
+    const from = values.get("--from");
+    const to = values.get("--to");
+    if (githubJob !== undefined) {
+      if (from !== undefined || to !== undefined) throw new Error(usage);
+      if (!GITHUB_JOB_REFERENCE.test(githubJob)) throw new Error("invalid --github-job: expected owner/repo/jobId");
+      query = { githubJob };
+    } else {
+      if (from === undefined || to === undefined) throw new Error(usage);
+      query = parseLoadWindow(from, to);
+    }
+  } catch (error) {
+    io.stderr(error instanceof Error ? error.message : String(error));
+    return 2;
+  }
+  if (dependencies.loadProfile === undefined) {
+    io.stderr("remote-runner load runtime is not configured");
+    return 70;
+  }
+  try {
+    const report = await dependencies.loadProfile(profile!, query, values.get("--manifest"));
+    io.stdout(seen.has("--json") ? JSON.stringify(report) : formatHostLoad(report, seen.has("--detail")));
+    return 0;
+  } catch (error) {
+    io.stderr(`remote-runner load failed: ${error instanceof Error ? error.message : String(error)}`);
+    return 70;
+  }
 }
 
 async function readManifest(path: string, dependencies: CliDependencies) {

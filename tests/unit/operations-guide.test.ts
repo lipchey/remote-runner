@@ -53,8 +53,10 @@ describe("remote-runner operations guide", () => {
       "Uninstall",
       "Privacy-safe support bundle",
       "Sync canary",
+      "## Host load attribution",
     ])
       expect(runbook).toContain(topic);
+    expect(runbook).toContain("remote-runner load <profile> --from <iso> --to <iso>");
   });
 
   it("documents remote fallback operation and rollback", async () => {

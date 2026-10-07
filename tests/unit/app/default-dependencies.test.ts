@@ -306,6 +306,66 @@ describe("concrete Node CLI dependencies", () => {
     expect(processes.requests.every((request) => request.command !== "sh" && request.command !== "bash")).toBe(true);
   });
 
+  it("wires load to the selected manifest and fake gh/ssh ports without bootstrap", async () => {
+    const paths = await fixture(validManifest.replace("SHA256:trusted", resolveHostPin));
+    await seedResolveKnownHosts(paths);
+    const from = Date.parse("2026-10-07T10:00:00Z");
+    const to = Date.parse("2026-10-07T11:00:00Z");
+    const processes = new FakeProcesses();
+    processes.run = async (request) => {
+      processes.requests.push(request);
+      if (request.command === "gh")
+        return result(
+          JSON.stringify({
+            started_at: "2026-10-07T10:00:00Z",
+            completed_at: "2026-10-07T11:00:00Z",
+            runner_name: "popos-1",
+          }),
+        );
+      if (request.command === "ssh")
+        return result(
+          JSON.stringify({
+            v: 1,
+            window: { from, to },
+            host: {
+              ncpu: 24,
+              busy_cores_mean: 0,
+              busy_pct: 0,
+              psi: {
+                cpu_some_pct: 0,
+                cpu_full_pct: 0,
+                io_some_pct: 0,
+                io_full_pct: 0,
+                mem_some_pct: 0,
+                mem_full_pct: 0,
+              },
+            },
+            groups: [],
+            cgroups: [],
+            unattributed: { mean_cores: 0, share: 0 },
+            coverage: {
+              window_ms: to - from,
+              covered_ms: 0,
+              samples: 0,
+              missing_readings: 0,
+              gaps: [],
+              clock_discontinuities: [],
+              boots: [],
+            },
+          }),
+        );
+      throw new Error(`unexpected process: ${request.command}`);
+    };
+    const dependencies = await createNodeCliDependencies({ clientId: "test-client", ...paths, processes });
+    const answer = await dependencies.loadProfile!("verify-full", { githubJob: "owner/repo/123" });
+    expect(answer.window).toEqual({ from, to });
+    expect(answer.job?.runner_name).toBe("popos-1");
+    expect(processes.requests.map(({ command }) => command)).toEqual(["gh", "ssh"]);
+    expect(processes.requests[1]!.args).toContain(`UserKnownHostsFile=${paths.knownHostsPath}`);
+    await expect(readFile(paths.managedSshPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(dependencies.loadProfile!("missing", { from, to })).rejects.toThrow("profile not found: missing");
+  });
+
   it("reports the last prewarm's terminal outcome on the status line", async () => {
     const paths = await fixture();
     const dependencies = await createNodeCliDependencies({

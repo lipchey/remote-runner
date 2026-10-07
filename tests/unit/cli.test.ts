@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { runCli, type CliDependencies, type CliIo } from "../../src/cli.js";
 import { summarizeCorpus, type CorpusOptions, type CorpusRecord } from "../../src/diagnostics/corpus.js";
 import type { DiagnosticStatus } from "../../src/diagnostics/doctor.js";
+import type { HostLoadReport, LoadQuery } from "../../src/diagnostics/load.js";
 import { validManifest } from "./config/manifest-fixture.js";
 
 const profileBlock = validManifest.slice(validManifest.indexOf("  - id:"));
@@ -51,6 +52,102 @@ function corpusDependencies(
 }
 
 describe("runCli", () => {
+  it("prints the frozen load JSON through the configured runtime", async () => {
+    const stdout: string[] = [];
+    const report: HostLoadReport = {
+      v: 1,
+      window: { from: Date.parse("2026-10-07T10:00:00Z"), to: Date.parse("2026-10-07T11:00:00Z") },
+      host: {
+        ncpu: 24,
+        busy_cores_mean: 0,
+        busy_pct: 0,
+        psi: { cpu_some_pct: 0, cpu_full_pct: 0, io_some_pct: 0, io_full_pct: 0, mem_some_pct: 0, mem_full_pct: 0 },
+      },
+      groups: [],
+      cgroups: [],
+      unattributed: { mean_cores: -1, share: -0.5 },
+      coverage: {
+        window_ms: 3_600_000,
+        covered_ms: 0,
+        samples: 0,
+        missing_readings: 0,
+        gaps: [],
+        clock_discontinuities: [],
+        boots: [],
+      },
+    };
+    const loadProfile = async (profile: string, query: LoadQuery, manifestPath?: string) => {
+      expect(profile).toBe("verify-full");
+      expect(query).toEqual(report.window);
+      expect(manifestPath).toBe("selected.yaml");
+      return report;
+    };
+    const code = await runCli(
+      [
+        "load",
+        "verify-full",
+        "--from",
+        "2026-10-07T10:00:00Z",
+        "--to",
+        "2026-10-07T11:00:00Z",
+        "--json",
+        "--manifest",
+        "selected.yaml",
+      ],
+      collect(stdout),
+      { readFile: async () => validManifest, loadProfile },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout[0]!)).toEqual(report);
+  });
+
+  it.each([
+    [],
+    ["verify-full"],
+    ["verify-full", "--from", "2026-10-07T00:00:00Z"],
+    ["verify-full", "--from", "2026-10-07", "--to", "2026-10-07T01:00:00Z"],
+    ["verify-full", "--from", "2026-02-30T00:00:00Z", "--to", "2026-03-01T00:00:00Z"],
+    ["verify-full", "--from", "2026-10-07T00:00:00Z", "--to", "2026-10-07T00:00:00Z"],
+    ["verify-full", "--from", "2026-10-07T00:00:00Z", "--to", "2026-10-08T00:00:01Z"],
+    ["verify-full", "--github-job", "owner/repo/123;echo"],
+    ["verify-full", "--github-job", "owner/repo/123", "--to", "2026-10-07T01:00:00Z"],
+    ["verify-full", "--github-job", "owner/repo/123", "--json", "--json"],
+    ["verify-full", "--github-job", "owner/repo/123", "--unknown"],
+    ["verify-full", "--github-job", "owner/repo/123", "extra"],
+  ])("rejects invalid load arguments before the runtime: %j", async (...argv) => {
+    let queried = false;
+    const code = await runCli(["load", ...argv], collect([]), {
+      readFile: async () => validManifest,
+      loadProfile: async () => {
+        queried = true;
+        throw new Error("must not query");
+      },
+    });
+    expect(code).toBe(2);
+    expect(queried).toBe(false);
+  });
+
+  it("passes a safe GitHub job reference to the load runtime and preserves clear failures", async () => {
+    const errors: string[] = [];
+    const code = await runCli(
+      ["load", "verify-full", "--github-job", "owner-name/repo.name/123", "--detail"],
+      {
+        stdout: () => undefined,
+        stderr: (line) => errors.push(line),
+      },
+      {
+        readFile: async () => validManifest,
+        loadProfile: async (profile, query) => {
+          expect(profile).toBe("verify-full");
+          expect(query).toEqual({ githubJob: "owner-name/repo.name/123" });
+          throw new Error("gh is missing; use --from/--to instead");
+        },
+      },
+    );
+    expect(code).toBe(70);
+    expect(errors[0]).toContain("gh is missing; use --from/--to");
+  });
+
   it("prints stable top-level commands without touching the system", async () => {
     const stdout: string[] = [];
     const code = await runCli(["--help"], {

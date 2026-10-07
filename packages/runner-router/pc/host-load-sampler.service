@@ -1,0 +1,12 @@
+[Unit]
+Description=Host load sampler
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=30
+Nice=10
+ExecStart=/usr/bin/python3 %h/.local/bin/host-load-sampler.py run
+
+[Install]
+WantedBy=default.target

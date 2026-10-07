@@ -84,7 +84,7 @@ Service-context checks ran in a transient `systemd-run --user --wait --pipe` uni
 
 - **Sampler:** `packages/runner-router/pc/host-load-sampler.py`, python3 standard library only, syntax valid on both the Mac test interpreter and 3.12. It has two subcommands:
   - `run` is the sampling loop, with test knobs `--once` and `--now`.
-  - `report --from <ms> --to <ms>` aggregates **on the host** and prints one summary JSON object of a few KiB. It returns no raw samples, so the ssh output limit holds.
+  - `report --from <ms> --to <ms>` aggregates **on the host** and prints one summary JSON object. It returns no raw samples; its size grows only with the number of cgroups in the window (one row per CI service container), which the CLI's 8 MiB output limit covers for 24 h.
 - **Configuration:** `run` and `report` share one config loader that reads `~/.config/host-load/sampler.env`. It holds `WORKSPACE_ROOT` and `STATE_DIR` (default `~/.local/state/host-load`) and no secrets.
 - **Service unit:** `packages/runner-router/pc/host-load-sampler.service`.
   - `Type=simple`, `Restart=always`, `RestartSec=30`, `Nice=10`.
@@ -156,8 +156,8 @@ Service-context checks ran in a transient `systemd-run --user --wait --pipe` uni
 
 - **Install paths on the host:** script `~/.local/bin/host-load-sampler.py`, config `~/.config/host-load/sampler.env`. The CLI runs `python3 ~/.local/bin/host-load-sampler.py report --from <ms> --to <ms>` over ssh.
 - **Exit codes:** 0 with one JSON object on stdout; 2 for bad arguments (including `to <= from` or a window over 24 h) with a one-line message on stderr; 1 for any other failure. Both sides enforce the 24 h cap.
-- **Attribution:** an interval's delta belongs to the source and labels its cgroup had at the interval's **end** sample. A `null` reading at either end drops that cgroup's interval and counts it in `coverage.missing_readings`.
-- **Units:** cores are CPU-seconds per elapsed second; `share` is a fraction of host busy time; `*_pct` values are 0–100 and computed over the covered elapsed time. All numbers are rounded to 3 decimals.
+- **Attribution:** an interval's delta belongs to the source and labels its cgroup had at the interval's **end** sample. A `null` reading at either end drops that cgroup's interval, or that host PSI field's interval, and counts it in `coverage.missing_readings`. A cgroup absent from the previous sample was created since, so its first interval starts from zero counters.
+- **Units:** cores are CPU-seconds per elapsed second; `share` is a fraction of host busy time; `*_pct` values are 0–100. Host PSI is computed over the covered time with a valid reading for that field; a cgroup's `stall_pct` over the time that cgroup was covered, so a short run is not diluted by the window. All numbers are rounded to 3 decimals.
 
 ```json
 {"v":1,
@@ -267,3 +267,21 @@ Each is a separate owner-approved step. If auto mode blocks one, hand the owner 
 | Gate C vs a Codex implementer | PARTIAL | Run by the Claude main loop |
 
 Own pass, written before reading Codex, added `ci-idle-load` (§1.7), `RestartSec` and the partial-line read. Its other items duplicated Codex's.
+
+## 10. Gate C record (Codex gpt-6.1-sol high + independent Claude pass, 2026-10-07)
+
+| Finding | Verdict | Change |
+|---|---|---|
+| Process facts cached across `exec` misclassify a live launcher as orphan | VALID (both passes) | `comm` in the cache key |
+| A slow `docker inspect` separates cgroup and host readings of one sample | VALID | Host counters read before classification |
+| A null host PSI reading counts as zero pressure | VALID (both passes) | Per-field denominator, counted as missing |
+| Runner name cached forever, failures included | VALID | Cached per cgroup, failures retried |
+| Archive rename not durable before the raw file is deleted | VALID | Directory fsync before unlink |
+| Stall diluted by the whole window | VALID | Per-cgroup covered time (§4.1) |
+| The interval in which `Runner.Worker` exits reads as `ci-idle-load` | VALID | No worker at both ends |
+| Report size vs a 256 KiB output limit | PLAUSIBLE (estimate) | 8 MiB limit |
+| New cgroup's first interval unattributed | VALID | Zero baseline (§4.1) |
+| Ops-guide entry not asserted by its test | VALID | Assertion added |
+| `ssh` label always `sshd`; prep rule narrower than §3; double gap; non-object `.runner`; dot-only job ref; vacuous test cases; README dir modes | VALID (P3) | Fixed |
+| A forward clock jump of more than 29 days ages out all history | VALID (P3) | Not fixed: a jump cannot be told from real downtime, and the host is NTP-synced (§0) |
+| `gh api` has no deadline | VALID (P3) | Not fixed: interactive command, interruptible |

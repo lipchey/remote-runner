@@ -13,7 +13,11 @@ const GENERATED_ROOT = "~/.cache/remote-runner/workspaces";
 const BASE_REF = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)+$/u;
 const FALLBACK_EVENT_FIELD = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
-export const RESERVED_CHILD_ENVIRONMENT = ["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL"] as const;
+export const RESERVED_CHILD_ENVIRONMENT = [
+  "REMOTE_RUNNER_SELECTED_PROFILE",
+  "REMOTE_RUNNER_REMOTE_LABEL",
+  "REMOTE_RUNNER_RUN_ID",
+] as const;
 
 type UnknownRecord = Record<string, unknown>;
 
