@@ -10,6 +10,7 @@ Start with:
 remote-runner status <profile>
 remote-runner doctor <profile>
 remote-runner logs <profile>
+remote-runner load <profile> --from <iso> --to <iso>
 ```
 
 `doctor` exits 0 when no check failed, 1 when at least one check is `fail`, 70 on a runtime error,
@@ -83,6 +84,31 @@ the window before that marker arrives can leave a remote workload alive, so an e
 unknown outcome and never a licence to retry. A `run-unavailable` record names the same reason with the
 operator detail when the failure carried one; join it by `runId` for that detail, and for any run
 whose terminal record has no reason.
+
+## Host load attribution
+
+For a PC timeout or slowdown, read the sampler's report for the affected window from the Mac:
+
+```sh
+remote-runner load <profile> --from 2026-10-07T10:00:00Z --to 2026-10-07T11:00:00Z
+remote-runner load <profile> --from 2026-10-07T10:00:00Z --to 2026-10-07T11:00:00Z --detail
+remote-runner load <profile> --github-job <owner>/<repo>/<jobId> --json
+```
+
+These commands validate the host-key pin and query existing sampler history without bootstrap,
+workload execution, or configuration changes on the PC. Use ISO timestamps with a timezone and a
+window of at most 24 hours. The GitHub lookup requires `gh` from PATH and a completed job; if either
+is unavailable, use `--from/--to`. It uses the job's exact start and completion times, without padding,
+and marks only that runner's `ci` and `ci-idle-load` rows. Other runners can overlap that window.
+
+Read mean cores and host CPU share to identify the source, and maximum member stall to judge CPU
+starvation. Host PSI also covers I/O and memory pressure. `--detail` adds each cgroup's stall.
+Always inspect coverage gaps, missing readings, and clock discontinuities before drawing a conclusion;
+a `null` peak means there was no eligible interval of at most 15 seconds. Signed `unattributed`
+includes activity that sampling could not label and may be negative. The report contains source
+labels and known run IDs, never captured secrets or process arguments; share its `--json` output
+with those labels only where appropriate. Install and rollback instructions are in README's PC
+installation section; diagnosis does not install the sampler or change the account workload limit.
 
 ## Remote fallback
 

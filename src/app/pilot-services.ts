@@ -139,7 +139,9 @@ export function remoteChildArguments(
   pathEnvironment: string,
   profile: Pick<Profile, "id" | "remote" | "workload" | "secrets">,
   command: readonly string[],
+  runId?: string,
 ): readonly string[] {
+  if (runId !== undefined && (runId.length === 0 || runId.includes("\0"))) throw new Error("remote run id is invalid");
   for (const [label, path] of [
     ["remote node", node],
     ["remote launcher", launcher],
@@ -175,6 +177,7 @@ export function remoteChildArguments(
     "REMOTE_RUNNER_PROVIDER=remote",
     `REMOTE_RUNNER_SELECTED_PROFILE=${profile.id}`,
     `REMOTE_RUNNER_REMOTE_LABEL=${profile.remote.label}`,
+    ...(runId === undefined ? [] : [`REMOTE_RUNNER_RUN_ID=${runId}`]),
     node,
     launcher,
     JSON.stringify(profile.secrets.allow),
@@ -409,6 +412,7 @@ function timedSshStream(
 
 export interface NodeProfileServicesOptions {
   readonly home: string;
+  readonly runId?: string;
   readonly clientId?: string;
   readonly sourceRoot: string;
   readonly knownHostsPath?: string;
@@ -972,6 +976,7 @@ export class NodeProfileServices implements ProfileExecutionServices {
           pathEnvironment,
           this.profile,
           command,
+          this.options.runId,
         ),
         this.profile.probes.connectTimeoutSeconds,
         this.knownHostsPath,

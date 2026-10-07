@@ -126,6 +126,30 @@ generated `HEARTBEAT_SECRET`, and the static map
 `systemctl --user daemon-reload` and
 `systemctl --user enable --now runner-router-heartbeat.timer`.
 
+For PC host-load attribution, install the sampler from this checkout as a separate
+user service:
+
+```sh
+mkdir -p ~/.local/bin ~/.config/systemd/user
+install -d -m 0700 ~/.config/host-load
+install -m 0755 packages/runner-router/pc/host-load-sampler.py ~/.local/bin/host-load-sampler.py
+install -m 0644 packages/runner-router/pc/host-load-sampler.service ~/.config/systemd/user/host-load-sampler.service
+printf '%s\n' 'WORKSPACE_ROOT=/mnt/DataAI/home/admin/.cache/remote-runner/workspaces' > ~/.config/host-load/sampler.env
+chmod 0600 ~/.config/host-load/sampler.env
+systemctl --user daemon-reload
+systemctl --user enable --now host-load-sampler.service
+```
+
+The sampler keeps 30 days of local history, bounded to 300 MB, under `STATE_DIR`
+(default `~/.local/state/host-load`). To roll back the sampler, stop it and remove
+only its unit and script; keep `STATE_DIR` so historical reports remain recoverable:
+
+```sh
+systemctl --user disable --now host-load-sampler.service
+rm ~/.config/systemd/user/host-load-sampler.service ~/.local/bin/host-load-sampler.py
+systemctl --user daemon-reload
+```
+
 The shadow deployment controlled only laptop `ci-active`. The label cutover sets
 `LAPTOP_ADMISSION_LABELS=ci-active,popos`, because runs created before it (and their
 re-runs) still ask for `popos`. When the compatibility window ends, first return the
@@ -234,6 +258,19 @@ manifest and consumer. A profile-id fallback is one remote hop only: its target 
 locally. Every profile that names or is named as a remote fallback must keep its `id`, `consumer`,
 and `remote.label` within `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`; violations reject the manifest as a
 usage error.
+
+`remote-runner load <profile> (--from <iso> --to <iso> | --github-job <owner>/<repo>/<jobId>)
+[--json] [--detail] [--manifest <path>]` reads the PC sampler's host-load report after validating
+that profile's host-key pin, without bootstrap or starting a workload. Supply ISO timestamps with
+a timezone; `--to` must follow `--from`, and the window is capped at 24 hours. A GitHub job uses
+`gh` from PATH and its exact `started_at`..`completed_at` window, marking matching runner rows
+for both `ci` and `ci-idle-load`. Missing `gh` or an unfinished job requires explicit `--from/--to`.
+The human table shows mean cores, host CPU share, interval peak, maximum member stall, host busy
+CPU and PSI, signed unattributed load, and coverage gaps and clock discontinuities. `--detail`
+adds per-cgroup rows; `--json` always includes them in the sampler's v1 object, adding
+`job: { ref, runner_name, started_at, completed_at }` for a lookup and `marked: true` to matching
+rows. A peak of `null` means no interval of at most 15 seconds was covered. Exit codes are
+0 for a report, 2 for invalid arguments, and 70 for a runtime or invalid-report error.
 
 `remote-runner resolve <profile> [--manifest <path>] --json` applies the same mode, reachability
 cache, and one-hop selection without starting a workload, taking the profile lock, or creating a
@@ -374,6 +411,6 @@ fingerprint arrays remain accepted as exact-file lists.
 - [Remote runner operations and troubleshooting](docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md)
 - Implementation plan: `docs/superpowers/plans/2026-07-31-remote-runner-implementation.md`
 
-`status`, `doctor` and bounded `logs` accept the same `--manifest <path>` as `run` and `prewarm`.
+`status`, `doctor`, `load` and bounded `logs` accept the same `--manifest <path>` as `run` and `prewarm`.
 For the opt-in account workload cap, migration steps and Linux acceptance requirement, see the
 [operations runbook](docs/REMOTE_RUNNER_OPERATIONS_AND_TROUBLESHOOTING.md#account-workload-limit).

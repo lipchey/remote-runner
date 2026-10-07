@@ -73,17 +73,19 @@ describe("fixed remote launcher", () => {
     expect(result).toEqual({ code: 0, signal: null, stdout: "present", stderr: "", marker: "RR_CHILD_STARTED\n" });
   });
 
-  it("keeps runner markers authoritative over allowlisted secrets", async () => {
-    const name = "REMOTE_RUNNER_SELECTED_PROFILE";
-    const result = await runLauncher(
-      encodeSecretFrame({ [name]: "from-secret" }, [name]).stdin,
-      [name],
-      [process.execPath, "-e", `process.stdout.write(String(process.env.${name}))`],
-      { [name]: "verify-full" },
-    );
+  it.each(["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL", "REMOTE_RUNNER_RUN_ID"])(
+    "keeps runner marker %s authoritative over allowlisted secrets",
+    async (name) => {
+      const result = await runLauncher(
+        encodeSecretFrame({ [name]: "from-secret" }, [name]).stdin,
+        [name],
+        [process.execPath, "-e", `process.stdout.write(String(process.env.${name}))`],
+        { [name]: "verify-full" },
+      );
 
-    expect(result).toMatchObject({ code: 0, stdout: "verify-full", marker: "RR_CHILD_STARTED\n" });
-  });
+      expect(result).toMatchObject({ code: 0, stdout: "verify-full", marker: "RR_CHILD_STARTED\n" });
+    },
+  );
 
   it.each([
     ["duplicate", concat([SECRET_FRAME_MAGIC, Buffer.from('[["SECRET","one"],["SECRET","two"]]')])],

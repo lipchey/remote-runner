@@ -949,6 +949,7 @@ describe("pilot service boundaries", () => {
       "/remote/node/bin:/remote/uv:/usr/bin:/bin",
       profile,
       ["./scripts/verify", "--full"],
+      "test-run-id",
     );
     const serialized = JSON.stringify(args);
 
@@ -956,6 +957,7 @@ describe("pilot service boundaries", () => {
     expect(serialized).toContain("NEON_DEV_DATABASE_URL");
     expect(serialized).toContain("REMOTE_RUNNER_CHILD");
     expect(args).toContain("REMOTE_RUNNER_PROVIDER=remote");
+    expect(args).toContain("REMOTE_RUNNER_RUN_ID=test-run-id");
     expect(args).toContain("REMOTE_RUNNER_SELECTED_PROFILE=verify-full");
     expect(args).toContain("REMOTE_RUNNER_REMOTE_LABEL=pop-os");
     expect(args.indexOf("REMOTE_RUNNER_SELECTED_PROFILE=verify-full")).toBeGreaterThan(
@@ -968,6 +970,37 @@ describe("pilot service boundaries", () => {
     expect(args[2]).toContain("exec 9>");
     expect(serialized).not.toContain("secret-canary");
     expect(serialized).not.toContain("postgres://");
+  });
+
+  it("threads the profile service run id into the workload SSH environment", async () => {
+    let streamCalls = 0;
+    const services = new NodeProfileServices(profile, {
+      home: "/Users/admin",
+      sourceRoot: process.cwd(),
+      clientId: "test-client",
+      runId: "service-run-id",
+      launcherSource: new Uint8Array(),
+      processes: fakeProcesses(),
+      streamProcess: async (request) => {
+        streamCalls += 1;
+        expect(request.args).toEqual(
+          expect.arrayContaining([expect.stringContaining("REMOTE_RUNNER_RUN_ID=service-run-id")]),
+        );
+        return { exitCode: 75, signal: null, markerSeen: false, spawned: true };
+      },
+    });
+    Object.assign(services, {
+      remotePaths: resolveRemotePaths(
+        "/home/admin",
+        profile,
+        worktreeIdentity(process.cwd(), "test-client"),
+        "test-client",
+      ),
+      nodeRoot: "/home/admin/node",
+      uvRoot: "/home/admin/uv",
+    });
+    await services.startRemote(["./scripts/verify"], {}, async () => undefined);
+    expect(streamCalls).toBe(1);
   });
 
   it("builds fixed workspace ensure argv without shell-interpolating the command", () => {

@@ -58,6 +58,7 @@ import { runSsh, type SshProcessRuntime } from "../ssh/client.js";
 import { inspectOwnedSession, MUTAGEN_LIST_ARGUMENTS, mutagenSessionName } from "../sync/mutagen.js";
 import { createProfileRuntime } from "./profile-runtime.js";
 import { NodeProfileServices } from "./pilot-services.js";
+import { readHostLoad } from "../diagnostics/load.js";
 
 const CAPTURE_BYTES = 64 * 1024;
 const LEGACY_GENERATED_ROOT = "~/.cache/remote-runner/workspaces";
@@ -663,6 +664,7 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         : undefined;
     const services = new NodeProfileServices(profile, {
       home,
+      runId: request.runId,
       clientId,
       sourceRoot,
       launcherSource: resources.launcherSource,
@@ -1092,6 +1094,14 @@ export async function createNodeCliDependencies(options: NodeCliDependencyOption
         );
       }
       return lines.join("\n");
+    },
+    async loadProfile(profileId, query, manifestPath) {
+      const profile = selectedProfiles(await loadManifest(manifestPath), profileId)[0]!;
+      return readHostLoad(profile, query, {
+        home,
+        knownHostsPath: diagnosticSsh.knownHostsPath,
+        processes,
+      });
     },
     async doctorProfile(profileId, manifestPath) {
       const profiles = selectedProfiles(await loadManifest(manifestPath), profileId);

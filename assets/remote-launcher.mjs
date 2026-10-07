@@ -17,7 +17,7 @@ const WORKLOAD_SPAWN_ERRORS = new Set(["ENOENT", "EACCES", "EISDIR", "ENOTDIR", 
 const MAX_FRAME_BYTES = 128 * 1024;
 const MAX_SECRET_BYTES = 64 * 1024;
 const SECRET_NAME = /^[A-Z][A-Z0-9_]*$/u;
-const RUNNER_MARKERS = ["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL"];
+const RUNNER_MARKERS = ["REMOTE_RUNNER_SELECTED_PROFILE", "REMOTE_RUNNER_REMOTE_LABEL", "REMOTE_RUNNER_RUN_ID"];
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
 function runnerMarkers() {
