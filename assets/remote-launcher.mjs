@@ -39,24 +39,32 @@ function spawnExitCode(error) {
    local run, a laptop asleep past the ssh keepalives, a dropped link), leaving the launcher
    orphaned. The workload never notices: it runs to the end against a channel nobody reads,
    and every native tool that writes to the now-broken stdout is killed by SIGPIPE — so an
-   abandoned run burns the host for its full length and then reports itself RED (observed: a
-   gitleaks gate dying mid-write, 6 of 408 remote verify runs) instead of simply being gone.
-   `process.ppid` follows reparenting (verified on darwin and linux node 26: it reads 1 once the
-   parent exits), so watching the RELATIONSHIP is both live and exact — probing whether the
-   recorded pid is still occupied would instead be fooled by pid reuse, and would say nothing
-   about whose child we are. Recorded at module load: a disconnect during the frame read would
-   otherwise be recorded as the orphaning that already happened, and never fire.
-   Ceiling: this reaches the direct child only — a grandchild already spawned into its own
-   process group (the verify runner puts every check in one) runs to its own end, but nothing
-   further starts. */
+   abandoned run burns the host for its full length and then reports itself RED instead of
+   simply being gone. `process.ppid` follows reparenting (it reads 1 once the parent exits), so
+   watching the RELATIONSHIP is both live and exact — probing whether the recorded pid is still
+   occupied would instead be fooled by pid reuse. Recorded at module load: a disconnect during
+   the frame read would otherwise be recorded as the orphaning that already happened, and never
+   fire. The kill takes the workload's whole process group, so its background jobs die with it
+   instead of reparenting to init; a descendant that moved into its own group or session (the
+   verify runner puts every check in one) is still out of reach and runs to its own end. */
 const LAUNCH_PARENT = process.ppid;
 const ORPHAN_POLL_MS = 1000;
+
+function killWorkloadGroup(child, signal) {
+  try {
+    process.kill(-child.pid, signal);
+  } catch (error) {
+    /* EPERM means only another user's processes are left; throwing here would replace the
+       workload's own exit code with the launcher's crash. */
+    if (error?.code !== "ESRCH" && error?.code !== "EPERM") throw error;
+  }
+}
 
 function killWhenOrphaned(child) {
   const timer = setInterval(() => {
     if (process.ppid === LAUNCH_PARENT) return;
     clearInterval(timer);
-    child.kill("SIGKILL");
+    killWorkloadGroup(child, "SIGKILL");
   }, ORPHAN_POLL_MS);
   /* Never let the watch itself hold the launcher open past the workload's own exit. */
   timer.unref();
@@ -158,6 +166,7 @@ async function launch() {
   let child;
   try {
     child = spawn(control.command[0], control.command.slice(1), {
+      detached: true,
       env: { ...process.env, ...secrets, ...runnerMarkers() },
       stdio: ["ignore", "inherit", "inherit"],
     });
@@ -166,6 +175,7 @@ async function launch() {
     return;
   }
   secrets = undefined;
+  child.once("exit", () => killWorkloadGroup(child, "SIGKILL"));
   const exit = once(child, "exit").catch(() => [null, null]);
   let spawnError;
   const start = await new Promise((resolve) => {
@@ -174,7 +184,7 @@ async function launch() {
         writeSync(3, CHILD_MARKER);
         resolve("started");
       } catch {
-        child.kill("SIGTERM");
+        killWorkloadGroup(child, "SIGTERM");
         resolve("marker-failed");
       }
     });
