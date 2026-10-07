@@ -1,6 +1,6 @@
 # Host load attribution on the PC — implementation plan
 
-Status: Gate P (Codex) done 2026-10-07, with findings folded in (§9). Code name `host-load-attribution`.
+Status: T0–T6 done 2026-10-07 (Gate P §9, Gate C §10, live acceptance §11); T7 is the Ariadne follow-up. Code name `host-load-attribution`.
 
 When a test times out on pop-os, nobody can say which source was loading the host.
 - GitHub's jobs API shows only CI jobs. remote-runner workloads, Mutagen agents, CI service containers and orphaned processes do not appear there.
@@ -48,7 +48,7 @@ Service-context checks ran in a transient `systemd-run --user --wait --pipe` uni
 - **Launcher sighting:** the live launchers matched on `argv[1]` ending in `remote-launcher.mjs` (`comm` is `node-MainThread`). Their workload processes carry `REMOTE_RUNNER_CHILD`, `REMOTE_RUNNER_PROVIDER`, `REMOTE_RUNNER_SELECTED_PROFILE` and `REMOTE_RUNNER_REMOTE_LABEL` (key names only were read), with a cwd of `<WORKSPACE_ROOT>/ariadne/verify-full-pop-os/clients/<24 hex>/…`.
 - **Mutagen:** each agent sits alone in its own long-lived `session-*.scope` (`comm` `mutagen-agent`).
 - **Desktop:** `session-4.scope` is the local COSMIC session (`Remote=no`). Under §3 it falls to `ssh`, labelled with its top `comm` (`cosmic-session`).
-- **Docker:** `docker ps` against the explicit socket exits 0 from the user service. No container existed during the probe, so `docker inspect` on a live container is **pending** until T6; T2 covers it with a fake `docker`.
+- **Docker:** `docker ps` against the explicit socket exits 0 from the user service. No container existed during the probe; `docker inspect` on live containers was confirmed at T6 (§11).
 - **Host busy time:** root `cpu.stat usage_usec` agreed with the `/proc/stat` busy sum within 0.09% over 10 s (15 644 000 vs 15 630 000 µs). **Decision:** use root `cpu.stat usage_usec`. It is the same accounting as the member cgroups, so `unattributed` carries no source-mismatch bias, and it has µs resolution. Root `cpu.pressure`, `io.pressure` and `memory.pressure` exist.
 - **Runner name:** `.runner` (JSON, may carry a UTF-8 BOM) field `agentName` (`popos-1`…`popos-3`). Units `gh-runner-1..3.service` run.
 - **`WORKSPACE_ROOT`:** `/mnt/DataAI/home/admin/.cache/remote-runner/workspaces` is already canonical (realpath is identity).
@@ -285,3 +285,21 @@ Own pass, written before reading Codex, added `ci-idle-load` (§1.7), `RestartSe
 | `ssh` label always `sshd`; prep rule narrower than §3; double gap; non-object `.runner`; dot-only job ref; vacuous test cases; README dir modes | VALID (P3) | Fixed |
 | A forward clock jump of more than 29 days ages out all history | VALID (P3) | Not fixed: a jump cannot be told from real downtime, and the host is NTP-synced (§0) |
 | `gh api` has no deadline | VALID (P3) | Not fixed: interactive command, interruptible |
+
+## 11. T6 live acceptance (2026-10-07)
+
+- **Controller:** built from `main` and installed; `remote-runner --version` reports app `efdd6c0df33cb630f9d8151c`, and `install --check` reports `current`.
+- **Sampler:** installed on pop-os per the README, with file hashes matching `main`. It has run since 16:20Z with 0 restarts; `STATE_DIR` is 0700 and the day file 0600. Live `docker inspect` labelled every CI service container with its name and image. A secret-keyword grep of the day file found nothing.
+
+| Criterion | Evidence | Result |
+|---|---|---|
+| §1.1 sampler CPU | 7.34 s of CPU over 3700 s of its own cgroup: 0.198% of one core | Pass |
+| §1.5 run identity | A `run verify-full-pop-os -- sleep 45` and three ordinary runs from other sessions all reported as `remote-runner` with their `runId` and full path labels | Pass |
+| §1.6 orphan | A detached 120-s busy loop launched through `run … -- sh -c "setsid -f …"` reported as `remote-runner-orphan {runId}`, peak 1.001 cores. Labels are run-id-only because the launcher lived less than one tick | Pass |
+| §1.4 job lookup | `--github-job lipchey/ariadne/112895617650` took 16:22:17–16:32:14Z from the API and marked `ci popos-1` | Pass |
+| §1.8 retention | The first hour's day file was 786 KB raw and 148 KB gzipped (5.3×): about 3.5 MB/day archived, about 120 MB for 30 days against a 300 MB budget | Pass (projection) |
+
+- **First reading:** during that job, remote-runner workloads averaged about 3.4 cores against the job's 2.4, with single intervals up to 19 cores. That load never appears in the GitHub jobs API.
+- **Consistency:** `unattributed` stayed between −0.2% and 1.0% of host busy time across the measured windows.
+- **Follow-up fixed with this record:** the human `load` table padded labels to the longest docker name (lines up to 319 characters); labels now come last.
+- **Watch:** an idle runner briefly crossed the `ci-idle-load` threshold at 0.211 cores. Raise the threshold only if this recurs as noise.
