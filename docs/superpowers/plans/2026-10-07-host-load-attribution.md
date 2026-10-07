@@ -40,6 +40,23 @@ When a test times out on pop-os, nobody can say which source was loading the hos
   - Every failure fell inside one 10–30 s spike.
   - The API showed the concurrent CI jobs; the laptop remote-runner load was invisible.
 
+### T0 results (read-only probe, 2026-10-07)
+
+Service-context checks ran in a transient `systemd-run --user --wait --pipe` unit (cgroup `user@1000.service/app.slice/run-u*.service`).
+- **Readable from a user service:** `cgroup.procs`, `cpu.stat`, `memory.current` and `cpu.pressure` of every `gh-runner-N.service` and `session-*.scope`, and of the unit's own cgroup. `/proc/<pid>/{stat,cmdline,environ,cwd}` of every `admin`-owned process.
+  - Each ssh session scope also holds a root-owned `sshd`, whose `environ` and `cwd` fail with EACCES. The classifier treats an unreadable member as carrying nothing; it is not a reading of the cgroup, so it is never `null`.
+- **Launcher sighting:** the live launchers matched on `argv[1]` ending in `remote-launcher.mjs` (`comm` is `node-MainThread`). Their workload processes carry `REMOTE_RUNNER_CHILD`, `REMOTE_RUNNER_PROVIDER`, `REMOTE_RUNNER_SELECTED_PROFILE` and `REMOTE_RUNNER_REMOTE_LABEL` (key names only were read), with a cwd of `<WORKSPACE_ROOT>/ariadne/verify-full-pop-os/clients/<24 hex>/…`.
+- **Mutagen:** each agent sits alone in its own long-lived `session-*.scope` (`comm` `mutagen-agent`).
+- **Desktop:** `session-4.scope` is the local COSMIC session (`Remote=no`). Under §3 it falls to `ssh`, labelled with its top `comm` (`cosmic-session`).
+- **Docker:** `docker ps` against the explicit socket exits 0 from the user service. No container existed during the probe, so `docker inspect` on a live container is **pending** until T6; T2 covers it with a fake `docker`.
+- **Host busy time:** root `cpu.stat usage_usec` agreed with the `/proc/stat` busy sum within 0.09% over 10 s (15 644 000 vs 15 630 000 µs). **Decision:** use root `cpu.stat usage_usec`. It is the same accounting as the member cgroups, so `unattributed` carries no source-mismatch bias, and it has µs resolution. Root `cpu.pressure`, `io.pressure` and `memory.pressure` exist.
+- **Runner name:** `.runner` (JSON, may carry a UTF-8 BOM) field `agentName` (`popos-1`…`popos-3`). Units `gh-runner-1..3.service` run.
+- **`WORKSPACE_ROOT`:** `/mnt/DataAI/home/admin/.cache/remote-runner/workspaces` is already canonical (realpath is identity).
+- **Logout policy:** `KillUserProcesses=no` (logind default, both lines commented; D-Bus property `false`), linger on. A `setsid -f` child of a closed ssh connection keeps its `session-*.scope`, which goes `SubState=abandoned`, session `State=closing`. Orphans therefore stay visible in their scope.
+- **Clock:** `NTP=yes`, `NTPSynchronized=yes`, timezone Europe/Kyiv (day files use UTC).
+- **Interpreters:** pop-os `/usr/bin/python3` 3.12.3, Mac `python3` 3.14.4.
+- **T6.5 route:** the Ariadne manifest has no command allow-list, and `remote-runner run <profile> -- <argv>` carries an arbitrary argv. Confirm at T6 before using it.
+
 ## 1. Goal and acceptance
 
 `remote-runner load` reports which sources consumed CPU on the PC, and how CPU-starved each one was. It covers any window in the last 30 days at 10-s resolution, and states the coverage of that window explicitly.
@@ -103,13 +120,11 @@ When a test times out on pop-os, nobody can say which source was loading the hos
  "cg":[["<key>",usage_usec,memory_current,cpu_some_total_us]]}
 ```
 
-- **Host busy time:**
-  - It is the sum of the `/proc/stat` fields user, nice, system, irq, softirq and steal (idle and iowait excluded), converted with `os.sysconf("SC_CLK_TCK")`.
-  - T0 decides whether root `cpu.stat` is preferable and whether it agrees with `/proc/stat` within 2%.
+- **Host busy time** (`busy_usec`) is root `/sys/fs/cgroup/cpu.stat usage_usec` (T0 decision, §0). Host PSI comes from root `{cpu,io,memory}.pressure` `total=` fields.
 - **Classification runs every sample.** A process is identified by pid plus `starttime` from `/proc/<pid>/stat`, read before and after cmdline/cwd/environ to drop pids that were reused mid-read. Per-process facts are cached under that identity, so each sample reads only new pids.
-  - `gh-runner-N.service` → `ci` with labels `{runner}`. The runner name comes from `~/actions-runner-N/.runner`; T0 verifies the field.
-    - `busy`: a `Runner.Worker` process is present.
-    - `ci-idle-load`: no `Runner.Worker` and more than 0.2 cores.
+  - `gh-runner-N.service` → `ci` with labels `{runner, busy}`. `runner` is `agentName` from `~/actions-runner-N/.runner` (§0).
+    - `busy` is `true` when a `Runner.Worker` process is present.
+    - No `Runner.Worker` and more than 0.2 cores over the interval → source `ci-idle-load`, labels `{runner}`.
   - A session scope with a `mutagen-agent` process → `mutagen`.
   - A session scope containing the launcher → `remote-runner`. The launcher is the process whose argv[1] ends in `remote-launcher.mjs`.
     - `runId` comes from the environ of the launcher or of any member process carrying it.
@@ -136,6 +151,30 @@ When a test times out on pop-os, nobody can say which source was loading the hos
 - **Source groups:** one row per (source, labels). Its CPU is the sum of its member cgroups, and its stall is the **maximum** member stall %, labelled as such. Summed PSI is never reported.
 - **Per-cgroup rows** are shown with `--json`, or with `--detail` for stalls.
 - **`--github-job`:** uses `gh` from PATH; if `gh` is missing, the command fails with an error naming `--from/--to`. There is no padding: the job's own `started_at`..`completed_at`.
+
+### 4.1 `report` contract (frozen; shared by T2 and T3)
+
+- **Install paths on the host:** script `~/.local/bin/host-load-sampler.py`, config `~/.config/host-load/sampler.env`. The CLI runs `python3 ~/.local/bin/host-load-sampler.py report --from <ms> --to <ms>` over ssh.
+- **Exit codes:** 0 with one JSON object on stdout; 2 for bad arguments (including `to <= from` or a window over 24 h) with a one-line message on stderr; 1 for any other failure. Both sides enforce the 24 h cap.
+- **Attribution:** an interval's delta belongs to the source and labels its cgroup had at the interval's **end** sample. A `null` reading at either end drops that cgroup's interval and counts it in `coverage.missing_readings`.
+- **Units:** cores are CPU-seconds per elapsed second; `share` is a fraction of host busy time; `*_pct` values are 0–100 and computed over the covered elapsed time. All numbers are rounded to 3 decimals.
+
+```json
+{"v":1,
+ "window":{"from":0,"to":0},
+ "host":{"ncpu":24,"busy_cores_mean":0.0,"busy_pct":0.0,
+         "psi":{"cpu_some_pct":0.0,"cpu_full_pct":0.0,"io_some_pct":0.0,"io_full_pct":0.0,"mem_some_pct":0.0,"mem_full_pct":0.0}},
+ "groups":[{"source":"ci","labels":{"runner":"popos-1","busy":true},"members":1,
+            "mean_cores":0.0,"share":0.0,"peak_cores":0.0,"max_stall_pct":0.0}],
+ "cgroups":[{"key":"<boot>:<inode>","path":"user.slice/…","source":"ci","labels":{},
+             "mean_cores":0.0,"peak_cores":0.0,"stall_pct":0.0}],
+ "unattributed":{"mean_cores":0.0,"share":0.0},
+ "coverage":{"window_ms":0,"covered_ms":0,"samples":0,"missing_readings":0,
+             "gaps":[{"from":0,"to":0}],"clock_discontinuities":[{"t":0,"wall_ms":0,"mono_ms":0}],"boots":["…"]}}
+```
+
+- `groups` is sorted by `mean_cores` descending. `peak_cores` is `null` when the window holds no interval of at most 15 s.
+- `labels` holds only the keys §3 defines for that source, and `runId` only when known.
 
 ## 5. Tasks
 
