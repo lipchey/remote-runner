@@ -1,0 +1,15 @@
+{
+  "name": "@remote-runner/backup-trigger",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "verify": "tsc -p tsconfig.json --noEmit && vitest run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260930.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.7",
+    "wrangler": "4.145.0"
+  }
+}

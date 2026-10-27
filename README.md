@@ -237,6 +237,40 @@ via REST and read the laptop's labels back. Fallback is then manual (ariadne
 `.claude/runbooks/ci-operations.md`). PC `ci-active` labels stay: since the cutover every
 self-hosted job asks for them.
 
+## Backup trigger Worker
+
+`packages/backup-trigger` is a separate scheduled-only Cloudflare Worker with no HTTP handler. At minute 23 every four hours (UTC), it dispatches `lipchey/ariadne`'s `backup.yml` on `main` with `source=worker`. GitHub's delayed schedules cannot reliably meet the six-hour backup RPO. This Worker has only a repository-scoped dispatch token, isolated from runner-router's GitHub App credentials. A `dispatch_ok` means GitHub accepted the request; backup completion is watched elsewhere. Only final dispatch failures send a Telegram alert and fail the invocation.
+
+Owner setup on the Mac:
+
+1. Create a fine-grained GitHub PAT with only `lipchey/ariadne` selected, **Repository permissions → Actions: Read and write**, and a one-year expiry. Store it in the encrypted vault as `GITHUB_BACKUP_DISPATCH_TOKEN`; renew it before expiry.
+2. Ensure the vault also contains `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CLOUDFLARE_REMOTE_RUNNER_TOKEN`, and `CLOUDFLARE_REMOTE_RUNNER_ACCOUNT_ID`. Preview the exact names, then upload from the repository root:
+
+   ```sh
+   node packages/backup-trigger/scripts/put-secrets.mjs --dry-run
+   node packages/backup-trigger/scripts/put-secrets.mjs
+   ```
+
+   Both commands accept `--vault /path/to/vault`. The installer reads only the three Worker secrets, passes their JSON through stdin, and limits Wrangler's environment to `PATH`, `HOME`, `CLOUDFLARE_API_TOKEN`, and `CLOUDFLARE_ACCOUNT_ID`; it creates no local secret file.
+
+3. Load `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the corresponding vault keys using the runner-router procedure above. From this package, record the current deployment/version ID **before deploying** so it is available for rollback (there is no prior version on the first deployment):
+
+   ```sh
+   cd packages/backup-trigger
+   env -i HOME="$HOME" PATH="$PATH" \
+     CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+     CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
+     "$(command -v node)" node_modules/wrangler/bin/wrangler.js deployments list
+   env -i HOME="$HOME" PATH="$PATH" \
+     CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+     CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
+     "$(command -v node)" node_modules/wrangler/bin/wrangler.js deploy
+   ```
+
+Smoke: use Wrangler's trigger configuration/logs to confirm the cron is active, then observe a structured `dispatch_ok` at the next scheduled tick and a run titled **Offsite database backup (worker)** in ariadne's Actions. Run `wrangler tail --format json` using the same `env -i ... node_modules/wrangler/bin/wrangler.js` form above to watch the logs. No HTTP smoke endpoint exists.
+
+Rollback/stop: remove the cron from `wrangler.toml` and redeploy to stop scheduling; to restore a previous code version, run `wrangler rollback <version-id>` with the same restricted environment. Version rollback keeps the cron, so remove it separately when stopping dispatches. Revoke the PAT as part of rollback/stop, and check that scheduled dispatches stop.
+
 ## Consumer commands
 
 From a repository containing `.remote-runner.yaml`:

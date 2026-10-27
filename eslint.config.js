@@ -22,7 +22,9 @@ export default tseslint.config(
       "src/**/*.ts",
       "tests/**/*.ts",
       "packages/runner-router/src/**/*.ts",
+      "packages/backup-trigger/src/**/*.ts",
       "packages/runner-router/tests/**/*.ts",
+      "packages/backup-trigger/tests/**/*.ts",
     ],
     extends: [...tseslint.configs.recommended],
     languageOptions: {
