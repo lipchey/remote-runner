@@ -243,7 +243,7 @@ self-hosted job asks for them.
 
 Owner setup on the Mac:
 
-1. Create a fine-grained GitHub PAT with only `lipchey/ariadne` selected, **Repository permissions → Actions: Read and write**, and a one-year expiry. Store it in the encrypted vault as `GITHUB_BACKUP_DISPATCH_TOKEN`; renew it before expiry.
+1. Create a fine-grained GitHub PAT with only `lipchey/ariadne` selected, **Repository permissions → Actions: Read and write**, and no expiration. Store it in the encrypted vault as `GITHUB_BACKUP_DISPATCH_TOKEN`.
 2. Ensure the vault also contains `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CLOUDFLARE_REMOTE_RUNNER_TOKEN`, and `CLOUDFLARE_REMOTE_RUNNER_ACCOUNT_ID`. Preview the exact names, then upload from the repository root:
 
    ```sh
