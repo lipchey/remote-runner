@@ -17,7 +17,7 @@
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "verify": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test && pnpm build && pnpm --filter @remote-runner/runner-router verify"
+    "verify": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test && pnpm build && pnpm --filter @remote-runner/runner-router verify && pnpm --filter @remote-runner/backup-trigger verify"
   },
   "dependencies": {
     "yaml": "2.8.3"
