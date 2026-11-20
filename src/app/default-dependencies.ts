@@ -394,6 +394,24 @@ async function resolveRemoteWorkspace(
   return posix.isAbsolute(resolved) ? resolved : undefined;
 }
 
+const GIB = 1024 ** 3;
+
+function capacityVerdict(
+  dfOutput: string,
+  minimumFreeBytes: number,
+): { readonly status: DiagnosticStatus; readonly detail?: string } {
+  const availableKb = dfOutput.split("\n")[1]?.trim().split(/\s+/u)[3];
+  if (availableKb === undefined || !/^(?:0|[1-9][0-9]*)$/u.test(availableKb)) {
+    return { status: "fail", detail: "remote free space is unreadable" };
+  }
+  const availableBytes = Number(availableKb) * 1024;
+  if (!Number.isSafeInteger(availableBytes)) return { status: "fail", detail: "remote free space is unreadable" };
+  if (availableBytes >= minimumFreeBytes) return { status: "ok" };
+  const free = (Math.floor((availableBytes / GIB) * 10) / 10).toFixed(1);
+  const floor = (Math.ceil((minimumFreeBytes / GIB) * 10) / 10).toFixed(1);
+  return { status: "fail", detail: `${free} GiB free, below the ${floor} GiB floor` };
+}
+
 async function inspectProbe(
   probe: DiagnosticProbe,
   profile: Profile,
@@ -514,6 +532,9 @@ async function inspectProbe(
        workspace, and `remote.workspace` must keep failing on it rather than call it unprovisioned. */
     if (result.exitCode === WORKSPACE_ABSENT_EXIT && WORKSPACE_SCOPED_PROBES.has(probe.id)) {
       return { status: "warn", detail: "remote workspace is not provisioned" };
+    }
+    if (probe.id === "remote.capacity" && result.exitCode === 0) {
+      return capacityVerdict(decoder.decode(result.stdout), profile.probes.minimumFreeBytes);
     }
     return { status: result.exitCode === 0 ? "ok" : "fail" };
   }

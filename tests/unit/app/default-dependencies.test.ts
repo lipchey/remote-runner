@@ -157,12 +157,17 @@ async function withInjectedWorkload(workload: (hooks: WorkloadHooks) => Promise<
   return { dependencies, profile: (await dependencies.loadManifest()).profiles[0]! };
 }
 
+function dfOutput(availableKb: number): string {
+  return `Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/nvme0n1p5 117000000 100000000 ${String(availableKb)} 92% /\n`;
+}
+
 class FakeProcesses {
   readonly requests: BoundedProcessRequest[] = [];
   registrationExitCode = 0;
   secretsProbeExitCode = 0;
   workspaceProbeExitCode = 0;
   sessionListing = "[]";
+  capacityOutput = dfOutput(999_999_999);
 
   async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
     this.requests.push(request);
@@ -180,6 +185,9 @@ class FakeProcesses {
     }
     if (request.command === "ssh" && request.args.at(-1)?.includes("remote-runner-secrets")) {
       return result("", this.secretsProbeExitCode);
+    }
+    if (request.command === "ssh" && request.args.at(-1)?.includes("exec df -Pk")) {
+      return result(this.capacityOutput);
     }
     /* The manifest's own secret provider, which both legs now run: the local one collects before it
        spawns anything, so a fake that answers it with the default empty stdout fails every local
@@ -564,6 +572,55 @@ describe("concrete Node CLI dependencies", () => {
       request.args.at(-1)?.includes("status --short --branch"),
     );
     expect(workspaceRequest?.args.at(-1)).toContain('[ -e "$path" ] || exit 79');
+  });
+
+  it.each([
+    ["free space below the floor", dfOutput(10_171_188), "9.7 GiB free, below the 10.0 GiB floor"],
+    ["one KiB below the floor", dfOutput(10_485_759), "9.9 GiB free, below the 10.0 GiB floor"],
+    ["unparseable df output", "df: no such file\n", "remote free space is unreadable"],
+    ["a byte count dispatch rejects as unsafe", dfOutput(8_796_093_022_208), "remote free space is unreadable"],
+  ])("fails remote.capacity on %s, as dispatch would", async (_label, output, detail) => {
+    const paths = await fixture();
+    const processes = new FakeProcesses();
+    processes.capacityOutput = output;
+    const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
+    });
+
+    const report = (await dependencies.doctorProfile?.("verify-full"))![0]!.report;
+
+    expect(report.checks).toContainEqual({
+      id: "remote.capacity",
+      status: "fail",
+      reason: "capacity",
+      detail,
+      next: "ssh <remote> df -Pk <workspace>",
+    });
+  });
+
+  it("passes remote.capacity at exactly the floor", async () => {
+    const paths = await fixture();
+    const processes = new FakeProcesses();
+    processes.capacityOutput = dfOutput(10_485_760);
+    const dependencies = await createNodeCliDependencies({
+      clientId: "test-client",
+      ...paths,
+      launcherSource: new Uint8Array([1]),
+      managedSsh: { changed: false, directory: paths.managedSshPath, knownHostsPath: paths.knownHostsPath },
+      processes,
+    });
+
+    const report = (await dependencies.doctorProfile?.("verify-full"))![0]!.report;
+
+    expect(report.checks).toContainEqual({
+      id: "remote.capacity",
+      status: "ok",
+      next: "ssh <remote> df -Pk <workspace>",
+    });
   });
 
   it("derives 79 from the generated probes only for an absent workspace", async () => {
